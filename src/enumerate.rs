@@ -21,7 +21,7 @@ pub fn midi() -> anyhow::Result<()> {
 
 pub fn audio() -> anyhow::Result<()> {
     // Suppress ALSA/JACK noise on stderr during device enumeration
-    let stderr_guard = suppress_stderr();
+    let stderr_guard = crate::tty::StderrSilencer::new();
 
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
@@ -69,43 +69,6 @@ fn format_sample_fmt(fmt: cpal::SampleFormat) -> &'static str {
         cpal::SampleFormat::F64 => "f64",
         _ => "?",
     }
-}
-
-/// Temporarily redirect stderr to /dev/null to suppress native library spam.
-/// Returns a guard that restores stderr on drop. No-op on non-Unix platforms.
-#[cfg(unix)]
-fn suppress_stderr() -> Option<StderrGuard> {
-    use std::os::unix::io::AsRawFd;
-    let devnull = std::fs::File::open("/dev/null").ok()?;
-    let stderr_fd = std::io::stderr().as_raw_fd();
-    let saved = unsafe { libc::dup(stderr_fd) };
-    if saved < 0 {
-        return None;
-    }
-    unsafe { libc::dup2(devnull.as_raw_fd(), stderr_fd) };
-    Some(StderrGuard { saved_fd: saved })
-}
-
-#[cfg(unix)]
-struct StderrGuard {
-    saved_fd: i32,
-}
-
-#[cfg(unix)]
-impl Drop for StderrGuard {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        let stderr_fd = std::io::stderr().as_raw_fd();
-        unsafe {
-            libc::dup2(self.saved_fd, stderr_fd);
-            libc::close(self.saved_fd);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn suppress_stderr() -> Option<()> {
-    None
 }
 
 pub fn builtins() -> anyhow::Result<()> {

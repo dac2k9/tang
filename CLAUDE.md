@@ -798,6 +798,21 @@ Any parameter tweaks made after the preset load are recorded as new overrides.
 All logging goes to stderr via `RawModeLogger`, same as in `play` mode. Use
 `tang 2> debug.log` to capture logs to a file. No in-app log viewer.
 
+While the TUI owns the screen it must not be corrupted by stray writes to the
+terminal. Two layers guard this, active only when **stderr is a terminal**
+(so `tang 2> debug.log` still captures everything):
+
+- Rust `log` output is suppressed (`max_level = Off`) for the TUI lifetime,
+  set before the background catalog scan spawns.
+- The stderr **file descriptor** is redirected to `/dev/null` for the TUI
+  lifetime (`tty::StderrSilencer`). Native plugin/library code — CLAP preset
+  scanners, VST3 factories, ALSA/JACK probing — writes diagnostics straight to
+  the fd, bypassing `log`; without this those lines land on the alternate
+  screen. (`enumerate` uses the same guard.) Consequence: a panic while the TUI
+  is up prints to `/dev/null`; re-run with `tang 2> debug.log` to capture it.
+  Only stderr is redirected — stdout is the TUI's render surface, so a plugin
+  that writes diagnostics to stdout (rare) is not covered.
+
 ## Virtual piano
 
 The Piano tab turns the computer keyboard into a MIDI controller using Amiga tracker key layout.

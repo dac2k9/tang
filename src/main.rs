@@ -12,6 +12,7 @@ mod piano_filter;
 mod plugin;
 mod scale;
 mod session;
+mod tty;
 mod tui;
 
 use std::io::Write;

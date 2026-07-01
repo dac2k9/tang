@@ -2388,9 +2388,21 @@ pub fn run(
     // since that thread starts logging immediately. Logging to a redirected
     // stderr (`tang 2> debug.log`) is left enabled. Restored at teardown.
     let prev_log_level = log::max_level();
-    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+    let stderr_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    if stderr_is_terminal {
         log::set_max_level(log::LevelFilter::Off);
     }
+
+    // Native plugin code (CLAP preset scanners, VST3 factories, ALSA/JACK, …)
+    // writes straight to the stderr fd, bypassing `log`, which would corrupt
+    // the alternate screen. Redirect stderr to /dev/null for the TUI lifetime
+    // when it's a terminal; when it's redirected (`tang 2> debug.log`) leave it
+    // so logs/plugin diagnostics still land in the file. Restored on drop.
+    let _stderr_silencer = if stderr_is_terminal {
+        crate::tty::StderrSilencer::new()
+    } else {
+        None
+    };
 
     // Scan the plugin catalog on a background thread so the TUI can draw
     // immediately — a full scan instantiates every installed plugin and can
