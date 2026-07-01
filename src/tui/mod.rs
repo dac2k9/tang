@@ -2341,6 +2341,16 @@ pub fn run(
     held: Arc<HeldNotes>,
     piano_filter: Arc<PianoFilter>,
 ) -> anyhow::Result<()> {
+    // Suppress Rust logging for the whole TUI lifetime when stderr is the
+    // terminal: the background catalog scan and plugin loads log verbosely and
+    // would corrupt the alternate screen. Must be set BEFORE the scan spawns,
+    // since that thread starts logging immediately. Logging to a redirected
+    // stderr (`tang 2> debug.log`) is left enabled. Restored at teardown.
+    let prev_log_level = log::max_level();
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        log::set_max_level(log::LevelFilter::Off);
+    }
+
     // Scan the plugin catalog on a background thread so the TUI can draw
     // immediately — a full scan instantiates every installed plugin and can
     // take seconds. Results arrive per-format on `catalog_rx` and are drained
@@ -2510,14 +2520,8 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // When stderr is redirected (e.g. `tang 2> debug.log`), keep logging enabled
-    // so plugin load errors are visible. When stderr is a terminal, suppress
-    // logging to avoid corrupting the alternate screen.
-    let prev_log_level = log::max_level();
-    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        log::set_max_level(log::LevelFilter::Off);
-    }
-
+    // (Rust logging was already suppressed at the top of this function, before
+    // the background scan spawned; it's restored below at teardown.)
     let result = event_loop(&mut terminal, &mut s);
 
     log::set_max_level(prev_log_level);
