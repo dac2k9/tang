@@ -797,6 +797,20 @@ fn save_mod_target_to_out(t: &SaveModTarget) -> ModTargetOut {
             out.param = Some(t.label.clone());
             out.bus = Some(*effect_index);
         }
+        ModTargetKind::GroupMemberMod { member, mod_index, field } => {
+            use crate::plugin::chain::CrossModField;
+            // Serialized as `member` (discriminator) + the matching mod_* field
+            // carrying the member modulator's index.
+            out.member = Some(*member);
+            match field {
+                CrossModField::Rate => out.mod_rate = Some(*mod_index),
+                CrossModField::Attack => out.mod_attack = Some(*mod_index),
+                CrossModField::Decay => out.mod_decay = Some(*mod_index),
+                CrossModField::Sustain => out.mod_sustain = Some(*mod_index),
+                CrossModField::Release => out.mod_release = Some(*mod_index),
+                CrossModField::Depth(ti) => out.mod_depth = Some(vec![*mod_index, *ti]),
+            }
+        }
         ModTargetKind::ModulatorRate { mod_index } => {
             out.mod_rate = Some(*mod_index);
         }
@@ -1405,6 +1419,17 @@ range = "C4-C8"
                         depth: 0.25,
                         slot: 0,
                     },
+                    // Group→member-modulator cross-mod: member 0's modulator 0 rate.
+                    SaveModTarget {
+                        kind: ModTargetKind::GroupMemberMod {
+                            member: 0,
+                            mod_index: 0,
+                            field: crate::plugin::chain::CrossModField::Rate,
+                        },
+                        label: "M0 Mod0 rate".into(),
+                        depth: 0.3,
+                        slot: 0,
+                    },
                 ],
             }],
         }];
@@ -1418,11 +1443,16 @@ range = "C4-C8"
         let config = load(path.to_str().unwrap()).unwrap();
         assert_eq!(config.groups[0].modulators.len(), 1);
         let m = &config.groups[0].modulators[0];
-        assert_eq!(m.targets.len(), 2);
+        assert_eq!(m.targets.len(), 3);
         assert_eq!(m.targets[0].member, Some(0));
         assert_eq!(m.targets[0].param.as_deref(), Some("cutoff"));
         assert_eq!(m.targets[1].bus, Some(0));
         assert_eq!(m.targets[1].param.as_deref(), Some("cutoff"));
+        // The member-modulator target: member set, mod_rate carries the index,
+        // and no param name.
+        assert_eq!(m.targets[2].member, Some(0));
+        assert_eq!(m.targets[2].mod_rate, Some(0));
+        assert_eq!(m.targets[2].param, None);
     }
 
     #[test]

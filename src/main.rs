@@ -441,10 +441,45 @@ fn build_mod_source(
 /// own bus effects (`bus`), or a sibling group modulator (`mod_*`).
 /// `member_chains[ordinal][slot]` holds each member's plugin params (slot 0 =
 /// instrument); `bus_params[i]` holds bus effect `i`'s params.
+/// (base_value, min, max) for a member modulator's field, used to seed a
+/// group→member-modulator cross-mod target on load. Falls back to per-field
+/// defaults if the member modulator's type doesn't match the field.
+fn member_mod_field_info(mm: &tui::LoadedModulator, field: plugin::chain::CrossModField) -> (f32, f32, f32) {
+    use plugin::chain::CrossModField;
+    use tui::LoadedModSource;
+    match field {
+        CrossModField::Rate => {
+            let v = if let LoadedModSource::Lfo { rate, .. } = &mm.source { *rate } else { 1.0 };
+            (v, 0.01, 50.0)
+        }
+        CrossModField::Attack => {
+            let v = if let LoadedModSource::Envelope { attack, .. } = &mm.source { *attack } else { 0.01 };
+            (v, 0.001, 10.0)
+        }
+        CrossModField::Decay => {
+            let v = if let LoadedModSource::Envelope { decay, .. } = &mm.source { *decay } else { 0.3 };
+            (v, 0.001, 10.0)
+        }
+        CrossModField::Sustain => {
+            let v = if let LoadedModSource::Envelope { sustain, .. } = &mm.source { *sustain } else { 0.7 };
+            (v, 0.0, 1.0)
+        }
+        CrossModField::Release => {
+            let v = if let LoadedModSource::Envelope { release, .. } = &mm.source { *release } else { 0.5 };
+            (v, 0.001, 10.0)
+        }
+        CrossModField::Depth(ti) => {
+            let v = mm.targets.get(ti).map(|t| t.depth).unwrap_or(0.5);
+            (v, 0.0, 1.0)
+        }
+    }
+}
+
 fn load_group_modulators(
     group_config: &session::GroupConfig,
     g_idx: usize,
     member_chains: &[Vec<Vec<plugin::ParameterInfo>>],
+    member_mods: &[&[tui::LoadedModulator]],
     bus_params: &[Vec<plugin::ParameterInfo>],
     cmd_tx: &crossbeam_channel::Sender<plugin::chain::GraphCommand>,
 ) -> anyhow::Result<Vec<tui::LoadedModulator>> {
@@ -463,33 +498,75 @@ fn load_group_modulators(
         for target_config in &mod_config.targets {
             let (kind, slot, label, param_min, param_max, base_value) =
                 if let Some(member) = target_config.member {
-                    let Some(ref param_name) = target_config.param else {
-                        log::warn!("Group modulator member target without param, skipping");
-                        continue;
-                    };
-                    let slot = target_config.slot;
-                    let param_info = member_chains
-                        .get(member)
-                        .and_then(|chain| chain.get(slot))
-                        .and_then(|ps| ps.iter().find(|p| p.name == *param_name));
-                    let Some(param_info) = param_info else {
-                        log::warn!(
-                            "Group modulator target param '{param_name}' not found (member {member}, slot {slot})"
-                        );
-                        continue;
-                    };
-                    (
-                        plugin::chain::ModTargetKind::GroupMember {
-                            member,
+                    if let Some(ref param_name) = target_config.param {
+                        // Member instrument plugin parameter.
+                        let slot = target_config.slot;
+                        let param_info = member_chains
+                            .get(member)
+                            .and_then(|chain| chain.get(slot))
+                            .and_then(|ps| ps.iter().find(|p| p.name == *param_name));
+                        let Some(param_info) = param_info else {
+                            log::warn!(
+                                "Group modulator target param '{param_name}' not found (member {member}, slot {slot})"
+                            );
+                            continue;
+                        };
+                        (
+                            plugin::chain::ModTargetKind::GroupMember {
+                                member,
+                                slot,
+                                param_index: param_info.index,
+                            },
                             slot,
-                            param_index: param_info.index,
-                        },
-                        slot,
-                        param_info.name.clone(),
-                        param_info.min,
-                        param_info.max,
-                        param_info.default,
-                    )
+                            param_info.name.clone(),
+                            param_info.min,
+                            param_info.max,
+                            param_info.default,
+                        )
+                    } else {
+                        // Cross-mod a member instrument's modulator (member + mod_*).
+                        use plugin::chain::CrossModField;
+                        let (field, mi) = if let Some(mi) = target_config.mod_rate {
+                            (CrossModField::Rate, mi)
+                        } else if let Some(mi) = target_config.mod_attack {
+                            (CrossModField::Attack, mi)
+                        } else if let Some(mi) = target_config.mod_decay {
+                            (CrossModField::Decay, mi)
+                        } else if let Some(mi) = target_config.mod_sustain {
+                            (CrossModField::Sustain, mi)
+                        } else if let Some(mi) = target_config.mod_release {
+                            (CrossModField::Release, mi)
+                        } else if let Some(ref pair) = target_config.mod_depth {
+                            let mi = pair.first().copied().unwrap_or(0);
+                            let ti = pair.get(1).copied().unwrap_or(0);
+                            (CrossModField::Depth(ti), mi)
+                        } else {
+                            log::warn!("Group modulator member target has no param or mod_* field, skipping");
+                            continue;
+                        };
+                        let mm = member_mods.get(member).and_then(|mods| mods.get(mi));
+                        let Some(mm) = mm else {
+                            log::warn!("Group member-mod target: member {member} has no modulator {mi}");
+                            continue;
+                        };
+                        let (base, min, max) = member_mod_field_info(mm, field);
+                        let field_name = match field {
+                            CrossModField::Rate => "rate".to_string(),
+                            CrossModField::Attack => "attack".to_string(),
+                            CrossModField::Decay => "decay".to_string(),
+                            CrossModField::Sustain => "sustain".to_string(),
+                            CrossModField::Release => "release".to_string(),
+                            CrossModField::Depth(ti) => format!("depth {ti}"),
+                        };
+                        (
+                            plugin::chain::ModTargetKind::GroupMemberMod { member, mod_index: mi, field },
+                            0,
+                            format!("M{member} Mod{mi} {field_name}"),
+                            min,
+                            max,
+                            base,
+                        )
+                    }
                 } else if let Some(bus) = target_config.bus {
                     let Some(ref param_name) = target_config.param else {
                         log::warn!("Group modulator bus target without param, skipping");
@@ -1112,12 +1189,25 @@ fn run_session(
                 chain
             })
             .collect();
+        // Member modulators in ordinal order (for group→member-mod cross-mod).
+        let member_mods: Vec<&[tui::LoadedModulator]> = loaded_instruments
+            .iter()
+            .filter(|li| li.group == Some(g_idx))
+            .map(|li| li.modulators.as_slice())
+            .collect();
         let bus_params: Vec<Vec<plugin::ParameterInfo>> = loaded_groups[g_idx]
             .effects
             .iter()
             .map(|p| p.params.clone())
             .collect();
-        let mods = load_group_modulators(group_config, g_idx, &member_chains, &bus_params, &cmd_tx)?;
+        let mods = load_group_modulators(
+            group_config,
+            g_idx,
+            &member_chains,
+            &member_mods,
+            &bus_params,
+            &cmd_tx,
+        )?;
         loaded_groups[g_idx].modulators = mods;
     }
 

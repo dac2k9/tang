@@ -1231,6 +1231,47 @@ impl State {
             }
         }
 
+        // Member instruments' modulators (cross-mod a member's LFO/envelope).
+        for (ord, member) in members.iter().enumerate() {
+            for (mk, mm) in member.modulators.iter().enumerate() {
+                let prefix = format!("M{ord} Mod{mk}");
+                let mut push_mm = |fname: &str,
+                                   field: crate::plugin::chain::CrossModField,
+                                   min: f32,
+                                   max: f32,
+                                   base: f32| {
+                    let idx = entries.len();
+                    entries.push(TargetEntry {
+                        label: format!("{prefix} {fname}"),
+                        slot: 0,
+                        kind: ModTargetKind::GroupMemberMod { member: ord, mod_index: mk, field },
+                        param_min: min,
+                        param_max: max,
+                        base_value: base,
+                    });
+                    items.push(FilterListItem {
+                        cells: vec![prefix.clone(), fname.to_string()],
+                        index: idx,
+                    });
+                };
+                use crate::plugin::chain::CrossModField;
+                match &mm.source {
+                    ModSourceSlot::Lfo { rate, .. } => {
+                        push_mm("rate", CrossModField::Rate, 0.01, 50.0, *rate);
+                    }
+                    ModSourceSlot::Envelope { attack, decay, sustain, release } => {
+                        push_mm("attack", CrossModField::Attack, 0.001, 10.0, *attack);
+                        push_mm("decay", CrossModField::Decay, 0.001, 10.0, *decay);
+                        push_mm("sustain", CrossModField::Sustain, 0.0, 1.0, *sustain);
+                        push_mm("release", CrossModField::Release, 0.001, 10.0, *release);
+                    }
+                }
+                for (ti, t) in mm.targets.iter().enumerate() {
+                    push_mm(&format!("{} depth", t.param_name), CrossModField::Depth(ti), 0.0, 1.0, t.depth);
+                }
+            }
+        }
+
         // The group's own bus effects.
         for (eff_idx, plugin) in group_node.effects.iter().enumerate() {
             for p in &plugin.params {
@@ -3478,6 +3519,13 @@ fn handle_key(s: &mut State, code: KeyCode, modifiers: KeyModifiers) {
                                 fixup_tui_cross_mod_after_remove(&mut node.modulators, index);
                             }
                         }
+                        // If this lane is a group member, fix up group modulators
+                        // that cross-mod its modulators.
+                        if let Some((group, ordinal)) = tui_lane_member_ordinal(&s.instruments, inst) {
+                            if let Some(g) = s.groups.get_mut(group) {
+                                fixup_tui_group_member_mod_after_remove(&mut g.modulators, ordinal, index);
+                            }
+                        }
                         s.dirty = true;
                         s.rebuild_tree();
                     }
@@ -4917,7 +4965,8 @@ fn fixup_tui_cross_mod_after_remove(modulators: &mut [ModulatorSlot], removed_in
             let idx = match &t.kind {
                 ModTargetKind::PluginParam { .. }
                 | ModTargetKind::GroupMember { .. }
-                | ModTargetKind::GroupBus { .. } => None,
+                | ModTargetKind::GroupBus { .. }
+                | ModTargetKind::GroupMemberMod { .. } => None,
                 ModTargetKind::ModulatorRate { mod_index }
                 | ModTargetKind::ModulatorAttack { mod_index }
                 | ModTargetKind::ModulatorDecay { mod_index }
@@ -4931,7 +4980,8 @@ fn fixup_tui_cross_mod_after_remove(modulators: &mut [ModulatorSlot], removed_in
             let idx = match &mut t.kind {
                 ModTargetKind::PluginParam { .. }
                 | ModTargetKind::GroupMember { .. }
-                | ModTargetKind::GroupBus { .. } => continue,
+                | ModTargetKind::GroupBus { .. }
+                | ModTargetKind::GroupMemberMod { .. } => continue,
                 ModTargetKind::ModulatorRate { mod_index }
                 | ModTargetKind::ModulatorAttack { mod_index }
                 | ModTargetKind::ModulatorDecay { mod_index }
@@ -4971,28 +5021,59 @@ fn fixup_tui_group_bus_after_remove(modulators: &mut [ModulatorSlot], removed: u
 fn fixup_tui_group_member_after_remove(modulators: &mut [ModulatorSlot], removed: usize) {
     use crate::plugin::chain::ModTargetKind;
     for m in modulators.iter_mut() {
-        m.targets.retain(
-            |t| !matches!(t.kind, ModTargetKind::GroupMember { member, .. } if member == removed),
-        );
+        m.targets.retain(|t| match &t.kind {
+            ModTargetKind::GroupMember { member, .. }
+            | ModTargetKind::GroupMemberMod { member, .. } => *member != removed,
+            _ => true,
+        });
         for t in &mut m.targets {
-            if let ModTargetKind::GroupMember { member, .. } = &mut t.kind {
-                if *member > removed {
-                    *member -= 1;
-                }
+            let member = match &mut t.kind {
+                ModTargetKind::GroupMember { member, .. }
+                | ModTargetKind::GroupMemberMod { member, .. } => member,
+                _ => continue,
+            };
+            if *member > removed {
+                *member -= 1;
             }
         }
     }
 }
 
 /// TUI-model mirror of `shift_group_member_after_insert`: after a member joins
-/// a group at ordinal `inserted`, bump GroupMember ordinals at/after it.
+/// a group at ordinal `inserted`, bump group-target member ordinals at/after it.
 fn shift_tui_group_member_after_insert(modulators: &mut [ModulatorSlot], inserted: usize) {
     use crate::plugin::chain::ModTargetKind;
     for m in modulators.iter_mut() {
         for t in &mut m.targets {
-            if let ModTargetKind::GroupMember { member, .. } = &mut t.kind {
-                if *member >= inserted {
-                    *member += 1;
+            let member = match &mut t.kind {
+                ModTargetKind::GroupMember { member, .. }
+                | ModTargetKind::GroupMemberMod { member, .. } => member,
+                _ => continue,
+            };
+            if *member >= inserted {
+                *member += 1;
+            }
+        }
+    }
+}
+
+/// TUI-model mirror of `fixup_group_member_mod_after_remove`: after member
+/// `member`'s lane modulator at `removed` is deleted, drop GroupMemberMod
+/// targets on it and shift that member's higher mod-indices down.
+fn fixup_tui_group_member_mod_after_remove(
+    modulators: &mut [ModulatorSlot],
+    member: usize,
+    removed: usize,
+) {
+    use crate::plugin::chain::ModTargetKind;
+    for m in modulators.iter_mut() {
+        m.targets.retain(|t| {
+            !matches!(t.kind, ModTargetKind::GroupMemberMod { member: tm, mod_index, .. } if tm == member && mod_index == removed)
+        });
+        for t in &mut m.targets {
+            if let ModTargetKind::GroupMemberMod { member: tm, mod_index, .. } = &mut t.kind {
+                if *tm == member && *mod_index > removed {
+                    *mod_index -= 1;
                 }
             }
         }
@@ -5367,6 +5448,19 @@ fn build_tree_entries(instruments: &[InstrumentNode], groups: &[GroupNode]) -> V
                             .map(|p| p.name.clone())
                             .unwrap_or_else(|| format!("fx{effect_index}"));
                         format!("Bus {name}: {}", t.param_name)
+                    }
+                    crate::plugin::chain::ModTargetKind::GroupMemberMod { member, mod_index, field } => {
+                        // Render live from the kind so it survives membership fixups.
+                        use crate::plugin::chain::CrossModField;
+                        let fname = match field {
+                            CrossModField::Rate => "rate".to_string(),
+                            CrossModField::Attack => "attack".to_string(),
+                            CrossModField::Decay => "decay".to_string(),
+                            CrossModField::Sustain => "sustain".to_string(),
+                            CrossModField::Release => "release".to_string(),
+                            CrossModField::Depth(ti) => format!("depth {ti}"),
+                        };
+                        format!("M{member} Mod{mod_index} {fname}")
                     }
                     _ => t.param_name.clone(),
                 }

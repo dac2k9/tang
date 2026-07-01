@@ -306,6 +306,14 @@ pub enum ModTargetKind {
     },
     /// (Group-scoped) Target a parameter on one of the group's own bus effects.
     GroupBus { effect_index: usize, param_index: u32 },
+    /// (Group-scoped) Cross-mod a member instrument's modulator: `member` is
+    /// the member ordinal, `mod_index` the member lane modulator's index, and
+    /// `field` which field of it to drive (rate / ADSR / target depth).
+    GroupMemberMod {
+        member: usize,
+        mod_index: usize,
+        field: CrossModField,
+    },
     /// Target a sibling modulator's LFO rate.
     ModulatorRate { mod_index: usize },
     /// Target a sibling modulator's target depth.
@@ -492,7 +500,8 @@ fn apply_cross_mod(modulators: &mut [Modulator]) {
                 }
                 ModTargetKind::PluginParam { .. }
                 | ModTargetKind::GroupMember { .. }
-                | ModTargetKind::GroupBus { .. } => continue,
+                | ModTargetKind::GroupBus { .. }
+                | ModTargetKind::GroupMemberMod { .. } => continue,
             };
             // Skip self-modulation.
             if tgt_mod_idx == src_idx {
@@ -507,43 +516,52 @@ fn apply_cross_mod(modulators: &mut [Modulator]) {
     // Apply collected modifications.
     for (tgt_idx, field, value) in mods_to_apply {
         if let Some(tgt) = modulators.get_mut(tgt_idx) {
-            match field {
-                CrossModField::Rate => {
-                    if let ModSource::Lfo { rate, .. } = &mut tgt.source {
-                        *rate = value;
-                    }
-                }
-                CrossModField::Attack => {
-                    if let ModSource::Envelope { attack, .. } = &mut tgt.source {
-                        *attack = value;
-                    }
-                }
-                CrossModField::Decay => {
-                    if let ModSource::Envelope { decay, .. } = &mut tgt.source {
-                        *decay = value;
-                    }
-                }
-                CrossModField::Sustain => {
-                    if let ModSource::Envelope { sustain, .. } = &mut tgt.source {
-                        *sustain = value;
-                    }
-                }
-                CrossModField::Release => {
-                    if let ModSource::Envelope { release, .. } = &mut tgt.source {
-                        *release = value;
-                    }
-                }
-                CrossModField::Depth(target_index) => {
-                    if let Some(t) = tgt.targets.get_mut(target_index) {
-                        t.depth = value;
-                    }
-                }
+            apply_cross_mod_field(tgt, field, value);
+        }
+    }
+}
+
+/// Write a cross-mod value into a modulator's field. Shared by sibling
+/// cross-mod and group→member-modulator cross-mod.
+fn apply_cross_mod_field(m: &mut Modulator, field: CrossModField, value: f32) {
+    match field {
+        CrossModField::Rate => {
+            if let ModSource::Lfo { rate, .. } = &mut m.source {
+                *rate = value;
+            }
+        }
+        CrossModField::Attack => {
+            if let ModSource::Envelope { attack, .. } = &mut m.source {
+                *attack = value;
+            }
+        }
+        CrossModField::Decay => {
+            if let ModSource::Envelope { decay, .. } = &mut m.source {
+                *decay = value;
+            }
+        }
+        CrossModField::Sustain => {
+            if let ModSource::Envelope { sustain, .. } = &mut m.source {
+                *sustain = value;
+            }
+        }
+        CrossModField::Release => {
+            if let ModSource::Envelope { release, .. } = &mut m.source {
+                *release = value;
+            }
+        }
+        CrossModField::Depth(target_index) => {
+            if let Some(t) = m.targets.get_mut(target_index) {
+                t.depth = value;
             }
         }
     }
 }
 
-enum CrossModField {
+/// Which field of a modulator a cross-mod target drives. Shared by sibling
+/// cross-mod (within one rack) and group→member-modulator cross-mod.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossModField {
     Rate,
     Attack,
     Decay,
@@ -680,7 +698,8 @@ fn cross_mod_index(kind: &ModTargetKind) -> Option<usize> {
     match kind {
         ModTargetKind::PluginParam { .. }
         | ModTargetKind::GroupMember { .. }
-        | ModTargetKind::GroupBus { .. } => None,
+        | ModTargetKind::GroupBus { .. }
+        | ModTargetKind::GroupMemberMod { .. } => None,
         ModTargetKind::ModulatorRate { mod_index }
         | ModTargetKind::ModulatorAttack { mod_index }
         | ModTargetKind::ModulatorDecay { mod_index }
@@ -695,7 +714,8 @@ fn adjust_cross_mod_index(kind: &mut ModTargetKind, removed_index: usize) {
     let idx = match kind {
         ModTargetKind::PluginParam { .. }
         | ModTargetKind::GroupMember { .. }
-        | ModTargetKind::GroupBus { .. } => return,
+        | ModTargetKind::GroupBus { .. }
+        | ModTargetKind::GroupMemberMod { .. } => return,
         ModTargetKind::ModulatorRate { mod_index }
         | ModTargetKind::ModulatorAttack { mod_index }
         | ModTargetKind::ModulatorDecay { mod_index }
@@ -936,16 +956,87 @@ fn apply_group_mod_writes(
     }
 }
 
+/// A pending write from a group modulator into a member instrument's modulator.
+struct GroupMemberModWrite {
+    lane: usize,
+    mod_index: usize,
+    field: CrossModField,
+    value: f32,
+}
+
+/// Collect group modulators' `GroupMemberMod` targets into cross-mod writes on
+/// member lanes' modulators. Member ordinals resolve against current
+/// membership; unresolvable ones are skipped. Multiple writers to the same
+/// field are last-wins (matching sibling cross-mod).
+fn collect_group_member_mod_writes(
+    groups: &[Group],
+    instruments: &[InstrumentLane],
+    out: &mut Vec<GroupMemberModWrite>,
+) {
+    out.clear();
+    for (gi, g) in groups.iter().enumerate() {
+        for m in &g.modulators {
+            for t in &m.targets {
+                if let ModTargetKind::GroupMemberMod {
+                    member,
+                    mod_index,
+                    field,
+                } = t.kind
+                {
+                    let Some(lane) = group_member_lane(instruments, gi, member) else {
+                        continue;
+                    };
+                    let value =
+                        (t.base_value + m.target_offset(t)).clamp(t.param_min, t.param_max);
+                    out.push(GroupMemberModWrite {
+                        lane,
+                        mod_index,
+                        field,
+                        value,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Apply collected group→member-modulator writes (bounds-checked).
+fn apply_group_member_mod_writes(
+    writes: &[GroupMemberModWrite],
+    instruments: &mut [InstrumentLane],
+) {
+    for w in writes {
+        if let Some(m) = instruments
+            .get_mut(w.lane)
+            .and_then(|l| l.modulators.get_mut(w.mod_index))
+        {
+            apply_cross_mod_field(m, w.field, w.value);
+        }
+    }
+}
+
+/// The member ordinal a group target lands on (GroupMember or GroupMemberMod),
+/// as a mutable reference for fixups. Other kinds return None.
+fn group_target_member_mut(kind: &mut ModTargetKind) -> Option<&mut usize> {
+    match kind {
+        ModTargetKind::GroupMember { member, .. } => Some(member),
+        ModTargetKind::GroupMemberMod { member, .. } => Some(member),
+        _ => None,
+    }
+}
+
 /// After the member at ordinal `removed` leaves a group (membership change or
-/// lane deletion), drop GroupMember targets pointing at it and shift higher
-/// ordinals down one.
+/// lane deletion), drop group targets pointing at it (GroupMember and
+/// GroupMemberMod) and shift higher ordinals down one.
 fn fixup_group_member_after_remove(modulators: &mut [Modulator], removed: usize) {
     for m in modulators.iter_mut() {
-        m.targets.retain(
-            |t| !matches!(t.kind, ModTargetKind::GroupMember { member, .. } if member == removed),
-        );
+        m.targets.retain(|t| match &t.kind {
+            ModTargetKind::GroupMember { member, .. }
+            | ModTargetKind::GroupMemberMod { member, .. } => *member != removed,
+            _ => true,
+        });
         for t in &mut m.targets {
-            if let ModTargetKind::GroupMember { member, .. } = &mut t.kind {
+            if let Some(member) = group_target_member_mut(&mut t.kind) {
                 if *member > removed {
                     *member -= 1;
                 }
@@ -954,12 +1045,34 @@ fn fixup_group_member_after_remove(modulators: &mut [Modulator], removed: usize)
     }
 }
 
-/// After a member joins a group at ordinal `inserted`, bump GroupMember
+/// After member `member`'s lane modulator at `removed` is deleted, drop
+/// GroupMemberMod targets pointing at it and shift that member's higher
+/// mod-indices down one.
+fn fixup_group_member_mod_after_remove(
+    modulators: &mut [Modulator],
+    member: usize,
+    removed: usize,
+) {
+    for m in modulators.iter_mut() {
+        m.targets.retain(|t| {
+            !matches!(t.kind, ModTargetKind::GroupMemberMod { member: tm, mod_index, .. } if tm == member && mod_index == removed)
+        });
+        for t in &mut m.targets {
+            if let ModTargetKind::GroupMemberMod { member: tm, mod_index, .. } = &mut t.kind {
+                if *tm == member && *mod_index > removed {
+                    *mod_index -= 1;
+                }
+            }
+        }
+    }
+}
+
+/// After a member joins a group at ordinal `inserted`, bump group-target member
 /// ordinals at/after it so existing targets keep pointing at their members.
 fn shift_group_member_after_insert(modulators: &mut [Modulator], inserted: usize) {
     for m in modulators.iter_mut() {
         for t in &mut m.targets {
-            if let ModTargetKind::GroupMember { member, .. } = &mut t.kind {
+            if let Some(member) = group_target_member_mut(&mut t.kind) {
                 if *member >= inserted {
                     *member += 1;
                 }
@@ -1047,6 +1160,32 @@ fn update_group_bus_base(
             } = t.kind
             {
                 if te == effect_index && tp == param_index {
+                    t.base_value = value;
+                }
+            }
+        }
+    }
+}
+
+/// Update the `base_value` of GroupMemberMod targets matching (member,
+/// mod_index, field) after the user changes that member modulator's field —
+/// keeps the group cross-mod centered on the user's latest setting.
+fn update_group_member_mod_base(
+    modulators: &mut [Modulator],
+    member: usize,
+    mod_index: usize,
+    field: CrossModField,
+    value: f32,
+) {
+    for m in modulators.iter_mut() {
+        for t in &mut m.targets {
+            if let ModTargetKind::GroupMemberMod {
+                member: tm,
+                mod_index: tmi,
+                field: tf,
+            } = t.kind
+            {
+                if tm == member && tmi == mod_index && tf == field {
                     t.base_value = value;
                 }
             }
@@ -2332,6 +2471,8 @@ pub struct AudioGraph {
     group_midi_scratch: Vec<(u64, [u8; 3])>,
     /// Reusable scratch for pending group-modulator parameter writes.
     group_mod_writes: Vec<GroupModWrite>,
+    /// Reusable scratch for pending group→member-modulator cross-mod writes.
+    group_member_mod_writes: Vec<GroupMemberModWrite>,
 }
 
 impl AudioGraph {
@@ -2353,6 +2494,7 @@ impl AudioGraph {
             piano_filter: None,
             group_midi_scratch: Vec::with_capacity(128),
             group_mod_writes: Vec::with_capacity(64),
+            group_member_mod_writes: Vec::with_capacity(32),
         }
     }
 
@@ -2751,6 +2893,13 @@ impl AudioGraph {
                             fixup_cross_mod_after_remove(&mut lane.modulators, index);
                         }
                     }
+                    // If this lane is a group member, fix up group modulators that
+                    // cross-mod its modulators.
+                    if let Some((group, ordinal)) = lane_member_ordinal(&self.instruments, inst) {
+                        if let Some(g) = self.groups.get_mut(group) {
+                            fixup_group_member_mod_after_remove(&mut g.modulators, ordinal, index);
+                        }
+                    }
                 }
                 GraphCommand::SetModulatorRate {
                     inst,
@@ -2765,6 +2914,12 @@ impl AudioGraph {
                         }
                         // Update cross-mod base values for targets pointing at this rate.
                         update_cross_mod_base(&mut lane.modulators, mod_index, CrossModField::Rate, rate);
+                    }
+                    // Keep any group cross-mod of this member modulator centered.
+                    if let Some((group, ordinal)) = lane_member_ordinal(&self.instruments, inst) {
+                        if let Some(g) = self.groups.get_mut(group) {
+                            update_group_member_mod_base(&mut g.modulators, ordinal, mod_index, CrossModField::Rate, rate);
+                        }
                     }
                 }
                 GraphCommand::SetModulatorWaveform {
@@ -2822,6 +2977,15 @@ impl AudioGraph {
                         update_cross_mod_base(&mut lane.modulators, mod_index, CrossModField::Sustain, sustain);
                         update_cross_mod_base(&mut lane.modulators, mod_index, CrossModField::Release, release);
                     }
+                    // Keep any group cross-mod of this member modulator centered.
+                    if let Some((group, ordinal)) = lane_member_ordinal(&self.instruments, inst) {
+                        if let Some(g) = self.groups.get_mut(group) {
+                            update_group_member_mod_base(&mut g.modulators, ordinal, mod_index, CrossModField::Attack, attack);
+                            update_group_member_mod_base(&mut g.modulators, ordinal, mod_index, CrossModField::Decay, decay);
+                            update_group_member_mod_base(&mut g.modulators, ordinal, mod_index, CrossModField::Sustain, sustain);
+                            update_group_member_mod_base(&mut g.modulators, ordinal, mod_index, CrossModField::Release, release);
+                        }
+                    }
                 }
                 GraphCommand::AddModTarget {
                     inst,
@@ -2858,6 +3022,18 @@ impl AudioGraph {
                             if let Some(t) = m.targets.get_mut(target_index) {
                                 t.depth = depth;
                             }
+                        }
+                    }
+                    // Keep any group cross-mod of this member modulator's depth centered.
+                    if let Some((group, ordinal)) = lane_member_ordinal(&self.instruments, inst) {
+                        if let Some(g) = self.groups.get_mut(group) {
+                            update_group_member_mod_base(
+                                &mut g.modulators,
+                                ordinal,
+                                mod_index,
+                                CrossModField::Depth(target_index),
+                                depth,
+                            );
                         }
                     }
                 }
@@ -3167,6 +3343,14 @@ impl AudioGraph {
                 }
                 apply_cross_mod(&mut self.groups[gi].modulators);
             }
+            // Group→member-modulator cross-mod: written first so member lanes
+            // pick up the modulated LFO/envelope fields when they tick below.
+            collect_group_member_mod_writes(
+                &self.groups,
+                &self.instruments,
+                &mut self.group_member_mod_writes,
+            );
+            apply_group_member_mod_writes(&self.group_member_mod_writes, &mut self.instruments);
             collect_group_mod_writes(&self.groups, &self.instruments, &mut self.group_mod_writes);
             apply_group_mod_writes(
                 &self.group_mod_writes,
@@ -4454,6 +4638,111 @@ mod tests {
         // A member joins at ordinal 0: existing ordinals shift up.
         shift_group_member_after_insert(&mut mods, 0);
         assert_eq!(members(&mods), vec![Some(1), None, Some(2)]);
+
+        // The same ordinal fixups apply to GroupMemberMod targets.
+        let mk_mm = |member: usize| Modulator {
+            source: ModSource::Lfo { waveform: LfoWaveform::Sine, rate: 1.0, phase: 0.0 },
+            sample_rate: 48000.0,
+            targets: vec![ModTarget {
+                kind: ModTargetKind::GroupMemberMod { member, mod_index: 0, field: CrossModField::Rate },
+                depth: 0.5,
+                base_value: 1.0,
+                param_min: 0.01,
+                param_max: 50.0,
+            }],
+            last_output: 0.0,
+        };
+        let mm_members = |mods: &[Modulator]| -> Vec<Option<usize>> {
+            mods.iter()
+                .map(|m| match m.targets.first().map(|t| &t.kind) {
+                    Some(ModTargetKind::GroupMemberMod { member, .. }) => Some(*member),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut mm = vec![mk_mm(0), mk_mm(1), mk_mm(2)];
+        fixup_group_member_after_remove(&mut mm, 1);
+        assert_eq!(mm_members(&mm), vec![Some(0), None, Some(1)]);
+
+        // Member-modulator removal: member 0's modulator 1 deleted → targets at
+        // (member 0, mod 1) drop, and (member 0, mod >1) shift down.
+        let mk_mm_idx = |mod_index: usize| Modulator {
+            source: ModSource::Lfo { waveform: LfoWaveform::Sine, rate: 1.0, phase: 0.0 },
+            sample_rate: 48000.0,
+            targets: vec![ModTarget {
+                kind: ModTargetKind::GroupMemberMod { member: 0, mod_index, field: CrossModField::Rate },
+                depth: 0.5,
+                base_value: 1.0,
+                param_min: 0.01,
+                param_max: 50.0,
+            }],
+            last_output: 0.0,
+        };
+        let mm_idx = |mods: &[Modulator]| -> Vec<Option<usize>> {
+            mods.iter()
+                .map(|m| match m.targets.first().map(|t| &t.kind) {
+                    Some(ModTargetKind::GroupMemberMod { mod_index, .. }) => Some(*mod_index),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut mmi = vec![mk_mm_idx(0), mk_mm_idx(1), mk_mm_idx(2)];
+        fixup_group_member_mod_after_remove(&mut mmi, 0, 1);
+        assert_eq!(mm_idx(&mmi), vec![Some(0), None, Some(1)]);
+    }
+
+    /// A group envelope modulator (idle, depth 1) drives a member instrument's
+    /// LFO rate down to its minimum — proving group→member-modulator cross-mod.
+    #[test]
+    fn group_modulator_drives_member_modulator() {
+        let (mut graph, cmd_tx, _rr) = make_graph(2);
+        swap_instrument_at(&cmd_tx, 0, ConstInstrument::new(0.5));
+        cmd_tx.send(GraphCommand::AddGroup).unwrap();
+        cmd_tx.send(GraphCommand::SetLaneGroup { inst: 0, group: Some(0) }).unwrap();
+        // Member lane gets an LFO modulator at rate 10 Hz.
+        cmd_tx
+            .send(GraphCommand::InsertModulator {
+                inst: 0,
+                index: 0,
+                source: ModSource::Lfo { waveform: LfoWaveform::Sine, rate: 10.0, phase: 0.0 },
+            })
+            .unwrap();
+        // Group envelope modulator (idle) drives that member LFO's rate, depth 1.
+        cmd_tx
+            .send(GraphCommand::InsertGroupModulator {
+                group: 0,
+                index: 0,
+                source: ModSource::Envelope {
+                    attack: 0.01, decay: 0.3, sustain: 0.7, release: 0.5,
+                    state: EnvState::Idle, level: 0.0, notes_held: 0,
+                },
+            })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::AddGroupModTarget {
+                group: 0,
+                mod_index: 0,
+                target: ModTarget {
+                    kind: ModTargetKind::GroupMemberMod { member: 0, mod_index: 0, field: CrossModField::Rate },
+                    depth: 1.0,
+                    base_value: 10.0,
+                    param_min: 0.01,
+                    param_max: 50.0,
+                },
+            })
+            .unwrap();
+
+        let mut out = make_output();
+        graph.process(&[], &mut out).unwrap();
+
+        // Idle envelope at depth 1 pulls the member LFO's rate from 10 to ~min.
+        match graph.instruments[0].modulators[0].source {
+            ModSource::Lfo { rate, .. } => assert!(
+                rate < 0.1,
+                "group envelope should pull member LFO rate to min, got {rate}"
+            ),
+            _ => panic!("member modulator should be an LFO"),
+        }
     }
 
     #[test]

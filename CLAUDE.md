@@ -167,10 +167,12 @@ group = 0               # ...and so does this one
 #### Group modulators
 
 A group can own modulators that drive parameters anywhere in the group's
-world: any **member instrument's** chain, the group's own **bus effects**, or
-**sibling group modulators**. They are the group-scoped analogue of the
-lane-scoped instrument modulators (same LFO/envelope sources and cross-mod;
-see "Modulator fields" below) — they just address a wider target set.
+world: any **member instrument's** chain, the group's own **bus effects**,
+**sibling group modulators**, or a **member instrument's modulators** (a group
+LFO can, e.g., sweep a member synth's own LFO rate). They are the group-scoped
+analogue of the lane-scoped instrument modulators (same LFO/envelope sources
+and cross-mod; see "Modulator fields" below) — they just address a wider
+target set.
 
 ```toml
 [[group.modulator]]
@@ -197,11 +199,22 @@ depth = 0.25
 [[group.modulator.target]]
 mod_rate = 1
 depth = 0.3
+
+# Cross-mod a MEMBER instrument's modulator: `member` + a `mod_*` field, where
+# the mod_* value is the member's lane-modulator index. Here: member 0's
+# modulator 2's LFO rate.
+[[group.modulator.target]]
+member = 0
+mod_rate = 2
+depth = 0.3
 ```
 
 - `member` + `param` (+ optional `slot`) → a member instrument's parameter.
 - `bus` + `param` → a group bus-effect parameter.
-- `mod_*` → a sibling group modulator (mutually exclusive with `member`/`bus`).
+- `member` + `mod_*` → a member instrument's modulator field (the `mod_*` value
+  is that member's lane-modulator index). Applied before the member renders, so
+  the member modulator ticks with the modulated field.
+- `mod_*` alone (no `member`) → a sibling group modulator.
 - Member ordinals are maintained as membership changes: a member leaving the
   group drops targets that pointed at it (higher ordinals shift down); a
   member joining bumps ordinals at/after its slot. The file stores ordinals,
@@ -682,8 +695,10 @@ for Ctrl+letter chords and `Ctrl+Shift+S` performs a plain save instead.
 Opened by `t` when a modulator is selected. For a **lane** modulator it lists
 candidate targets across the whole instrument chain (every plugin's parameters,
 labelled by plugin, plus sibling lane-modulator parameters). For a **group**
-modulator it lists every member instrument's params (`M<n> <plugin>`), the
-group's bus effects (`Bus <effect>`), and sibling group-modulator params.
+modulator it lists every member instrument's params (`M<n> <plugin>`), each
+member's modulators (`M<n> Mod<k>` — rate/ADSR/depth, for group→member-mod
+cross-mod), the group's bus effects (`Bus <effect>`), and sibling
+group-modulator params.
 
 - `Up` / `Down` — navigate rows
 - `Enter` — bind target and close popup
