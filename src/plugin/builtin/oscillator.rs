@@ -65,6 +65,11 @@ pub struct Oscillator {
     /// Smoothed volume actually applied, ramping toward `volume` to avoid
     /// zipper noise when the parameter is tweaked or modulated at block rate.
     volume_smoothed: f32,
+    /// Stereo pan target, -1.0 = hard left, 0.0 = center, +1.0 = hard right.
+    /// Modulator-friendly.
+    pan: f32,
+    /// Smoothed pan actually applied (same anti-zipper ramp as `volume`).
+    pan_smoothed: f32,
     waveform: Waveform,
     /// Per-voice envelope: attack/decay/release in seconds, sustain 0.0–1.0.
     attack: f32,
@@ -87,7 +92,10 @@ struct Voice {
     state: VoiceState,
 }
 
-pub const PARAM_COUNT: usize = 7; // waveform, detune, volume, attack, decay, sustain, release
+pub const PARAM_COUNT: usize = 8; // waveform, detune, volume, attack, decay, sustain, release, pan
+
+const PAN_MIN: f32 = -1.0;
+const PAN_MAX: f32 = 1.0;
 
 const DETUNE_MIN: f32 = -2.0;
 const DETUNE_MAX: f32 = 2.0;
@@ -115,6 +123,8 @@ impl Oscillator {
             detune: 0.0,
             volume: 1.0,
             volume_smoothed: 1.0,
+            pan: 0.0,
+            pan_smoothed: 0.0,
             waveform,
             attack: DEFAULT_ATTACK_SEC,
             decay: DEFAULT_DECAY_SEC,
@@ -250,12 +260,23 @@ impl Plugin for Oscillator {
                 .retain(|_, v| !(matches!(v.state, VoiceState::Release) && v.amp <= 0.0));
 
             self.volume_smoothed += (self.volume - self.volume_smoothed) * volume_alpha;
-            let sample = sample * self.volume_smoothed;
+            self.pan_smoothed += (self.pan - self.pan_smoothed) * volume_alpha;
+            let mono = sample * self.volume_smoothed;
 
-            // Mono signal to both channels
-            audio_out[0][frame] = sample;
+            // Balance-style pan: center leaves both channels at full (matching
+            // the old mono-to-both behavior), panning attenuates the far channel.
+            let p = self.pan_smoothed;
+            let (left_gain, right_gain) = if p >= 0.0 {
+                (1.0 - p, 1.0)
+            } else {
+                (1.0, 1.0 + p)
+            };
             if audio_out.len() > 1 {
-                audio_out[1][frame] = sample;
+                audio_out[0][frame] = mono * left_gain;
+                audio_out[1][frame] = mono * right_gain;
+            } else {
+                // Mono output: pan collapses to full level.
+                audio_out[0][frame] = mono;
             }
         }
 
@@ -320,6 +341,14 @@ impl Plugin for Oscillator {
                 default: DEFAULT_RELEASE_SEC,
                 ..Default::default()
             },
+            ParameterInfo {
+                index: 7,
+                name: "pan".into(),
+                min: PAN_MIN,
+                max: PAN_MAX,
+                default: 0.0,
+                ..Default::default()
+            },
         ]
     }
 
@@ -332,6 +361,7 @@ impl Plugin for Oscillator {
             4 => Some(self.decay),
             5 => Some(self.sustain),
             6 => Some(self.release),
+            7 => Some(self.pan),
             _ => None,
         }
     }
@@ -364,6 +394,10 @@ impl Plugin for Oscillator {
             }
             6 => {
                 self.release = value.clamp(0.0, ADSR_TIME_MAX);
+                Ok(())
+            }
+            7 => {
+                self.pan = value.clamp(PAN_MIN, PAN_MAX);
                 Ok(())
             }
             _ => anyhow::bail!("no parameter with index {index}"),
@@ -418,7 +452,7 @@ mod tests {
         let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["waveform", "detune", "volume", "attack", "decay", "sustain", "release"]
+            ["waveform", "detune", "volume", "attack", "decay", "sustain", "release", "pan"]
         );
         // The waveform parameter is an enum.
         assert!(params[0].labels.is_some());
@@ -501,6 +535,50 @@ mod tests {
         osc.set_parameter(2, 0.0).unwrap();
         let peak = settled_peak(&render(&mut osc, &[(0, [0x90, 60, 100])], frames));
         assert!(peak < 1e-3, "expected silence, got peak {peak}");
+    }
+
+    #[test]
+    fn pan_round_trips_and_clamps() {
+        let mut osc = Oscillator::new(SAMPLE_RATE, Waveform::Sine);
+        assert_eq!(osc.get_parameter(7), Some(0.0)); // default center
+        osc.set_parameter(7, -0.5).unwrap();
+        assert_eq!(osc.get_parameter(7), Some(-0.5));
+        osc.set_parameter(7, 5.0).unwrap();
+        assert_eq!(osc.get_parameter(7), Some(1.0)); // clamped to hard right
+        osc.set_parameter(7, -5.0).unwrap();
+        assert_eq!(osc.get_parameter(7), Some(-1.0)); // clamped to hard left
+    }
+
+    #[test]
+    fn pan_balances_channels() {
+        let frames = (SAMPLE_RATE * 0.1) as usize;
+        // Settled peak of each channel (past the attack + pan-smoothing ramps).
+        let render_lr = |osc: &mut Oscillator| -> (f32, f32) {
+            let mut l = vec![0.0f32; frames];
+            let mut r = vec![0.0f32; frames];
+            let mut out: Vec<&mut [f32]> = vec![&mut l, &mut r];
+            osc.process(&NOTE_ON, &[], &mut out).unwrap();
+            (settled_peak(&l), settled_peak(&r))
+        };
+
+        // Center: both channels equal (matches the old mono-to-both output).
+        let mut center = Oscillator::new(SAMPLE_RATE, Waveform::Sine);
+        let (cl, cr) = render_lr(&mut center);
+        assert!(cl > 0.2 && (cl - cr).abs() < 1e-3, "center should be equal: L {cl}, R {cr}");
+
+        // Hard right: left silent, right stays at full (center level).
+        let mut right = Oscillator::new(SAMPLE_RATE, Waveform::Sine);
+        right.set_parameter(7, 1.0).unwrap();
+        let (rl, rr) = render_lr(&mut right);
+        assert!(rl < 1e-2, "hard right should silence the left channel: {rl}");
+        assert!((rr - cr).abs() < 0.02, "hard right keeps the right at full: {rr} vs {cr}");
+
+        // Hard left: mirror image.
+        let mut left = Oscillator::new(SAMPLE_RATE, Waveform::Sine);
+        left.set_parameter(7, -1.0).unwrap();
+        let (ll, lr) = render_lr(&mut left);
+        assert!(lr < 1e-2, "hard left should silence the right channel: {lr}");
+        assert!((ll - cl).abs() < 0.02, "hard left keeps the left at full: {ll} vs {cl}");
     }
 
     fn peak(samples: &[f32]) -> f32 {
