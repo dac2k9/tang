@@ -27,6 +27,7 @@ pub struct SessionConfig {
 pub struct GroupConfig {
     pub name: Option<String>,
     pub volume: f32,
+    pub pan: f32,
     pub effects: Vec<EffectConfig>,
     /// Group-scoped modulators. Their targets address member instruments
     /// (`member` + optional `slot`), bus effects (`bus`), or sibling
@@ -190,6 +191,8 @@ struct GroupRaw {
     name: Option<String>,
     #[serde(default = "default_volume")]
     volume: f64,
+    #[serde(default)]
+    pan: f64,
     #[serde(default, rename = "effect")]
     effects: Vec<EffectConfig>,
     #[serde(default, rename = "modulator")]
@@ -308,6 +311,7 @@ pub fn load(path: &str) -> anyhow::Result<SessionConfig> {
         .map(|g| GroupConfig {
             name: g.name,
             volume: g.volume as f32,
+            pan: (g.pan as f32).clamp(-1.0, 1.0),
             effects: g.effects,
             modulators: g.modulators,
         })
@@ -554,6 +558,7 @@ pub struct SaveInstrumentSlot {
 pub struct SaveGroup {
     pub name: Option<String>,
     pub volume: f32,
+    pub pan: f32,
     pub effects: Vec<SaveEffect>,
     /// Group-scoped modulators (targets address members / bus effects).
     pub modulators: Vec<SaveModulator>,
@@ -625,6 +630,8 @@ struct GroupOut {
     name: Option<String>,
     #[serde(skip_serializing_if = "is_default_volume_f32")]
     volume: f32,
+    #[serde(skip_serializing_if = "is_default_pan_f32")]
+    pan: f32,
     #[serde(skip_serializing_if = "Vec::is_empty", rename = "effect")]
     effects: Vec<EffectOut>,
     #[serde(skip_serializing_if = "Vec::is_empty", rename = "modulator")]
@@ -633,6 +640,10 @@ struct GroupOut {
 
 fn is_default_volume_f32(v: &f32) -> bool {
     (*v - 1.0).abs() < f32::EPSILON
+}
+
+fn is_default_pan_f32(v: &f32) -> bool {
+    v.abs() < f32::EPSILON
 }
 
 #[derive(Serialize)]
@@ -919,6 +930,7 @@ pub fn save(
             .map(|g| GroupOut {
                 name: g.name.clone(),
                 volume: g.volume,
+                pan: g.pan,
                 effects: g.effects.iter().map(effect_to_out).collect(),
                 modulators: mods_to_out(&g.modulators),
             })
@@ -1347,6 +1359,7 @@ range = "C4-C8"
         let groups = vec![SaveGroup {
             name: Some("Pad".into()),
             volume: 0.5,
+            pan: -0.5,
             effects: vec![SaveEffect {
                 plugin: "builtin:reverb".into(),
                 mix: 1.0,
@@ -1360,11 +1373,13 @@ range = "C4-C8"
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("[[group]]"), "expected a [[group]] section:\n{raw}");
         assert!(raw.contains("group = 0"), "members should record group index:\n{raw}");
+        assert!(raw.contains("pan = -0.5"), "group pan should serialize:\n{raw}");
 
         let config = load(path.to_str().unwrap()).unwrap();
         assert_eq!(config.groups.len(), 1);
         assert_eq!(config.groups[0].name.as_deref(), Some("Pad"));
         assert!((config.groups[0].volume - 0.5).abs() < 1e-6);
+        assert!((config.groups[0].pan + 0.5).abs() < 1e-6);
         assert_eq!(config.groups[0].effects.len(), 1);
         assert_eq!(config.instruments[0].group, Some(0));
         assert_eq!(config.instruments[1].group, Some(0));
@@ -1398,6 +1413,7 @@ range = "C4-C8"
         let groups = vec![SaveGroup {
             name: None,
             volume: 1.0,
+            pan: 0.0,
             effects: vec![SaveEffect {
                 plugin: "builtin:filter".into(),
                 mix: 1.0,

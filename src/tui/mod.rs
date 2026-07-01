@@ -133,6 +133,8 @@ struct InstrumentNode {
 struct GroupNode {
     name: Option<String>,
     volume: f32,
+    /// Stereo balance pan for the group bus (-1 left … 0 center … +1 right).
+    pan: f32,
     effects: Vec<PluginSlot>,
     /// Group-scoped modulators. Each target addresses a member instrument
     /// (`GroupMember`), a bus effect (`GroupBus`), or a sibling group modulator.
@@ -539,6 +541,8 @@ impl State {
                 TreeAddress::GroupModulator { group, index } => {
                     self.group_modulator(group, index).map_or(0, modulator_param_len)
                 }
+                // A group's bus pane shows two host-side params: Volume + Pan.
+                TreeAddress::Group(_) => 2,
                 _ => self.plugin_at(addr).map_or(0, |p| p.params.len()),
             };
             self.param_state.set_len(param_len);
@@ -616,6 +620,11 @@ impl State {
                 let m = self.group_modulator(group, index)?;
                 modulator_param_range(m, self.param_state.selected)
             }
+            TreeAddress::Group(_) => match self.param_state.selected {
+                0 => Some((0.0, 4.0)),  // volume
+                1 => Some((-1.0, 1.0)), // pan
+                _ => None,
+            },
             _ => {
                 let pa = self.real_param_index()?;
                 let param = self.plugin_at(&addr)?.params.get(pa)?;
@@ -1434,7 +1443,7 @@ impl State {
             GroupAssignChoice::New => {
                 let g = self.groups.len();
                 let _ = self.cmd_tx.send(GraphCommand::AddGroup);
-                self.groups.push(GroupNode { name: None, volume: 1.0, effects: vec![], modulators: vec![] });
+                self.groups.push(GroupNode { name: None, volume: 1.0, pan: 0.0, effects: vec![], modulators: vec![] });
                 Some(g)
             }
         };
@@ -1634,6 +1643,29 @@ impl State {
         self.rebuild_tree();
     }
 
+    /// Update a group's host-side bus param (0 = volume, 1 = pan) by applying
+    /// `f` to its current value, clamping to that param's range and mirroring
+    /// the change to the audio thread.
+    fn set_group_bus_param(&mut self, group: usize, pa: usize, f: impl FnOnce(f32) -> f32) {
+        let Some(g) = self.groups.get_mut(group) else {
+            return;
+        };
+        match pa {
+            0 => {
+                g.volume = f(g.volume).clamp(0.0, 4.0);
+                let value = g.volume;
+                let _ = self.cmd_tx.send(GraphCommand::SetGroupVolume { group, value });
+            }
+            1 => {
+                g.pan = f(g.pan).clamp(-1.0, 1.0);
+                let value = g.pan;
+                let _ = self.cmd_tx.send(GraphCommand::SetGroupPan { group, value });
+            }
+            _ => return,
+        }
+        self.dirty = true;
+    }
+
     fn adjust_param(&mut self, delta: f32) {
         let sel = self.chain_state.selected;
         if sel >= self.tree_entries.len() {
@@ -1668,6 +1700,14 @@ impl State {
         if let TreeAddress::GroupModulator { group, index } = addr {
             let pa = self.param_state.selected;
             self.adjust_group_modulator_param(group, index, pa, delta);
+            return;
+        }
+
+        // A group's host-side bus params (Volume + Pan).
+        if let TreeAddress::Group(group) = addr {
+            let pa = self.param_state.selected;
+            let range = self.selected_param_range().unwrap_or((0.0, 1.0));
+            self.set_group_bus_param(group, pa, |v| (v + delta).clamp(range.0, range.1));
             return;
         }
 
@@ -1887,6 +1927,13 @@ impl State {
         if let TreeAddress::GroupModulator { group, index } = addr {
             let pa = self.param_state.selected;
             self.set_group_modulator_param_value(group, index, pa, value);
+            return;
+        }
+
+        // A group's host-side bus params (Volume + Pan) — set absolute.
+        if let TreeAddress::Group(group) = addr {
+            let pa = self.param_state.selected;
+            self.set_group_bus_param(group, pa, |_| value);
             return;
         }
 
@@ -2227,6 +2274,7 @@ impl State {
             .map(|g| crate::session::SaveGroup {
                 name: g.name.clone(),
                 volume: g.volume,
+                pan: g.pan,
                 effects: g.effects.iter().map(&to_save_effect).collect(),
                 modulators: mods_to_save(&g.modulators),
             })
@@ -2304,6 +2352,7 @@ pub struct LoadedInstrument {
 pub struct LoadedGroup {
     pub name: Option<String>,
     pub volume: f32,
+    pub pan: f32,
     pub effects: Vec<LoadedPlugin>,
     /// Group-scoped modulators loaded from the session.
     pub modulators: Vec<LoadedModulator>,
@@ -2415,6 +2464,7 @@ pub fn run(
         .map(|g| GroupNode {
             name: g.name,
             volume: g.volume,
+            pan: g.pan,
             effects: g.effects.into_iter().map(to_plugin_slot).collect(),
             modulators: g.modulators.into_iter().map(to_modulator_slot).collect(),
         })
@@ -3630,6 +3680,22 @@ fn handle_key(s: &mut State, code: KeyCode, modifiers: KeyModifiers) {
                                 }
                             }
                         }
+                        TreeAddress::Group(group) => {
+                            // Group bus pane: 0 = volume, 1 = pan.
+                            if let Some(g) = s.groups.get(group) {
+                                let (val, name, min, max) = match pa {
+                                    0 => (g.volume, "volume (1.0 = unity)", 0.0, 4.0),
+                                    1 => (g.pan, "pan (-1 L … +1 R)", -1.0, 1.0),
+                                    _ => return,
+                                };
+                                s.editing = Some(EditState {
+                                    input: TextInputState::new(&format!("{val:.2}")),
+                                    param_name: name.to_string(),
+                                    param_min: min,
+                                    param_max: max,
+                                });
+                            }
+                        }
                         _ => {
                             let real_pa = s.real_param_index().unwrap_or(pa);
                             if let Some(param) = s.plugin_at(&addr).and_then(|p| p.params.get(real_pa)) {
@@ -4364,6 +4430,37 @@ fn render_session(
                         ("Pattern".to_string(), mod_params.as_slice())
                     }
                     None => ("Pattern".to_string(), &[] as &[ParamSlot]),
+                }
+            }
+            TreeAddress::Group(group) => {
+                // The group's bus pane: host-side Volume + Pan (no plugin).
+                match groups.get(*group) {
+                    Some(g) => {
+                        mod_params.push(ParamSlot {
+                            name: "volume".to_string(),
+                            index: 0,
+                            min: 0.0,
+                            max: 4.0,
+                            default: 1.0,
+                            value: g.volume,
+                            kind: ParamKind::Float,
+                        });
+                        mod_params.push(ParamSlot {
+                            name: "pan".to_string(),
+                            index: 1,
+                            min: -1.0,
+                            max: 1.0,
+                            default: 0.0,
+                            value: g.pan,
+                            kind: ParamKind::Float,
+                        });
+                        let name = g
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| format!("Group {}", group + 1));
+                        (name, mod_params.as_slice())
+                    }
+                    None => ("(none)".to_string(), &[] as &[ParamSlot]),
                 }
             }
             _ => {

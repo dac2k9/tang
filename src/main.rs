@@ -794,6 +794,14 @@ fn run_session(
                 })
                 .map_err(|_| anyhow::anyhow!("command channel closed"))?;
         }
+        if group_config.pan.abs() > f32::EPSILON {
+            cmd_tx
+                .send(plugin::chain::GraphCommand::SetGroupPan {
+                    group: g_idx,
+                    value: group_config.pan,
+                })
+                .map_err(|_| anyhow::anyhow!("command channel closed"))?;
+        }
         let mut group_effects: Vec<tui::LoadedPlugin> = Vec::new();
         for (fx_idx, effect_config) in group_config.effects.iter().enumerate() {
             let effect_source = session::resolve_plugin_path(&effect_config.plugin, session_dir);
@@ -845,6 +853,7 @@ fn run_session(
         loaded_groups.push(tui::LoadedGroup {
             name: group_config.name.clone(),
             volume: group_config.volume,
+            pan: group_config.pan,
             effects: group_effects,
             // Group modulators are loaded after the instruments, once member
             // chains are known (so member-target param names resolve).

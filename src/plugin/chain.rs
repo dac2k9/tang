@@ -1287,6 +1287,11 @@ pub enum GraphCommand {
         group: usize,
         value: f32,
     },
+    /// Set a group's stereo balance pan (-1 left … 0 center … +1 right).
+    SetGroupPan {
+        group: usize,
+        value: f32,
+    },
     /// Insert an effect into a group's bus chain.
     InsertGroupEffect {
         group: usize,
@@ -2334,6 +2339,9 @@ struct Group {
     mix_values: Vec<f64>,
     /// Output gain applied to the member sum, before the group effects.
     volume: f32,
+    /// Stereo balance pan for the group bus output: -1 = left, 0 = center,
+    /// +1 = right. Applied after the effect chain.
+    pan: f32,
     /// Group-scoped modulators. Each target addresses a member instrument's
     /// chain (`GroupMember`), one of this group's bus effects (`GroupBus`), or
     /// a sibling group modulator (cross-mod).
@@ -2351,6 +2359,7 @@ impl Group {
             effects: Vec::new(),
             mix_values: Vec::new(),
             volume: 1.0,
+            pan: 0.0,
             modulators: Vec::new(),
             accum: (0..num_channels).map(|_| Vec::new()).collect(),
             buf_a: (0..num_channels).map(|_| Vec::new()).collect(),
@@ -2381,6 +2390,7 @@ impl Group {
             }
         }
         if self.effects.is_empty() {
+            self.apply_pan(num_channels);
             return Ok(());
         }
         for buf in self.buf_a.iter_mut().chain(self.buf_b.iter_mut()) {
@@ -2436,7 +2446,28 @@ impl Group {
         for (acc, fin) in self.accum.iter_mut().zip(final_buf.iter()).take(num_channels) {
             acc.copy_from_slice(fin);
         }
+        self.apply_pan(num_channels);
         Ok(())
+    }
+
+    /// Balance-style stereo pan on the bus output (2-channel only): center
+    /// leaves both channels untouched, panning attenuates the far channel.
+    fn apply_pan(&mut self, num_channels: usize) {
+        if num_channels != 2 || self.pan.abs() < f32::EPSILON {
+            return;
+        }
+        let p = self.pan;
+        let (left_gain, right_gain) = if p >= 0.0 {
+            (1.0 - p, 1.0)
+        } else {
+            (1.0, 1.0 + p)
+        };
+        for s in self.accum[0].iter_mut() {
+            *s *= left_gain;
+        }
+        for s in self.accum[1].iter_mut() {
+            *s *= right_gain;
+        }
     }
 }
 
@@ -2808,6 +2839,11 @@ impl AudioGraph {
                 GraphCommand::SetGroupVolume { group, value } => {
                     if let Some(g) = self.groups.get_mut(group) {
                         g.volume = value;
+                    }
+                }
+                GraphCommand::SetGroupPan { group, value } => {
+                    if let Some(g) = self.groups.get_mut(group) {
+                        g.pan = value.clamp(-1.0, 1.0);
                     }
                 }
                 GraphCommand::InsertGroupEffect { group, index, effect, mix } => {
@@ -4165,6 +4201,34 @@ mod tests {
             "expected 0.375 after ungrouping one member, got {}",
             out[0][0]
         );
+
+        drop(return_rx);
+    }
+
+    #[test]
+    fn group_pan_balances_bus_output() {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::bounded(64);
+        let (return_tx, return_rx) = crossbeam_channel::bounded(16);
+        let mut graph = AudioGraph::new(2, cmd_rx, return_tx);
+
+        graph.instruments.push(InstrumentLane::new(2));
+        swap_instrument_at(&cmd_tx, 0, ConstInstrument::new(0.5));
+        cmd_tx.send(GraphCommand::AddGroup).unwrap();
+        cmd_tx.send(GraphCommand::SetLaneGroup { inst: 0, group: Some(0) }).unwrap();
+
+        // Hard right: left silent, right at full member level.
+        cmd_tx.send(GraphCommand::SetGroupPan { group: 0, value: 1.0 }).unwrap();
+        let mut out = make_output();
+        graph.process(&[note_on(60)], &mut out).unwrap();
+        assert!(out[0].iter().all(|&s| s.abs() < 1e-6), "hard right should silence left: {}", out[0][0]);
+        assert!(out[1].iter().all(|&s| (s - 0.5).abs() < 1e-6), "right stays at full: {}", out[1][0]);
+
+        // Center: both channels at full (unchanged).
+        cmd_tx.send(GraphCommand::SetGroupPan { group: 0, value: 0.0 }).unwrap();
+        let mut out = make_output();
+        graph.process(&[note_on(60)], &mut out).unwrap();
+        assert!(out[0].iter().all(|&s| (s - 0.5).abs() < 1e-6), "center left: {}", out[0][0]);
+        assert!(out[1].iter().all(|&s| (s - 0.5).abs() < 1e-6), "center right: {}", out[1][0]);
 
         drop(return_rx);
     }

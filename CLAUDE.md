@@ -141,6 +141,7 @@ volume on that sum, then adds the result to the master mix.
 [[group]]
 name = "Pad"            # optional display name (default: "Group N")
 volume = 0.8            # group bus output gain (default: 1.0)
+pan = -0.3             # group bus stereo balance (default: 0.0 = center)
 
 [[group.effect]]        # zero or more bus effects, in series
 plugin = "builtin:reverb"
@@ -159,6 +160,10 @@ group = 0               # ...and so does this one
   header, default "Group N")
 - `volume` — group bus output gain, applied to the member sum before the group
   effects (default: 1.0)
+- `pan` — group bus stereo balance, −1 left … 0 center … +1 right (default:
+  0.0; balance-style, applied to the bus output after the effect chain). In
+  the TUI a group's parameter pane shows Volume + Pan as editable rows
+  (`Enter` to focus, `Left`/`Right`/`Enter` to edit); `v` still edits volume.
 - `[[group.effect]]` — zero or more bus effects in series (each with `mix`)
 - `[[group.modulator]]` — zero or more group-scoped modulators (see below)
 - Membership is set on the instruments via their `group` index, not listed on
