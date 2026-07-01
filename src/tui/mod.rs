@@ -264,6 +264,7 @@ fn actions_for(addr: Option<&TreeAddress>) -> Vec<(&'static str, &'static str)> 
             ("a", "add fx"),
             ("m", "modulate"),
             ("v", "volume"),
+            ("R", "rename"),
             ("d", "delete group"),
         ],
         Some(TreeAddress::GroupEffect { .. }) => vec![
@@ -417,6 +418,13 @@ struct RangeEditState {
     input: TextInputState,
 }
 
+/// State for the "rename group" popup.
+struct RenameGroupState {
+    /// The group whose display name is being edited.
+    group: usize,
+    input: TextInputState,
+}
+
 /// State for the "save as" filename popup.
 struct SaveAsState {
     input: TextInputState,
@@ -460,6 +468,7 @@ struct State {
     param_scrollbar_dragging: bool,
     editing: Option<EditState>,
     range_edit: Option<RangeEditState>,
+    rename_group: Option<RenameGroupState>,
     selector: Option<SelectorState>,
     target_selector: Option<TargetSelectorState>,
     modulate: Option<ModulateState>,
@@ -2450,6 +2459,7 @@ pub fn run(
         param_scrollbar_dragging: false,
         editing: None,
         range_edit: None,
+        rename_group: None,
         selector: None,
         target_selector: None,
         modulate: None,
@@ -2608,6 +2618,8 @@ fn process_event(s: &mut State, ev: Event) {
                 handle_edit_key(s, key.code);
             } else if s.range_edit.is_some() {
                 handle_range_edit_key(s, key.code);
+            } else if s.rename_group.is_some() {
+                handle_rename_group_key(s, key.code);
             } else if s.param_filtering {
                 handle_param_filter_key(s, key.code);
             } else {
@@ -2623,6 +2635,7 @@ fn process_event(s: &mut State, ev: Event) {
                 || s.scale_selector.is_some()
                 || s.editing.is_some()
                 || s.range_edit.is_some()
+                || s.rename_group.is_some()
                 || s.bpm_editing.is_some()
                 || s.gain_editing.is_some()
                 || s.save_as.is_some()
@@ -2636,6 +2649,7 @@ fn process_event(s: &mut State, ev: Event) {
                     s.scale_selector = None;
                     s.editing = None;
                     s.range_edit = None;
+                    s.rename_group = None;
                     s.bpm_editing = None;
                     s.gain_editing = None;
                     s.save_as = None;
@@ -2835,6 +2849,33 @@ fn handle_range_edit_key(s: &mut State, code: KeyCode) {
         KeyCode::Home => re.input.home(),
         KeyCode::End => re.input.end(),
         KeyCode::Char(ch) => re.input.insert(ch),
+        _ => {}
+    }
+}
+
+fn handle_rename_group_key(s: &mut State, code: KeyCode) {
+    let rg = s.rename_group.as_mut().unwrap();
+    match code {
+        KeyCode::Esc => s.rename_group = None,
+        KeyCode::Enter => {
+            let name = rg.input.value.trim().to_string();
+            let group = rg.group;
+            // Empty clears the custom name (falls back to "Group N"). The name
+            // is display-only, so no audio-thread command is needed.
+            if let Some(g) = s.groups.get_mut(group) {
+                g.name = if name.is_empty() { None } else { Some(name) };
+            }
+            s.dirty = true;
+            s.rebuild_tree();
+            s.rename_group = None;
+        }
+        KeyCode::Backspace => rg.input.backspace(),
+        KeyCode::Delete => rg.input.delete(),
+        KeyCode::Left => rg.input.move_left(),
+        KeyCode::Right => rg.input.move_right(),
+        KeyCode::Home => rg.input.home(),
+        KeyCode::End => rg.input.end(),
+        KeyCode::Char(ch) => rg.input.insert(ch),
         _ => {}
     }
 }
@@ -3109,9 +3150,19 @@ fn handle_key(s: &mut State, code: KeyCode, modifiers: KeyModifiers) {
             s.open_selector(SelectorMode::Instrument);
         }
 
-        // 'R' — set the key range of the selected instrument.
+        // 'R' — set the key range of the selected instrument, or rename the
+        // selected group (range doesn't apply to groups).
         KeyCode::Char('R') if s.active_tab == 0 && !s.focus_params => {
-            if let Some(inst) = s.selected_inst() {
+            if let Some(TreeAddress::Group(group)) = s.selected_address().copied() {
+                let initial = s
+                    .groups
+                    .get(group)
+                    .and_then(|g| g.name.clone())
+                    .unwrap_or_default();
+                let mut input = TextInputState::new(&initial);
+                input.end();
+                s.rename_group = Some(RenameGroupState { group, input });
+            } else if let Some(inst) = s.selected_inst() {
                 let initial = s
                     .instruments
                     .get(inst)
@@ -3965,6 +4016,9 @@ fn render(
                 if let Some(re) = &s.range_edit {
                     render_range_edit_popup(frame, area, re);
                 }
+                if let Some(rg) = &s.rename_group {
+                    render_rename_group_popup(frame, area, rg);
+                }
                 if let Some(sel) = &s.selector {
                     render_selector_popup(frame, area, sel, s.catalog_scanning);
                 }
@@ -4259,6 +4313,9 @@ fn render_session(
                         instruments.get(*inst)
                             .and_then(|n| n.effects.get(*index))
                     }
+                    TreeAddress::GroupEffect { group, index } => {
+                        groups.get(*group).and_then(|g| g.effects.get(*index))
+                    }
                     _ => None,
                 };
                 match slot {
@@ -4494,6 +4551,29 @@ fn render_range_edit_popup(frame: &mut ratatui::Frame, area: Rect, re: &RangeEdi
         );
         frame.render_widget(
             TextInput::new(&re.input),
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        );
+    }
+}
+
+fn render_rename_group_popup(frame: &mut ratatui::Frame, area: Rect, rg: &RenameGroupState) {
+    let popup = centered_rect(40, 5, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Rename Group ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height >= 2 {
+        frame.render_widget(
+            Paragraph::new("Group name (empty = default)")
+                .style(Style::default().fg(DIM)),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+        frame.render_widget(
+            TextInput::new(&rg.input),
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
     }
@@ -5408,7 +5488,7 @@ fn build_help_lines() -> Vec<String> {
         "  Enter      Focus parameter list".into(),
         "  n          Add instrument (split); defaults to oscillator".into(),
         "  i          Replace instrument".into(),
-        "  R          Set instrument key range".into(),
+        "  R          Set instrument key range / rename group".into(),
         "  v          Set instrument volume".into(),
         "  a          Add effect after selected".into(),
         "  d          Delete selected".into(),

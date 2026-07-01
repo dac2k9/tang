@@ -155,7 +155,8 @@ plugin = "builtin:osc"
 group = 0               # ...and so does this one
 ```
 
-- `name` — display name (optional)
+- `name` — display name (optional; editable in the TUI with `R` on the group
+  header, default "Group N")
 - `volume` — group bus output gain, applied to the member sum before the group
   effects (default: 1.0)
 - `[[group.effect]]` — zero or more bus effects in series (each with `mix`)
@@ -564,7 +565,7 @@ numeric `params` values (the index into the label list).
 | `Shift+Down` / `Shift+Up` | Move selected effect down/up (reorder, focus follows) |
 | `n` | Add a new instrument (defaults to `builtin:osc`, opens the plugin selector to replace it; full range until set with `R`) |
 | `i` | Replace instrument (opens instrument selector popup) |
-| `R` | Set the selected instrument's key range (opens range popup, prefilled) |
+| `R` | Set the selected instrument's key range (opens range popup, prefilled) — or, on a group header, rename the group (opens rename popup, prefilled) |
 | `v` | Set the output volume of the selected instrument or group (host-side gain, opens value popup) |
 | `a` | Add effect to the selected instrument, or — on a group/group-effect node — to the group's bus chain (opens effect selector popup). New effects default to 0.5 mix (half-wet); `builtin:filter` defaults to 1.0 (fully wet, since a half-wet filter barely filters) |
 | `m` | Chain focus: add an empty LFO modulator — to the instrument's lane rack on an instrument-side node, or to the group's rack on a group / group-bus node. Param focus: modulate the selected parameter — opens a popup to bind it to a new (LFO/envelope) or existing modulator (a group bus-effect param binds a group modulator; an instrument/effect param binds a lane modulator) |
@@ -647,6 +648,17 @@ To build a split: press `n` to add a new instrument (this adds a full-range
 lane defaulting to `builtin:osc` and opens the plugin selector to replace it —
 cancelling the selector leaves the oscillator in place), then press `R` to set
 that lane's key range. Repeat for each split zone.
+
+### Rename group popup
+
+Opened by `R` on a group header (range doesn't apply to groups). Titled
+"Rename Group" and prefilled with the current name.
+
+- Text input for the group's display name. Empty clears the custom name (the
+  header falls back to "Group N"). The name is display-only (not sent to the
+  audio thread), so it just updates the model and marks the session dirty.
+- `Enter` — accept and close popup
+- `Escape` — cancel and close popup
 
 ### Save As popup
 
