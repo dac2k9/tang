@@ -118,6 +118,24 @@ impl Allpass {
     }
 }
 
+/// Soft-clip the wet output so a long, energetic reverb tail can't leave the
+/// [-1, 1] range the audio device expects. An FDN with a near-lossless feedback
+/// matrix and long `decay` builds up modal energy under sustained input
+/// (steady-state gain ~= 1/(1 - decay)); left unbounded that clips harshly at
+/// the DAC and crackles. This is the identity below ±KNEE and a C1-smooth
+/// saturation above, asymptoting to ±1 — transparent at normal levels, gentle
+/// compression when hot.
+#[inline]
+fn soft_clip(x: f32) -> f32 {
+    const KNEE: f32 = 0.8;
+    let a = x.abs();
+    if a <= KNEE {
+        x
+    } else {
+        x.signum() * (KNEE + (1.0 - KNEE) * ((a - KNEE) / (1.0 - KNEE)).tanh())
+    }
+}
+
 pub struct Reverb {
     sample_rate: f32,
 
@@ -319,9 +337,10 @@ impl Plugin for Reverb {
             let l_out = (mid + side) * level;
             let r_out = (mid - side) * level;
 
-            audio_out[0][frame] = l_out;
+            // Bound the wet output so a hot tail can't clip the DAC and crackle.
+            audio_out[0][frame] = soft_clip(l_out);
             if audio_out.len() > 1 {
-                audio_out[1][frame] = r_out;
+                audio_out[1][frame] = soft_clip(r_out);
             }
         }
 
@@ -488,6 +507,57 @@ mod tests {
             assert!(energy > 0.0, "preset {id} produced no output");
             assert!(max_abs < 10.0, "preset {id} produced hot output: {max_abs}");
         }
+    }
+
+    #[test]
+    fn sustained_input_output_stays_bounded() {
+        // A long reverb driven by sustained full-scale input builds up modal
+        // energy; the soft-clipped wet output must stay within [-1, 1] so it
+        // can't clip the DAC and crackle.
+        let mut reverb = Reverb::new(48_000.0);
+        reverb.set_parameter(0, 0.99).unwrap(); // long decay
+        reverb.set_parameter(9, 2.0).unwrap(); // max level
+        let block_size = 256;
+        let sr = 48_000.0f32;
+        let freq = 220.0f32;
+        let mut phase = 0.0f32;
+        let mut max_abs = 0.0f32;
+        for _ in 0..400 {
+            // Sustained full-scale tone (DC would be removed by the lowcut).
+            let mut in_l = vec![0.0f32; block_size];
+            let mut in_r = vec![0.0f32; block_size];
+            for k in 0..block_size {
+                let s = (phase * TAU).sin();
+                in_l[k] = s;
+                in_r[k] = s;
+                phase = (phase + freq / sr).fract();
+            }
+            let mut out_l = vec![0.0f32; block_size];
+            let mut out_r = vec![0.0f32; block_size];
+            let in_slices: Vec<&[f32]> = vec![&in_l, &in_r];
+            let mut out_refs: Vec<&mut [f32]> = vec![&mut out_l, &mut out_r];
+            reverb.process(&[], &in_slices, &mut out_refs).unwrap();
+            for &s in out_l.iter().chain(out_r.iter()) {
+                assert!(s.is_finite(), "non-finite sample: {s}");
+                max_abs = max_abs.max(s.abs());
+            }
+        }
+        assert!(max_abs <= 1.0 + 1e-4, "output left [-1,1]: {max_abs}");
+        // Confirm it was actually driven into the limiter (so the test is
+        // meaningful — without soft-clipping this tone builds up past 1.0).
+        assert!(max_abs > 0.9, "expected a hot tail near the ceiling: {max_abs}");
+    }
+
+    #[test]
+    fn soft_clip_transparent_then_bounded() {
+        // Transparent below the knee.
+        assert_eq!(soft_clip(0.5), 0.5);
+        assert_eq!(soft_clip(-0.5), -0.5);
+        // C0-continuous at the knee.
+        assert!((soft_clip(0.8) - 0.8).abs() < 1e-6);
+        // Bounded to (-1, 1) no matter how hot.
+        assert!((0.99..=1.0).contains(&soft_clip(100.0)));
+        assert!((-1.0..=-0.99).contains(&soft_clip(-100.0)));
     }
 
     #[test]
