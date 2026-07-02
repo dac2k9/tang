@@ -513,13 +513,18 @@ impl Modulator {
     /// trying to push past an already-maxed value (offsets above the base
     /// would just clamp at param_max and do nothing).
     fn target_offset(&self, target: &ModTarget) -> f32 {
-        match self.source {
+        match &self.source {
             ModSource::Lfo { .. } => {
                 self.last_output * target.depth * (target.param_max - target.param_min)
             }
             ModSource::Envelope { .. } => {
                 -(1.0 - self.last_output) * target.depth * (target.base_value - target.param_min)
             }
+            // Unbound (armed for learning, or bound to nothing yet): leave the
+            // parameter at its base. Otherwise last_output=0 would map to
+            // param_min and slam the parameter down the instant you arm learn,
+            // before you've touched a control.
+            ModSource::MidiLearn { source: None, .. } => 0.0,
             ModSource::MidiLearn { .. } => {
                 // Absolute: map the control across the param range, blended
                 // toward the base by (1 - depth). At depth 1.0 the control sets
@@ -4976,6 +4981,51 @@ mod tests {
         assert!(
             out[0].iter().all(|&s| s.abs() < 1e-6),
             "CC 0 should drive cutoff to 0, got {}",
+            out[0][0]
+        );
+    }
+
+    /// An armed MidiLearn modulator must leave its target at the base value
+    /// until a control is captured — arming learn on a parameter should not
+    /// slam it to the minimum before you touch a knob.
+    #[test]
+    fn midi_learn_unbound_leaves_param_at_base() {
+        let (mut graph, cmd_tx, _rr) = make_graph(2);
+
+        let inst: Box<dyn Plugin> = Box::new(ParamTrackingInstrument { param_value: 0.5 });
+        let inst_buf = (0..inst.audio_output_count()).map(|_| Vec::new()).collect();
+        cmd_tx
+            .send(GraphCommand::SwapInstrument { inst: 0, instrument: inst, inst_buf, remapper: None })
+            .unwrap();
+
+        // Armed MidiLearn targeting cutoff (param 0), full-range, depth 1.0.
+        cmd_tx
+            .send(GraphCommand::InsertModulator {
+                inst: 0,
+                index: 0,
+                source: ModSource::MidiLearn { source: None, value: 0.0, learning: true },
+            })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::AddModTarget {
+                inst: 0,
+                mod_index: 0,
+                target: ModTarget {
+                    kind: ModTargetKind::PluginParam { slot: 0, param_index: 0 },
+                    depth: 1.0,
+                    base_value: 0.5,
+                    param_min: 0.0,
+                    param_max: 1.0,
+                },
+            })
+            .unwrap();
+
+        // No CC yet — the parameter must stay at its base (0.5), not drop to 0.
+        let mut out = make_output();
+        graph.process(&[], &mut out).unwrap();
+        assert!(
+            out[0].iter().all(|&s| (s - 0.5).abs() < 1e-6),
+            "unbound learn should leave cutoff at base 0.5, got {}",
             out[0][0]
         );
     }

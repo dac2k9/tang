@@ -307,6 +307,39 @@ fn actions_for(addr: Option<&TreeAddress>) -> Vec<(&'static str, &'static str)> 
     }
 }
 
+/// Build the action bar items for the parameter pane (when it has focus). These
+/// are the keys that act on the *selected parameter*, which differ from the
+/// chain-focus actions in `actions_for`.
+fn param_actions_for(addr: Option<&TreeAddress>) -> Vec<(&'static str, &'static str)> {
+    match addr {
+        // Plugin parameters: edit, modulate, MIDI-learn, filter the list.
+        Some(TreeAddress::Instrument(_))
+        | Some(TreeAddress::Effect { .. })
+        | Some(TreeAddress::GroupEffect { .. }) => vec![
+            ("Enter", "edit"),
+            ("m", "modulate"),
+            ("l", "learn"),
+            ("/", "filter"),
+        ],
+        // Modulator pseudo-params (rate/ADSR/depth): edit, or MIDI-learn the row.
+        Some(TreeAddress::Modulator { .. }) | Some(TreeAddress::GroupModulator { .. }) => {
+            vec![("Enter", "edit"), ("l", "learn")]
+        }
+        // Group Volume/Pan and pattern settings: edit only.
+        Some(TreeAddress::Group(_)) | Some(TreeAddress::Pattern(_)) => vec![("Enter", "edit")],
+        None => vec![],
+    }
+}
+
+/// The action bar items for the currently focused pane.
+fn action_bar_items(addr: Option<&TreeAddress>, focus_params: bool) -> Vec<(&'static str, &'static str)> {
+    if focus_params {
+        param_actions_for(addr)
+    } else {
+        actions_for(addr)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Popup state types
 // ---------------------------------------------------------------------------
@@ -4215,7 +4248,7 @@ fn handle_mouse(s: &mut State, kind: MouseEventKind, x: u16, y: u16) {
             if s.active_tab == 0 {
                 let sel = s.chain_state.selected;
                 let addr = s.tree_entries.get(sel).map(|e| &e.address);
-                let actions = actions_for(addr);
+                let actions = action_bar_items(addr, s.focus_params);
                 if let Some(key) = action_bar_hit(x, y, s.areas.action_bar, &actions) {
                     handle_key(s, KeyCode::Char(key), KeyModifiers::NONE);
                     return;
@@ -4891,33 +4924,27 @@ fn render_action_bar(
     }
     let sel = chain_state.selected;
     let addr = tree_entries.get(sel).map(|e| &e.address);
-    let actions = actions_for(addr);
+    // Show the actions for whichever pane has focus (chain vs. parameters).
+    let actions = action_bar_items(addr, focus_params);
 
-    let key_style = Style::default().fg(Color::Black).bg(DIM).add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(DIM);
-    let active_key_style = Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD);
-    let active_label_style = Style::default().fg(Color::White);
+    let key_style = Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(Color::White);
 
     let y = area.y;
     let mut x = area.x;
 
     for &(key, desc) in &actions {
-        let (ks, ls) = if focus_params {
-            (key_style, label_style)
-        } else {
-            (active_key_style, active_label_style)
-        };
         if x > area.x {
             x += 1;
         }
         for ch in format!(" {key} ").chars() {
             if x >= area.right() { break; }
-            if let Some(c) = frame.buffer_mut().cell_mut((x, y)) { c.set_char(ch); c.set_style(ks); }
+            if let Some(c) = frame.buffer_mut().cell_mut((x, y)) { c.set_char(ch); c.set_style(key_style); }
             x += 1;
         }
         for ch in format!(" {desc}").chars() {
             if x >= area.right() { break; }
-            if let Some(c) = frame.buffer_mut().cell_mut((x, y)) { c.set_char(ch); c.set_style(ls); }
+            if let Some(c) = frame.buffer_mut().cell_mut((x, y)) { c.set_char(ch); c.set_style(label_style); }
             x += 1;
         }
     }
@@ -5942,11 +5969,18 @@ fn format_from_id(id: &str) -> String {
     }
 }
 
+/// Truncate `s` to at most `max` characters, appending an ellipsis when cut.
+/// Operates on `char`s (not bytes) so it never splits a multi-byte character —
+/// param names can contain non-ASCII glyphs (e.g. the MIDI-learn source row
+/// "MIDI (learning…)"), and byte-slicing those panics.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
+    } else if max == 0 {
+        String::new()
     } else {
-        format!("{}…", &s[..max - 1])
+        let kept: String = s.chars().take(max - 1).collect();
+        format!("{kept}…")
     }
 }
 
@@ -6049,4 +6083,49 @@ fn build_help_lines() -> Vec<String> {
         "  Drag       Adjust parameter bars".into(),
         "  Scroll     Navigate lists".into(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_is_char_boundary_safe() {
+        // The MIDI-learn "learning" source row: 26 bytes but only 24 chars, so
+        // the old byte-length check triggered truncation and `&s[..23]` sliced
+        // through the 3-byte ellipsis — a panic when the param pane rendered a
+        // still-learning modulator. It must not panic now.
+        let s = "Source: MIDI (learning…)";
+        assert_eq!(s.len(), 26);
+        assert_eq!(s.chars().count(), 24);
+        let out = truncate(s, 24); // name_width used by the param pane
+        assert_eq!(out, s); // fits in 24 chars → unchanged
+
+        // A genuinely-too-long multi-byte string truncates cleanly on a char
+        // boundary and gains an ellipsis.
+        let arrows = "→".repeat(30);
+        let out = truncate(&arrows, 10);
+        assert!(out.chars().count() <= 10);
+        assert!(out.ends_with('…'));
+        // Round-trips as valid UTF-8 (String is always valid, but assert the cut
+        // landed on a boundary by re-counting).
+        assert_eq!(out.chars().filter(|&c| c == '→').count(), 9);
+
+        // Degenerate width.
+        assert_eq!(truncate("abc", 0), "");
+    }
+
+    #[test]
+    fn param_action_bar_shows_learn() {
+        // Regression for "I can't see the 'l' at the bottom": the parameter pane
+        // action bar must advertise MIDI-learn on plugin params.
+        let inst = TreeAddress::Instrument(0);
+        let acts = action_bar_items(Some(&inst), true);
+        assert!(acts.iter().any(|(k, _)| *k == "l"), "learn missing: {acts:?}");
+        assert!(acts.iter().any(|(k, _)| *k == "m"), "modulate missing: {acts:?}");
+        // Chain focus keeps the chain actions (no bare 'l').
+        let chain = action_bar_items(Some(&inst), false);
+        assert!(chain.iter().any(|(k, _)| *k == "i"));
+        assert!(!chain.iter().any(|(k, _)| *k == "l"));
+    }
 }
