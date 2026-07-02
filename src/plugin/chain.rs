@@ -350,7 +350,16 @@ pub enum EnvState {
     Release,
 }
 
-/// Modulation source: either an LFO or an ADSR envelope.
+/// A learnable MIDI control source bound to a `MidiLearn` modulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidiBindSource {
+    /// Control Change number (0–127).
+    Cc(u8),
+    /// The pitch-bend wheel.
+    PitchBend,
+}
+
+/// Modulation source: an LFO, an ADSR envelope, or a learned MIDI control.
 #[derive(Debug, Clone)]
 pub enum ModSource {
     Lfo {
@@ -367,6 +376,14 @@ pub enum ModSource {
         level: f32,
         notes_held: u32,
     },
+    /// A MIDI-learned control: a CC or the pitch-bend wheel drives the target
+    /// parameter absolutely (0..1 across its range). `source` is None until a
+    /// control is captured; `learning` arms the next incoming CC/bend.
+    MidiLearn {
+        source: Option<MidiBindSource>,
+        value: f32,
+        learning: bool,
+    },
 }
 
 /// A block-rate modulator with a source (LFO or Envelope) and targets.
@@ -377,6 +394,9 @@ pub struct Modulator {
     pub targets: Vec<ModTarget>,
     /// Last computed output value (bipolar -1..1 for LFO, unipolar 0..1 for envelope).
     pub last_output: f32,
+    /// Set for one buffer when a `MidiLearn` source just captured a control, so
+    /// the graph can notify the main thread. Consumed (taken) by the graph.
+    pub last_learned: Option<MidiBindSource>,
 }
 
 impl Modulator {
@@ -386,6 +406,7 @@ impl Modulator {
             sample_rate,
             targets: Vec::new(),
             last_output: 0.0,
+            last_learned: None,
         }
     }
 
@@ -454,6 +475,30 @@ impl Modulator {
                 }
                 self.last_output = *level;
             }
+            ModSource::MidiLearn { source, value, learning } => {
+                for &(_frame, bytes) in midi_events {
+                    let status = bytes[0] & 0xF0;
+                    // Normalized 0..1 for a CC (7-bit) or pitch bend (14-bit).
+                    let (this_src, norm) = match status {
+                        0xB0 => (Some(MidiBindSource::Cc(bytes[1])), bytes[2] as f32 / 127.0),
+                        0xE0 => {
+                            let raw = ((bytes[2] as u16) << 7) | bytes[1] as u16;
+                            (Some(MidiBindSource::PitchBend), raw as f32 / 16383.0)
+                        }
+                        _ => (None, 0.0),
+                    };
+                    let Some(this_src) = this_src else { continue };
+                    if *learning {
+                        *source = Some(this_src);
+                        *learning = false;
+                        *value = norm;
+                        self.last_learned = Some(this_src);
+                    } else if *source == Some(this_src) {
+                        *value = norm;
+                    }
+                }
+                self.last_output = *value;
+            }
         }
     }
 
@@ -474,6 +519,14 @@ impl Modulator {
             }
             ModSource::Envelope { .. } => {
                 -(1.0 - self.last_output) * target.depth * (target.base_value - target.param_min)
+            }
+            ModSource::MidiLearn { .. } => {
+                // Absolute: map the control across the param range, blended
+                // toward the base by (1 - depth). At depth 1.0 the control sets
+                // the parameter directly across its full range.
+                let mapped =
+                    target.param_min + self.last_output * (target.param_max - target.param_min);
+                (mapped - target.base_value) * target.depth
             }
         }
     }
@@ -1517,6 +1570,22 @@ pub struct Pattern {
     pub length_samples: u64,
 }
 
+/// Which modulator rack a modulator lives in (for learn notifications).
+#[derive(Debug, Clone, Copy)]
+pub enum ModulatorLocation {
+    Lane(usize),
+    Group(usize),
+}
+
+/// Sent from the audio thread to the TUI when a `MidiLearn` modulator captures
+/// a control, so the TUI can display and persist the binding.
+#[derive(Debug, Clone, Copy)]
+pub struct MidiLearnedNotification {
+    pub location: ModulatorLocation,
+    pub mod_index: usize,
+    pub source: MidiBindSource,
+}
+
 /// Notification sent from audio thread to TUI when recording completes.
 pub struct PatternNotification {
     pub inst: usize,
@@ -2493,6 +2562,8 @@ pub struct AudioGraph {
     return_tx: Sender<Box<dyn Plugin>>,
     /// Notification channel for pattern recording completion.
     pattern_tx: Option<Sender<PatternNotification>>,
+    /// Notification channel for MIDI-learn captures.
+    learn_tx: Option<Sender<MidiLearnedNotification>>,
     /// Shared piano-tab state; read once per buffer for the current scale
     /// (lock-free atomics) so in-key pattern transposition follows the
     /// scale picker live. None = default scale (C Major).
@@ -2522,6 +2593,7 @@ impl AudioGraph {
             command_rx,
             return_tx,
             pattern_tx: None,
+            learn_tx: None,
             piano_filter: None,
             group_midi_scratch: Vec::with_capacity(128),
             group_mod_writes: Vec::with_capacity(64),
@@ -2548,6 +2620,31 @@ impl AudioGraph {
     /// Set the shared piano-tab state used for in-key pattern transposition.
     pub fn set_piano_filter(&mut self, filter: Arc<PianoFilter>) {
         self.piano_filter = Some(filter);
+    }
+
+    /// Set the notification channel for MIDI-learn captures.
+    pub fn set_learn_tx(&mut self, tx: Sender<MidiLearnedNotification>) {
+        self.learn_tx = Some(tx);
+    }
+
+    /// Scan a modulator list for a just-captured MIDI-learn control and notify
+    /// the main thread, tagging each with its rack location. Takes the sender
+    /// explicitly so it doesn't borrow all of `self`.
+    fn drain_learned(
+        tx: Option<&Sender<MidiLearnedNotification>>,
+        modulators: &mut [Modulator],
+        loc_of: impl Fn(usize) -> ModulatorLocation,
+    ) {
+        let Some(tx) = tx else { return };
+        for (i, m) in modulators.iter_mut().enumerate() {
+            if let Some(source) = m.last_learned.take() {
+                let _ = tx.try_send(MidiLearnedNotification {
+                    location: loc_of(i),
+                    mod_index: i,
+                    source,
+                });
+            }
+        }
     }
 
     /// Set the notification channel for pattern recording completion.
@@ -3378,6 +3475,11 @@ impl AudioGraph {
                     m.tick(frames, &self.group_midi_scratch);
                 }
                 apply_cross_mod(&mut self.groups[gi].modulators);
+                Self::drain_learned(
+                    self.learn_tx.as_ref(),
+                    &mut self.groups[gi].modulators,
+                    |_| ModulatorLocation::Group(gi),
+                );
             }
             // Group→member-modulator cross-mod: written first so member lanes
             // pick up the modulated LFO/envelope fields when they tick below.
@@ -3397,13 +3499,19 @@ impl AudioGraph {
 
         // Process each instrument; route its output to its group's bus (if a
         // member) or straight to the master mix.
-        for inst in self.instruments.iter_mut() {
+        for (inst_idx, inst) in self.instruments.iter_mut().enumerate() {
             // Zero lane_buf
             for buf in self.lane_buf.iter_mut() {
                 buf.fill(0.0);
             }
 
             inst.process(midi_events, &mut self.lane_buf, self.num_channels, scale)?;
+            // A lane MidiLearn modulator may have just captured a control.
+            Self::drain_learned(
+                self.learn_tx.as_ref(),
+                &mut inst.modulators,
+                |_| ModulatorLocation::Lane(inst_idx),
+            );
 
             let dest = match inst.group {
                 Some(g) if g < self.groups.len() => &mut self.groups[g].accum,
@@ -4684,6 +4792,7 @@ mod tests {
                 param_max: 1.0,
             }],
             last_output: 0.0,
+            last_learned: None,
         };
         let members = |mods: &[Modulator]| -> Vec<Option<usize>> {
             mods.iter()
@@ -4715,6 +4824,7 @@ mod tests {
                 param_max: 50.0,
             }],
             last_output: 0.0,
+            last_learned: None,
         };
         let mm_members = |mods: &[Modulator]| -> Vec<Option<usize>> {
             mods.iter()
@@ -4741,6 +4851,7 @@ mod tests {
                 param_max: 50.0,
             }],
             last_output: 0.0,
+            last_learned: None,
         };
         let mm_idx = |mods: &[Modulator]| -> Vec<Option<usize>> {
             mods.iter()
@@ -4807,6 +4918,66 @@ mod tests {
             ),
             _ => panic!("member modulator should be an LFO"),
         }
+    }
+
+    /// A MidiLearn modulator, once armed, captures the next CC, notifies the
+    /// main thread, and then drives its target parameter absolutely.
+    #[test]
+    fn midi_learn_binds_cc_and_drives_param() {
+        let (mut graph, cmd_tx, _rr) = make_graph(2);
+        let (learn_tx, learn_rx) = crossbeam_channel::bounded(8);
+        graph.set_learn_tx(learn_tx);
+
+        let inst: Box<dyn Plugin> = Box::new(ParamTrackingInstrument { param_value: 0.5 });
+        let inst_buf = (0..inst.audio_output_count()).map(|_| Vec::new()).collect();
+        cmd_tx
+            .send(GraphCommand::SwapInstrument { inst: 0, instrument: inst, inst_buf, remapper: None })
+            .unwrap();
+
+        // Armed MidiLearn modulator targeting cutoff (param 0), full-range.
+        cmd_tx
+            .send(GraphCommand::InsertModulator {
+                inst: 0,
+                index: 0,
+                source: ModSource::MidiLearn { source: None, value: 0.0, learning: true },
+            })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::AddModTarget {
+                inst: 0,
+                mod_index: 0,
+                target: ModTarget {
+                    kind: ModTargetKind::PluginParam { slot: 0, param_index: 0 },
+                    depth: 1.0,
+                    base_value: 0.5,
+                    param_min: 0.0,
+                    param_max: 1.0,
+                },
+            })
+            .unwrap();
+
+        // CC 74 at max → learns CC 74 and sets cutoff to its max (1.0).
+        let cc = |v: u8| (0u64, [0xB0, 74, v]);
+        let mut out = make_output();
+        graph.process(&[cc(127)], &mut out).unwrap();
+
+        let notif = learn_rx.try_recv().expect("learn notification");
+        assert!(matches!(notif.source, MidiBindSource::Cc(74)));
+        assert!(matches!(notif.location, ModulatorLocation::Lane(0)));
+        assert!(
+            out[0].iter().all(|&s| (s - 1.0).abs() < 1e-6),
+            "CC max should drive cutoff to 1.0, got {}",
+            out[0][0]
+        );
+
+        // A later CC 74 = 0 drives it to the minimum (0.0).
+        let mut out = make_output();
+        graph.process(&[cc(0)], &mut out).unwrap();
+        assert!(
+            out[0].iter().all(|&s| s.abs() < 1e-6),
+            "CC 0 should drive cutoff to 0, got {}",
+            out[0][0]
+        );
     }
 
     #[test]

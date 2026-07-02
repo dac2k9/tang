@@ -412,6 +412,31 @@ fn build_mod_source(
             };
             (source, loaded_source, "ADSR envelope".to_string())
         }
+        "midi" => {
+            let bind = if let Some(cc) = mod_config.midi_cc {
+                Some(plugin::chain::MidiBindSource::Cc(cc))
+            } else if mod_config.midi_pitch_bend {
+                Some(plugin::chain::MidiBindSource::PitchBend)
+            } else {
+                None
+            };
+            let source = plugin::chain::ModSource::MidiLearn {
+                source: bind,
+                value: 0.0,
+                // Unbound on load ⇒ re-arm so the next control binds.
+                learning: bind.is_none(),
+            };
+            let loaded_source = tui::LoadedModSource::MidiLearn {
+                source: bind,
+                learning: bind.is_none(),
+            };
+            let desc = match bind {
+                Some(plugin::chain::MidiBindSource::Cc(n)) => format!("MIDI CC {n}"),
+                Some(plugin::chain::MidiBindSource::PitchBend) => "MIDI pitch bend".to_string(),
+                None => "MIDI (learning)".to_string(),
+            };
+            (source, loaded_source, desc)
+        }
         _ => {
             // Default: LFO.
             let waveform = plugin::chain::LfoWaveform::from_str(&mod_config.waveform)
@@ -754,6 +779,10 @@ fn run_session(
     // Pattern recording completion channel
     let (pattern_tx, pattern_rx) = crossbeam_channel::bounded::<plugin::chain::PatternNotification>(64);
     graph.set_pattern_tx(pattern_tx.clone());
+    // MIDI-learn captures flow back to the TUI on this channel.
+    let (learn_tx, learn_rx) =
+        crossbeam_channel::bounded::<plugin::chain::MidiLearnedNotification>(64);
+    graph.set_learn_tx(learn_tx);
     // Give the audio thread the live piano scale for in-key pattern transposition.
     graph.set_piano_filter(piano_filter.clone());
 
@@ -1232,7 +1261,7 @@ fn run_session(
     // --- Branch: TUI view vs plain play mode ---
     if use_tui {
         let session_path = Some(std::path::PathBuf::from(source));
-        tui::run(loaded_instruments, loaded_groups, cmd_tx, midi_tx, runtime, sample_rate_f, max_block_size, session_path, pattern_rx, held.clone(), piano_filter.clone())?;
+        tui::run(loaded_instruments, loaded_groups, cmd_tx, midi_tx, runtime, sample_rate_f, max_block_size, session_path, pattern_rx, learn_rx, held.clone(), piano_filter.clone())?;
     } else {
         // --- Plain play mode (original) ---
 

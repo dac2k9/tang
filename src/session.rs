@@ -86,6 +86,13 @@ pub struct ModulatorConfig {
     pub sustain: f64,
     #[serde(default = "default_release")]
     pub release: f64,
+    /// For `type = "midi"`: the bound CC number (mutually exclusive with
+    /// `midi_pitch_bend`). Absent = unbound (armed for learning on load).
+    #[serde(default)]
+    pub midi_cc: Option<u8>,
+    /// For `type = "midi"`: bound to the pitch-bend wheel.
+    #[serde(default)]
+    pub midi_pitch_bend: bool,
     #[serde(default, rename = "target")]
     pub targets: Vec<ModTargetConfig>,
 }
@@ -579,6 +586,9 @@ pub struct SavePattern {
 pub enum SaveModSource {
     Lfo { waveform: String, rate: f32 },
     Envelope { attack: f32, decay: f32, sustain: f32, release: f32 },
+    /// A MIDI-learned control. `cc = Some(n)` = CC n, `None` with
+    /// `pitch_bend = true` = pitch bend, `None`/false = unbound (still learning).
+    MidiLearn { cc: Option<u8>, pitch_bend: bool },
 }
 
 pub struct SaveModulator {
@@ -726,6 +736,10 @@ struct ModulatorOut {
     sustain: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     release: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    midi_cc: Option<u8>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    midi_pitch_bend: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", rename = "target")]
     targets: Vec<ModTargetOut>,
 }
@@ -890,6 +904,8 @@ fn mods_to_out(mods: &[SaveModulator]) -> Vec<ModulatorOut> {
                     decay: None,
                     sustain: None,
                     release: None,
+                    midi_cc: None,
+                    midi_pitch_bend: false,
                     targets,
                 },
                 SaveModSource::Envelope { attack, decay, sustain, release } => ModulatorOut {
@@ -900,6 +916,20 @@ fn mods_to_out(mods: &[SaveModulator]) -> Vec<ModulatorOut> {
                     decay: Some(*decay as f64),
                     sustain: Some(*sustain as f64),
                     release: Some(*release as f64),
+                    midi_cc: None,
+                    midi_pitch_bend: false,
+                    targets,
+                },
+                SaveModSource::MidiLearn { cc, pitch_bend } => ModulatorOut {
+                    mod_type: "midi".into(),
+                    waveform: None,
+                    rate: None,
+                    attack: None,
+                    decay: None,
+                    sustain: None,
+                    release: None,
+                    midi_cc: *cc,
+                    midi_pitch_bend: *pitch_bend,
                     targets,
                 },
             }
@@ -1283,6 +1313,53 @@ range = "C4-C8"
         assert!((m.targets[0].depth - 0.75).abs() < 0.01);
         // Slot defaults to instrument (0).
         assert_eq!(m.targets[0].slot, 0);
+    }
+
+    #[test]
+    fn save_and_reload_midi_learn_modulator() {
+        // A MIDI-learned modulator (bound to CC 74) must round-trip as
+        // `type = "midi"` + `midi_cc = 74`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("midi_learn.toml");
+
+        let instruments = vec![SaveInstrumentSlot {
+            range: None,
+            transpose: 0,
+            group: None,
+            modulators: vec![SaveModulator {
+                source: SaveModSource::MidiLearn { cc: Some(74), pitch_bend: false },
+                targets: vec![SaveModTarget {
+                    kind: crate::plugin::chain::ModTargetKind::PluginParam { slot: 0, param_index: 0 },
+                    label: "cutoff".into(),
+                    depth: 1.0,
+                    slot: 0,
+                }],
+            }],
+            instrument: Some(SaveInstrument {
+                plugin: "builtin:filter".into(),
+                volume: 1.0,
+                preset: None,
+                params: vec![],
+                pitch_bend_range: 2.0,
+                remap: HashMap::new(),
+            }),
+            effects: vec![],
+            pattern: None,
+        }];
+
+        save(&path, &instruments, &[], None).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("type = \"midi\""), "expected midi modulator:\n{raw}");
+        assert!(raw.contains("midi_cc = 74"), "expected bound CC:\n{raw}");
+
+        let config = load(path.to_str().unwrap()).unwrap();
+        let inst = config.instruments[0].instrument.as_ref().unwrap();
+        assert_eq!(inst.modulators.len(), 1);
+        let m = &inst.modulators[0];
+        assert_eq!(m.mod_type, "midi");
+        assert_eq!(m.midi_cc, Some(74));
+        assert!(!m.midi_pitch_bend);
+        assert_eq!(m.targets[0].param.as_deref(), Some("cutoff"));
     }
 
     #[test]

@@ -152,6 +152,29 @@ enum ModSourceSlot {
         sustain: f32,
         release: f32,
     },
+    /// A MIDI-learned control (CC or pitch bend). `source` is None while
+    /// `learning` (armed for the next incoming control).
+    MidiLearn {
+        source: Option<crate::plugin::chain::MidiBindSource>,
+        learning: bool,
+    },
+}
+
+impl ModSourceSlot {
+    /// A short label for the source (used in the tree and param pane).
+    fn label(&self) -> String {
+        use crate::plugin::chain::MidiBindSource;
+        match self {
+            ModSourceSlot::Lfo { waveform, rate } => format!("LFO {:.1}Hz {}", rate, waveform.name()),
+            ModSourceSlot::Envelope { .. } => "ADSR".to_string(),
+            ModSourceSlot::MidiLearn { source, learning } => match source {
+                Some(MidiBindSource::Cc(n)) => format!("CC {n}"),
+                Some(MidiBindSource::PitchBend) => "Pitch Bend".to_string(),
+                None if *learning => "MIDI (learning…)".to_string(),
+                None => "MIDI (unbound)".to_string(),
+            },
+        }
+    }
 }
 
 struct ModulatorSlot {
@@ -502,6 +525,8 @@ struct State {
     gain_editing: Option<GainEditState>,
     save_as: Option<SaveAsState>,
     pattern_rx: crossbeam_channel::Receiver<crate::plugin::chain::PatternNotification>,
+    /// Receives MIDI-learn captures from the audio thread.
+    learn_rx: crossbeam_channel::Receiver<crate::plugin::chain::MidiLearnedNotification>,
     // Piano tab state.
     held: Arc<HeldNotes>,
     piano_filter: Arc<PianoFilter>,
@@ -965,6 +990,9 @@ impl State {
                     push(&mut entries, &mut items, format!("{prefix}release"),
                         crate::plugin::chain::ModTargetKind::ModulatorRelease { mod_index: sib_idx }, 0.001, 10.0, *release);
                 }
+                // MidiLearn has no editable source params — only its target
+                // depths (added below) can be cross-modded.
+                ModSourceSlot::MidiLearn { .. } => {}
             }
             for (tgt_idx, tgt) in sib.targets.iter().enumerate() {
                 push(&mut entries, &mut items, format!("{prefix}{} depth", tgt.param_name),
@@ -1072,10 +1100,7 @@ impl State {
         ];
         if let Some(node) = self.instruments.get(inst) {
             for (i, m) in node.modulators.iter().enumerate() {
-                let label = match &m.source {
-                    ModSourceSlot::Lfo { waveform, rate } => format!("LFO {:.1}Hz {}", rate, waveform.name()),
-                    ModSourceSlot::Envelope { .. } => "ADSR".to_string(),
-                };
+                let label = m.source.label();
                 let idx = choices.len();
                 choices.push(ModulateChoice::Existing(i));
                 items.push(FilterListItem { cells: vec![format!("attach → {label}")], index: idx });
@@ -1274,6 +1299,7 @@ impl State {
                         push_mm("sustain", CrossModField::Sustain, 0.0, 1.0, *sustain);
                         push_mm("release", CrossModField::Release, 0.001, 10.0, *release);
                     }
+                    ModSourceSlot::MidiLearn { .. } => {} // only its target depths below
                 }
                 for (ti, t) in mm.targets.iter().enumerate() {
                     push_mm(&format!("{} depth", t.param_name), CrossModField::Depth(ti), 0.0, 1.0, t.depth);
@@ -1329,6 +1355,7 @@ impl State {
                     push(&mut entries, &mut items, format!("{prefix}release"),
                         ModTargetKind::ModulatorRelease { mod_index: sib_idx }, 0.001, 10.0, *release);
                 }
+                ModSourceSlot::MidiLearn { .. } => {} // only its target depths below
             }
             for (tgt_idx, tgt) in sib.targets.iter().enumerate() {
                 push(&mut entries, &mut items, format!("{prefix}{} depth", tgt.param_name),
@@ -1377,10 +1404,7 @@ impl State {
         ];
         if let Some(node) = self.groups.get(group) {
             for (i, m) in node.modulators.iter().enumerate() {
-                let label = match &m.source {
-                    ModSourceSlot::Lfo { waveform, rate } => format!("LFO {:.1}Hz {}", rate, waveform.name()),
-                    ModSourceSlot::Envelope { .. } => "ADSR".to_string(),
-                };
+                let label = m.source.label();
                 let idx = choices.len();
                 choices.push(ModulateChoice::Existing(i));
                 items.push(FilterListItem { cells: vec![format!("attach → {label}")], index: idx });
@@ -1404,6 +1428,125 @@ impl State {
             filter,
             items,
         });
+    }
+
+    /// MIDI-learn: create an armed `MidiLearn` modulator bound to the parameter
+    /// currently selected in the param pane. Works for plugin params
+    /// (instrument / effect / group-bus effect) and modulator fields (binding a
+    /// control to an LFO's rate, an envelope stage, or a target depth). The
+    /// audio thread captures the next CC / pitch-bend and notifies back.
+    fn learn_selected_param(&mut self) {
+        use crate::plugin::chain::{ModSource, ModTarget, ModTargetKind};
+        let sel = self.chain_state.selected;
+        if sel >= self.tree_entries.len() {
+            return;
+        }
+        let addr = self.tree_entries[sel].address;
+
+        // (scope, target kind, min, max, base value, label)
+        let (scope, kind, min, max, base, label): (ModScope, ModTargetKind, f32, f32, f32, String) =
+            match addr {
+                TreeAddress::Instrument(inst) | TreeAddress::Effect { inst, .. } => {
+                    let pa = match self.real_param_index() {
+                        Some(i) => i,
+                        None => return,
+                    };
+                    let Some(p) = self.plugin_at(&addr).and_then(|p| p.params.get(pa)) else {
+                        return;
+                    };
+                    (
+                        ModScope::Lane(inst),
+                        ModTargetKind::PluginParam { slot: addr.slot(), param_index: p.index },
+                        p.min, p.max, p.value, p.name.clone(),
+                    )
+                }
+                TreeAddress::GroupEffect { group, index } => {
+                    let pa = match self.real_param_index() {
+                        Some(i) => i,
+                        None => return,
+                    };
+                    let Some(p) = self.plugin_at(&addr).and_then(|p| p.params.get(pa)) else {
+                        return;
+                    };
+                    (
+                        ModScope::Group(group),
+                        ModTargetKind::GroupBus { effect_index: index, param_index: p.index },
+                        p.min, p.max, p.value, p.name.clone(),
+                    )
+                }
+                TreeAddress::Modulator { inst, index } => {
+                    let Some(m) = self.modulator(inst, index) else { return };
+                    let Some((kind, min, max, base, label)) =
+                        modulator_row_to_cross_mod(m, index, self.param_state.selected)
+                    else {
+                        return;
+                    };
+                    (ModScope::Lane(inst), kind, min, max, base, label)
+                }
+                TreeAddress::GroupModulator { group, index } => {
+                    let Some(m) = self.group_modulator(group, index) else { return };
+                    let Some((kind, min, max, base, label)) =
+                        modulator_row_to_cross_mod(m, index, self.param_state.selected)
+                    else {
+                        return;
+                    };
+                    (ModScope::Group(group), kind, min, max, base, label)
+                }
+                _ => return,
+            };
+
+        // Create an armed MidiLearn modulator in the right rack.
+        let mod_index = match self.scoped_modulators_mut(scope) {
+            Some(ms) => ms.len(),
+            None => return,
+        };
+        match scope {
+            ModScope::Lane(inst) => {
+                let _ = self.cmd_tx.send(GraphCommand::InsertModulator {
+                    inst,
+                    index: mod_index,
+                    source: ModSource::MidiLearn { source: None, value: 0.0, learning: true },
+                });
+            }
+            ModScope::Group(group) => {
+                let _ = self.cmd_tx.send(GraphCommand::InsertGroupModulator {
+                    group,
+                    index: mod_index,
+                    source: ModSource::MidiLearn { source: None, value: 0.0, learning: true },
+                });
+            }
+        }
+        if let Some(ms) = self.scoped_modulators_mut(scope) {
+            ms.push(ModulatorSlot {
+                source: ModSourceSlot::MidiLearn { source: None, learning: true },
+                targets: vec![],
+            });
+        }
+
+        // Bind the target (depth 1.0 = full-range absolute control).
+        let target = ModTarget { kind: kind.clone(), depth: 1.0, base_value: base, param_min: min, param_max: max };
+        match scope {
+            ModScope::Lane(inst) => {
+                let _ = self.cmd_tx.send(GraphCommand::AddModTarget { inst, mod_index, target });
+            }
+            ModScope::Group(group) => {
+                let _ = self.cmd_tx.send(GraphCommand::AddGroupModTarget { group, mod_index, target });
+            }
+        }
+        if let Some(ms) = self.scoped_modulators_mut(scope) {
+            if let Some(m) = ms.get_mut(mod_index) {
+                m.targets.push(ModTargetSlot {
+                    slot: addr.slot(),
+                    param_name: label,
+                    kind,
+                    depth: 1.0,
+                    param_min: min,
+                    param_max: max,
+                });
+            }
+        }
+        self.dirty = true;
+        self.rebuild_tree();
     }
 
     /// Open the "assign to group" popup for instrument `inst`.
@@ -1806,13 +1949,15 @@ impl State {
             Some(m) => m,
             None => return,
         };
-        if pa == 0 {
-            // Type (enum) — switch between LFO and Envelope.
+        // Type row (0) switches LFO/Envelope — but MidiLearn's row 0 is a
+        // read-only source-info row, so it doesn't switch.
+        let is_midi = matches!(m.source, ModSourceSlot::MidiLearn { .. });
+        if pa == 0 && !is_midi {
             let new_source = match &m.source {
                 ModSourceSlot::Lfo { .. } => ModSourceSlot::Envelope {
                     attack: 0.01, decay: 0.3, sustain: 0.7, release: 0.5,
                 },
-                ModSourceSlot::Envelope { .. } => ModSourceSlot::Lfo {
+                _ => ModSourceSlot::Lfo {
                     waveform: crate::plugin::chain::LfoWaveform::Sine,
                     rate: 1.0,
                 },
@@ -1889,6 +2034,19 @@ impl State {
                             inst, mod_index,
                             attack: *attack, decay: *decay, sustain: *sustain, release: *release,
                         });
+                    }
+                }
+                ModSourceSlot::MidiLearn { .. } => {
+                    // Rows: 0 = source info, 1 = Targets separator, 2+ = depths.
+                    if pa >= 2 {
+                        if let Some(t) = m.targets.get_mut(pa - 2) {
+                            t.depth = (t.depth + delta).clamp(0.0, 1.0);
+                            let _ = self.cmd_tx.send(GraphCommand::SetModTargetDepth {
+                                inst, mod_index,
+                                target_index: pa - 2,
+                                depth: t.depth,
+                            });
+                        }
                     }
                 }
             }
@@ -2048,6 +2206,21 @@ impl State {
                     attack: *attack, decay: *decay, sustain: *sustain, release: *release,
                 });
             }
+            ModSourceSlot::MidiLearn { .. } => {
+                // Rows: 0 = source info, 1 = Targets separator, 2+ = depths.
+                if pa >= 2 {
+                    if let Some(t) = m.targets.get_mut(pa - 2) {
+                        t.depth = value.clamp(0.0, 1.0);
+                        let _ = self.cmd_tx.send(GraphCommand::SetModTargetDepth {
+                            inst, mod_index,
+                            target_index: pa - 2,
+                            depth: t.depth,
+                        });
+                    }
+                } else {
+                    return; // source info / separator — not settable
+                }
+            }
         }
         self.dirty = true;
     }
@@ -2059,13 +2232,14 @@ impl State {
             Some(m) => m,
             None => return,
         };
-        if pa == 0 {
+        let is_midi = matches!(m.source, ModSourceSlot::MidiLearn { .. });
+        if pa == 0 && !is_midi {
             // Type (enum) — switch between LFO and Envelope.
             let new_source = match &m.source {
                 ModSourceSlot::Lfo { .. } => ModSourceSlot::Envelope {
                     attack: 0.01, decay: 0.3, sustain: 0.7, release: 0.5,
                 },
-                ModSourceSlot::Envelope { .. } => ModSourceSlot::Lfo {
+                _ => ModSourceSlot::Lfo {
                     waveform: crate::plugin::chain::LfoWaveform::Sine,
                     rate: 1.0,
                 },
@@ -2132,6 +2306,19 @@ impl State {
                         });
                     }
                 }
+                ModSourceSlot::MidiLearn { .. } => {
+                    // Rows: 0 = source info, 1 = Targets separator, 2+ = depths.
+                    if pa >= 2 {
+                        if let Some(t) = m.targets.get_mut(pa - 2) {
+                            t.depth = (t.depth + delta).clamp(0.0, 1.0);
+                            let _ = self.cmd_tx.send(GraphCommand::SetGroupModTargetDepth {
+                                group, mod_index,
+                                target_index: pa - 2,
+                                depth: t.depth,
+                            });
+                        }
+                    }
+                }
             }
         }
         self.dirty = true;
@@ -2193,6 +2380,21 @@ impl State {
                     attack: *attack, decay: *decay, sustain: *sustain, release: *release,
                 });
             }
+            ModSourceSlot::MidiLearn { .. } => {
+                // Rows: 0 = source info, 1 = Targets separator, 2+ = depths.
+                if pa >= 2 {
+                    if let Some(t) = m.targets.get_mut(pa - 2) {
+                        t.depth = value.clamp(0.0, 1.0);
+                        let _ = self.cmd_tx.send(GraphCommand::SetGroupModTargetDepth {
+                            group, mod_index,
+                            target_index: pa - 2,
+                            depth: t.depth,
+                        });
+                    }
+                } else {
+                    return;
+                }
+            }
         }
         self.dirty = true;
     }
@@ -2238,6 +2440,16 @@ impl State {
                                 decay: *decay,
                                 sustain: *sustain,
                                 release: *release,
+                            }
+                        }
+                        ModSourceSlot::MidiLearn { source, .. } => {
+                            use crate::plugin::chain::MidiBindSource;
+                            crate::session::SaveModSource::MidiLearn {
+                                cc: match source {
+                                    Some(MidiBindSource::Cc(n)) => Some(*n),
+                                    _ => None,
+                                },
+                                pitch_bend: matches!(source, Some(MidiBindSource::PitchBend)),
                             }
                         }
                     };
@@ -2380,6 +2592,10 @@ pub enum LoadedModSource {
         sustain: f32,
         release: f32,
     },
+    MidiLearn {
+        source: Option<crate::plugin::chain::MidiBindSource>,
+        learning: bool,
+    },
 }
 
 pub struct LoadedModulator {
@@ -2428,6 +2644,7 @@ pub fn run(
     max_block_size: usize,
     session_path: Option<PathBuf>,
     pattern_rx: crossbeam_channel::Receiver<crate::plugin::chain::PatternNotification>,
+    learn_rx: crossbeam_channel::Receiver<crate::plugin::chain::MidiLearnedNotification>,
     held: Arc<HeldNotes>,
     piano_filter: Arc<PianoFilter>,
 ) -> anyhow::Result<()> {
@@ -2598,6 +2815,7 @@ pub fn run(
         gain_editing: None,
         save_as: None,
         pattern_rx,
+        learn_rx,
         held,
         piano_filter,
         piano_view_octave: 4,
@@ -2675,6 +2893,26 @@ fn event_loop(
                 });
                 s.rebuild_tree();
             }
+        }
+
+        // Drain MIDI-learn captures: fill in the bound control on the model.
+        while let Ok(notif) = s.learn_rx.try_recv() {
+            use crate::plugin::chain::ModulatorLocation;
+            let scope = match notif.location {
+                ModulatorLocation::Lane(inst) => ModScope::Lane(inst),
+                ModulatorLocation::Group(g) => ModScope::Group(g),
+            };
+            if let Some(m) = s
+                .scoped_modulators_mut(scope)
+                .and_then(|ms| ms.get_mut(notif.mod_index))
+            {
+                if let ModSourceSlot::MidiLearn { source, learning } = &mut m.source {
+                    *source = Some(notif.source);
+                    *learning = false;
+                }
+            }
+            s.dirty = true;
+            s.rebuild_tree();
         }
 
         render(terminal, s)?;
@@ -3315,6 +3553,12 @@ fn handle_key(s: &mut State, code: KeyCode, modifiers: KeyModifiers) {
                 }
                 _ => {}
             }
+        }
+
+        // 'l' (param focus) — MIDI learn: bind the next CC / pitch-bend to the
+        // selected parameter (plugin param or modulator field).
+        KeyCode::Char('l') if s.active_tab == 0 && s.focus_params => {
+            s.learn_selected_param();
         }
 
         // 'm' (chain focus) — add an empty LFO modulator to the instrument's
@@ -4342,12 +4586,26 @@ fn render_session(
                                 });
                                 (name, 1)
                             }
+                            ModSourceSlot::MidiLearn { .. } => {
+                                // A single read-only info row showing the binding.
+                                mod_params.push(ParamSlot {
+                                    name: format!("Source: {}", m.source.label()),
+                                    index: 0,
+                                    min: 0.0,
+                                    max: 0.0,
+                                    default: 0.0,
+                                    value: 0.0,
+                                    kind: ParamKind::Separator,
+                                });
+                                ("MIDI".to_string(), 2)
+                            }
                         };
                         let _ = type_idx;
                         // Separator before target depths.
                         let depth_offset = match &m.source {
                             ModSourceSlot::Lfo { .. } => 4,  // 3 source params + 1 separator
                             ModSourceSlot::Envelope { .. } => 6,  // 5 source params + 1 separator
+                            ModSourceSlot::MidiLearn { .. } => 2, // 1 source-info row + 1 separator
                         };
                         mod_params.push(ParamSlot {
                             name: "Targets".to_string(),
@@ -5216,6 +5474,11 @@ fn mod_source_slot_to_graph(slot: &ModSourceSlot) -> crate::plugin::chain::ModSo
             level: 0.0,
             notes_held: 0,
         },
+        ModSourceSlot::MidiLearn { source, learning } => crate::plugin::chain::ModSource::MidiLearn {
+            source: *source,
+            value: 0.0,
+            learning: *learning,
+        },
     }
 }
 
@@ -5252,8 +5515,9 @@ fn to_plugin_slot(lp: LoadedPlugin) -> PluginSlot {
 /// separator + one row per target. Scope-independent (lane or group).
 fn modulator_param_len(m: &ModulatorSlot) -> usize {
     let fixed = match &m.source {
-        ModSourceSlot::Lfo { .. } => 3,     // Type + Waveform + Rate
+        ModSourceSlot::Lfo { .. } => 3,      // Type + Waveform + Rate
         ModSourceSlot::Envelope { .. } => 5, // Type + A + D + S + R
+        ModSourceSlot::MidiLearn { .. } => 1, // Source-info row only
     };
     fixed + 1 + m.targets.len()
 }
@@ -5279,6 +5543,11 @@ fn modulator_param_range(m: &ModulatorSlot, pa: usize) -> Option<(f32, f32)> {
             5 => None, // Separator
             _ => m.targets.get(pa - 6).map(|_| (0.0f32, 1.0f32)),
         },
+        // Row 0 = source info (handled above), 1 = Targets separator, 2+ = depths.
+        ModSourceSlot::MidiLearn { .. } => match pa {
+            1 => None,
+            _ => m.targets.get(pa - 2).map(|_| (0.0f32, 1.0f32)),
+        },
     }
 }
 
@@ -5287,6 +5556,7 @@ fn modulator_param_is_enum(m: &ModulatorSlot, pa: usize) -> bool {
     match &m.source {
         ModSourceSlot::Lfo { .. } => pa == 0 || pa == 1, // Type, Waveform
         ModSourceSlot::Envelope { .. } => pa == 0,       // Type
+        ModSourceSlot::MidiLearn { .. } => false,        // source row is read-only info
     }
 }
 
@@ -5331,6 +5601,51 @@ fn modulator_edit_state(m: &ModulatorSlot, pa: usize) -> Option<EditState> {
                 param_max: max,
             })
         }
+        // Row 0 = source info (handled above), 1 = Targets separator, 2+ = depths.
+        ModSourceSlot::MidiLearn { .. } => match pa {
+            1 => None,
+            _ => m.targets.get(pa - 2).map(|t| EditState {
+                input: TextInputState::new(&format!("{:.2}", t.depth)),
+                param_name: format!("{} depth", t.param_name),
+                param_min: 0.0,
+                param_max: 1.0,
+            }),
+        },
+    }
+}
+
+/// Map a modulator's param-pane row `pa` to a cross-mod target on that
+/// modulator (index `mod_index`): its rate/ADSR field or one of its target
+/// depths. Returns `(kind, min, max, base, label)`, or None for enum/separator
+/// rows. Used by MIDI-learn to bind a control to a modulator's own parameter.
+fn modulator_row_to_cross_mod(
+    m: &ModulatorSlot,
+    mod_index: usize,
+    pa: usize,
+) -> Option<(crate::plugin::chain::ModTargetKind, f32, f32, f32, String)> {
+    use crate::plugin::chain::ModTargetKind as K;
+    let depth_at = |off: usize| {
+        let ti = pa - off;
+        m.targets
+            .get(ti)
+            .map(|t| (K::ModulatorDepth { mod_index, target_index: ti }, 0.0f32, 1.0f32, t.depth, format!("Mod {mod_index} depth {ti}")))
+    };
+    match &m.source {
+        ModSourceSlot::Lfo { rate, .. } => match pa {
+            2 => Some((K::ModulatorRate { mod_index }, 0.01, 50.0, *rate, format!("Mod {mod_index} rate"))),
+            _ if pa >= 4 => depth_at(4),
+            _ => None,
+        },
+        ModSourceSlot::Envelope { attack, decay, sustain, release } => match pa {
+            1 => Some((K::ModulatorAttack { mod_index }, 0.001, 10.0, *attack, format!("Mod {mod_index} attack"))),
+            2 => Some((K::ModulatorDecay { mod_index }, 0.001, 10.0, *decay, format!("Mod {mod_index} decay"))),
+            3 => Some((K::ModulatorSustain { mod_index }, 0.0, 1.0, *sustain, format!("Mod {mod_index} sustain"))),
+            4 => Some((K::ModulatorRelease { mod_index }, 0.001, 10.0, *release, format!("Mod {mod_index} release"))),
+            _ if pa >= 6 => depth_at(6),
+            _ => None,
+        },
+        ModSourceSlot::MidiLearn { .. } if pa >= 2 => depth_at(2),
+        ModSourceSlot::MidiLearn { .. } => None,
     }
 }
 
@@ -5339,6 +5654,9 @@ fn to_modulator_slot(lm: LoadedModulator) -> ModulatorSlot {
         LoadedModSource::Lfo { waveform, rate } => ModSourceSlot::Lfo { waveform, rate },
         LoadedModSource::Envelope { attack, decay, sustain, release } => {
             ModSourceSlot::Envelope { attack, decay, sustain, release }
+        }
+        LoadedModSource::MidiLearn { source, learning } => {
+            ModSourceSlot::MidiLearn { source, learning }
         }
     };
     ModulatorSlot {
@@ -5477,10 +5795,7 @@ fn push_instrument_entries(
         }
     };
     for (mod_idx, m) in inst.modulators.iter().enumerate() {
-        let source_label = match &m.source {
-            ModSourceSlot::Lfo { waveform, rate } => format!("LFO {:.1}Hz {}", rate, waveform.name()),
-            ModSourceSlot::Envelope { .. } => "ADSR".to_string(),
-        };
+        let source_label = m.source.label();
         let targets = if m.targets.is_empty() {
             String::new()
         } else {
@@ -5575,10 +5890,7 @@ fn build_tree_entries(instruments: &[InstrumentNode], groups: &[GroupNode]) -> V
                 }
             };
             for (mod_idx, m) in group.modulators.iter().enumerate() {
-                let source_label = match &m.source {
-                    ModSourceSlot::Lfo { waveform, rate } => format!("LFO {:.1}Hz {}", rate, waveform.name()),
-                    ModSourceSlot::Envelope { .. } => "ADSR".to_string(),
-                };
+                let source_label = m.source.label();
                 let targets = if m.targets.is_empty() {
                     String::new()
                 } else {
@@ -5722,6 +6034,7 @@ fn build_help_lines() -> Vec<String> {
         "  Ctrl+←/→   Coarse adjust (10%)".into(),
         "  Enter      Type a value".into(),
         "  m          Modulate this parameter (new/existing modulator)".into(),
+        "  l          MIDI learn: bind the next CC / pitch-bend to it".into(),
         "  /          Search parameters".into(),
         "  Esc        Clear filter / back to chain".into(),
         "".into(),
