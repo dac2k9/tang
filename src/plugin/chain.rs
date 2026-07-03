@@ -365,6 +365,37 @@ pub enum MidiBindSource {
     Aftertouch,
 }
 
+/// Parse a MIDI message into a learnable control: its source, normalized value
+/// (0..1), and deflection from rest (0..1). Non-learnable messages → None.
+///
+/// The deflection is what MIDI-learn ranks gestures by — an expressive
+/// controller streams several dimensions at once (touching a key nudges pitch
+/// bend, slide *and* pressure together), so "the first message" is not reliably
+/// the one the user meant. Pitch bend rests at centre (deflection = distance
+/// from centre); a CC / aftertouch rests at zero (deflection = the value).
+fn parse_learnable(bytes: [u8; 3]) -> Option<(MidiBindSource, f32, f32)> {
+    match bytes[0] & 0xF0 {
+        0xB0 => {
+            let n = bytes[2] as f32 / 127.0;
+            Some((MidiBindSource::Cc(bytes[1]), n, n))
+        }
+        0xE0 => {
+            let raw = ((bytes[2] as u16) << 7) | bytes[1] as u16;
+            let n = raw as f32 / 16383.0;
+            Some((MidiBindSource::PitchBend, n, (n - 0.5).abs() * 2.0))
+        }
+        0xD0 => {
+            let n = bytes[1] as f32 / 127.0;
+            Some((MidiBindSource::Aftertouch, n, n))
+        }
+        0xA0 => {
+            let n = bytes[2] as f32 / 127.0;
+            Some((MidiBindSource::Aftertouch, n, n))
+        }
+        _ => None,
+    }
+}
+
 /// Modulation source: an LFO, an ADSR envelope, or a learned MIDI control.
 #[derive(Debug, Clone)]
 pub enum ModSource {
@@ -482,29 +513,39 @@ impl Modulator {
                 self.last_output = *level;
             }
             ModSource::MidiLearn { source, value, learning } => {
-                for &(_frame, bytes) in midi_events {
-                    let status = bytes[0] & 0xF0;
-                    // Normalized 0..1 for a CC (7-bit), pitch bend (14-bit),
-                    // channel pressure (0xD0, value in data1) or polyphonic
-                    // aftertouch (0xA0, value in data2 — data1 is the note).
-                    let (this_src, norm) = match status {
-                        0xB0 => (Some(MidiBindSource::Cc(bytes[1])), bytes[2] as f32 / 127.0),
-                        0xE0 => {
-                            let raw = ((bytes[2] as u16) << 7) | bytes[1] as u16;
-                            (Some(MidiBindSource::PitchBend), raw as f32 / 16383.0)
+                if *learning {
+                    // Capture the *strongest deliberately-moved* control in this
+                    // buffer, not the first message. An expressive controller
+                    // streams several dimensions at once (a press also nudges
+                    // pitch bend / slide), so first-wins binds the wrong one —
+                    // typically an incidental micro-bend instead of the press
+                    // the user meant. Require a minimum deflection from rest,
+                    // then take the largest.
+                    const LEARN_MIN_DEFLECTION: f32 = 0.2;
+                    let mut best: Option<(MidiBindSource, f32, f32)> = None;
+                    for &(_frame, bytes) in midi_events {
+                        if let Some((src, norm, defl)) = parse_learnable(bytes) {
+                            if defl >= LEARN_MIN_DEFLECTION
+                                && best.is_none_or(|(_, _, d)| defl > d)
+                            {
+                                best = Some((src, norm, defl));
+                            }
                         }
-                        0xD0 => (Some(MidiBindSource::Aftertouch), bytes[1] as f32 / 127.0),
-                        0xA0 => (Some(MidiBindSource::Aftertouch), bytes[2] as f32 / 127.0),
-                        _ => (None, 0.0),
-                    };
-                    let Some(this_src) = this_src else { continue };
-                    if *learning {
-                        *source = Some(this_src);
+                    }
+                    if let Some((src, norm, _)) = best {
+                        *source = Some(src);
                         *learning = false;
                         *value = norm;
-                        self.last_learned = Some(this_src);
-                    } else if *source == Some(this_src) {
-                        *value = norm;
+                        self.last_learned = Some(src);
+                    }
+                } else if let Some(bound) = *source {
+                    // Bound: track the value of the matching control.
+                    for &(_frame, bytes) in midi_events {
+                        if let Some((src, norm, _)) = parse_learnable(bytes) {
+                            if src == bound {
+                                *value = norm;
+                            }
+                        }
                     }
                 }
                 self.last_output = *value;
@@ -5066,6 +5107,58 @@ mod tests {
             out[0].iter().all(|&s| (s - 0.2).abs() < 1e-6),
             "release should return to the base 0.2, got {}",
             out[0][0]
+        );
+    }
+
+    /// Learning captures the strongest deliberate gesture, not the first
+    /// message in the buffer. An expressive controller emits several dimensions
+    /// at once when a key is touched — a firm press must win over an incidental
+    /// pitch-bend wiggle that happens to arrive first.
+    #[test]
+    fn midi_learn_prefers_strongest_gesture() {
+        let (mut graph, cmd_tx, _rr) = make_graph(2);
+        let (learn_tx, learn_rx) = crossbeam_channel::bounded(8);
+        graph.set_learn_tx(learn_tx);
+
+        let inst: Box<dyn Plugin> = Box::new(ParamTrackingInstrument { param_value: 0.5 });
+        let inst_buf = (0..inst.audio_output_count()).map(|_| Vec::new()).collect();
+        cmd_tx
+            .send(GraphCommand::SwapInstrument { inst: 0, instrument: inst, inst_buf, remapper: None })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::InsertModulator {
+                inst: 0,
+                index: 0,
+                source: ModSource::MidiLearn { source: None, value: 0.0, learning: true },
+            })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::AddModTarget {
+                inst: 0,
+                mod_index: 0,
+                target: ModTarget {
+                    kind: ModTargetKind::PluginParam { slot: 0, param_index: 0 },
+                    depth: 1.0,
+                    base_value: 0.0,
+                    param_min: 0.0,
+                    param_max: 1.0,
+                },
+            })
+            .unwrap();
+
+        // One buffer: a tiny pitch-bend nudge near centre (deflection ≈ 0.03,
+        // below threshold) arriving *before* a firm channel-pressure press
+        // (deflection ≈ 0.94). The press must be the one that binds.
+        let small_bend = (0u64, [0xE0, 0x00, 0x42]); // raw 0x2100 ≈ just above centre
+        let firm_press = (0u64, [0xD0, 120, 0]);
+        let mut out = make_output();
+        graph.process(&[small_bend, firm_press], &mut out).unwrap();
+
+        let notif = learn_rx.try_recv().expect("a deliberate gesture should have bound");
+        assert!(
+            matches!(notif.source, MidiBindSource::Aftertouch),
+            "the firm press should win over the incidental bend, got {:?}",
+            notif.source
         );
     }
 
