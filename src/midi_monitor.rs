@@ -13,6 +13,27 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+/// Label a 0xF0-range message (SysEx or system common / real-time). SysEx is
+/// identified by manufacturer ID so proprietary chatter is obviously not an
+/// expression control (ROLI's keepalive uses the extended ID `00 21 10`).
+fn system_label(bytes: &[u8]) -> String {
+    match bytes[0] {
+        0xF0 => match bytes.get(1..4) {
+            Some(&[0x00, 0x21, 0x10]) => "SysEx (ROLI)".to_string(),
+            Some(&[0x7E | 0x7F, ..]) => "SysEx (universal)".to_string(),
+            Some(&[id, ..]) => format!("SysEx (mfr {id:#04x})"),
+            _ => "SysEx".to_string(),
+        },
+        0xF8 => "Clock".to_string(),
+        0xFA => "Start".to_string(),
+        0xFB => "Continue".to_string(),
+        0xFC => "Stop".to_string(),
+        0xFE => "Active Sensing".to_string(),
+        0xFF => "Reset".to_string(),
+        b => format!("System {b:#04x}"),
+    }
+}
+
 pub struct MidiMonitor {
     enabled: bool,
     /// kind label → (latest raw bytes, hit count).
@@ -37,14 +58,17 @@ impl MidiMonitor {
             return;
         }
         let key = match bytes[0] & 0xF0 {
-            0x90 => "Note On".to_string(),
             0x80 => "Note Off".to_string(),
+            0x90 => "Note On".to_string(),
             0xA0 => "Poly Aftertouch".to_string(),
             0xB0 => format!("CC {}", bytes.get(1).copied().unwrap_or(0)),
             0xC0 => "Program".to_string(),
             0xD0 => "Channel Pressure".to_string(),
             0xE0 => "Pitch Bend".to_string(),
-            other => format!("status {other:#04x}"),
+            // 0xF0 range: SysEx and system common / real-time. Labelling these
+            // clearly matters — a controller's proprietary SysEx chatter (e.g.
+            // ROLI keepalive) is easily mistaken for a real expression signal.
+            _ => system_label(bytes),
         };
         let detail = format!("{bytes:02x?}");
         if let Ok(mut tally) = self.tally.lock() {
@@ -98,5 +122,19 @@ mod tests {
             rows.iter().any(|r| r.contains("Channel Pressure") && r.contains("6e")),
             "latest bytes should update: {rows:?}"
         );
+    }
+
+    #[test]
+    fn labels_roli_sysex_distinctly() {
+        // A controller's proprietary SysEx must not read as a mystery signal —
+        // ROLI's keepalive (manufacturer ID 00 21 10) shows as "SysEx (ROLI)".
+        let m = MidiMonitor::new(true);
+        m.record(&[0xf0, 0x00, 0x21, 0x10, 0x77, 0x6d, 0x20, 0x00, 0xf7]);
+        m.record(&[0xf0, 0x7e, 0x00, 0x06, 0x01, 0xf7]); // universal (identity req)
+        let rows = m.snapshot();
+        assert!(rows.iter().any(|r| r.starts_with("SysEx (ROLI)")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.starts_with("SysEx (universal)")), "{rows:?}");
+        // Crucially, no channel-message label was invented for it.
+        assert!(!rows.iter().any(|r| r.contains("Channel Pressure")), "{rows:?}");
     }
 }
