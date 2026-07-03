@@ -650,7 +650,7 @@ numeric `params` values (the index into the label list).
 | `R` | Set the selected instrument's key range (opens range popup, prefilled) — or, on a group header, rename the group (opens rename popup, prefilled) |
 | `v` | Set the output volume of the selected instrument or group (host-side gain, opens value popup) |
 | `a` | Add effect to the selected instrument, or — on a group/group-effect node — to the group's bus chain (opens effect selector popup). New effects default to 0.5 mix (half-wet); `builtin:filter` defaults to 1.0 (fully wet, since a half-wet filter barely filters) |
-| `m` | Chain focus: add an empty LFO modulator — to the instrument's lane rack on an instrument-side node, or to the group's rack on a group / group-bus node. Param focus: modulate the selected parameter — opens a popup to bind it to a new (LFO/envelope) or existing modulator (a group bus-effect param binds a group modulator; an instrument/effect param binds a lane modulator) |
+| `m` | Chain focus: add an empty LFO modulator — to the instrument's lane rack on an instrument-side node, or to the group's rack on a group / group-bus node. Param focus: modulate the selected parameter — opens a popup to bind it to a new (LFO/envelope) or existing modulator (a group bus-effect param binds a group modulator; an instrument/effect param binds a lane modulator; a **modulator's own param** binds a sibling modulator for cross-mod) |
 | `l` | Param focus: MIDI-learn the selected parameter — arms a MIDI modulator and binds the next incoming CC / pitch-bend / aftertouch to it (works on plugin params and modulator fields) |
 | `x` | Set the dry/wet mix of the selected effect or group bus effect (host-side blend, opens value popup) |
 | `g` | Assign the selected instrument to a submix group (new / existing / ungroup, opens popup) |
@@ -776,11 +776,15 @@ group-modulator params.
 
 ### Modulate popup
 
-Opened by `m` while focused on a plugin parameter (the parameter-centric way
-to wire modulation). Lists: "New LFO", "New envelope", and each existing
-modulator in the relevant rack ("attach → …"). On an instrument/effect param it
-operates on the instrument's **lane** rack; on a group bus-effect param it
-operates on the **group** rack.
+Opened by `m` while focused on a parameter (the parameter-centric way to wire
+modulation). Lists: "New LFO", "New envelope", and each existing modulator in
+the relevant rack ("attach → …"). It works on:
+- an **instrument/effect** param → operates on the instrument's **lane** rack;
+- a **group bus-effect** param → operates on the **group** rack;
+- a **modulator's own** param (its rate / ADSR stage / a target depth) →
+  **cross-modulation**: creates or attaches a *sibling* modulator in the same
+  rack that drives this field. The modulator can't modulate itself (it's
+  excluded from the list), and enum/separator rows aren't modulatable.
 
 - `Up` / `Down` — navigate rows
 - `Enter` — create the chosen modulator (if new) and bind the selected

@@ -322,9 +322,10 @@ fn param_actions_for(addr: Option<&TreeAddress>) -> Vec<(&'static str, &'static 
             ("l", "learn"),
             ("/", "filter"),
         ],
-        // Modulator pseudo-params (rate/ADSR/depth): edit, or MIDI-learn the row.
+        // Modulator pseudo-params (rate/ADSR/depth): edit, cross-modulate, or
+        // MIDI-learn the row.
         Some(TreeAddress::Modulator { .. }) | Some(TreeAddress::GroupModulator { .. }) => {
-            vec![("Enter", "edit"), ("l", "learn")]
+            vec![("Enter", "edit"), ("m", "modulate"), ("l", "learn")]
         }
         // Group Volume/Pan and pattern settings: edit only.
         Some(TreeAddress::Group(_)) | Some(TreeAddress::Pattern(_)) => vec![("Enter", "edit")],
@@ -1152,6 +1153,76 @@ impl State {
                 slot,
                 param_index,
             },
+            param_name,
+            param_min,
+            param_max,
+            base_value,
+            choices,
+            filter,
+            items,
+        });
+    }
+
+    /// Open the "modulate" popup for a parameter of a *modulator* (its rate /
+    /// ADSR stage / a target depth) — i.e. cross-modulation: a sibling modulator
+    /// (new or existing, in the same lane or group rack) drives this field. The
+    /// inverse of picking this modulator as a target via `t`. Enum / separator
+    /// rows aren't modulatable, and the modulator can't modulate itself.
+    fn open_modulate_cross_mod(&mut self) {
+        let sel = self.chain_state.selected;
+        if sel >= self.tree_entries.len() {
+            return;
+        }
+        let (scope, mod_index) = match self.tree_entries[sel].address {
+            TreeAddress::Modulator { inst, index } => (ModScope::Lane(inst), index),
+            TreeAddress::GroupModulator { group, index } => (ModScope::Group(group), index),
+            _ => return,
+        };
+        let pa = self.param_state.selected;
+        // Resolve the cross-mod target kind (+ range / base / label) for this row.
+        let resolved = {
+            let m = match scope {
+                ModScope::Lane(inst) => self.modulator(inst, mod_index),
+                ModScope::Group(group) => self.group_modulator(group, mod_index),
+            };
+            m.and_then(|m| modulator_row_to_cross_mod(m, mod_index, pa))
+        };
+        let Some((kind, param_min, param_max, base_value, param_name)) = resolved else {
+            return;
+        };
+
+        // Choices: new LFO / envelope, then each sibling modulator in the same
+        // rack except this one (no self-modulation).
+        let mut choices = vec![ModulateChoice::NewLfo, ModulateChoice::NewEnvelope];
+        let mut items = vec![
+            FilterListItem { cells: vec![format!("New LFO → {param_name}")], index: 0 },
+            FilterListItem { cells: vec![format!("New envelope → {param_name}")], index: 1 },
+        ];
+        let rack_len = match scope {
+            ModScope::Lane(inst) => self.instruments.get(inst).map_or(0, |n| n.modulators.len()),
+            ModScope::Group(group) => self.groups.get(group).map_or(0, |g| g.modulators.len()),
+        };
+        for i in 0..rack_len {
+            if i == mod_index {
+                continue; // can't modulate itself
+            }
+            let label = match scope {
+                ModScope::Lane(inst) => self.modulator(inst, i).map(|m| m.source.label()),
+                ModScope::Group(group) => self.group_modulator(group, i).map(|m| m.source.label()),
+            };
+            if let Some(label) = label {
+                let idx = choices.len();
+                choices.push(ModulateChoice::Existing(i));
+                items.push(FilterListItem { cells: vec![format!("attach → {label}")], index: idx });
+            }
+        }
+
+        let mut filter = FilterListState::new();
+        filter.apply_filter(&items);
+        self.modulate = Some(ModulateState {
+            scope,
+            slot: 0, // unused for cross-mod target kinds
+            target_kind: kind,
             param_name,
             param_min,
             param_max,
@@ -3589,6 +3660,11 @@ fn handle_key(s: &mut State, code: KeyCode, modifiers: KeyModifiers) {
                 // A group bus-effect parameter → create/attach a group modulator.
                 Some(TreeAddress::GroupEffect { .. }) => {
                     s.open_group_modulate();
+                }
+                // A modulator's own param (rate / ADSR / a target depth) →
+                // cross-modulate it with a sibling modulator.
+                Some(TreeAddress::Modulator { .. } | TreeAddress::GroupModulator { .. }) => {
+                    s.open_modulate_cross_mod();
                 }
                 _ => {}
             }
@@ -6168,5 +6244,11 @@ mod tests {
         let chain = action_bar_items(Some(&inst), false);
         assert!(chain.iter().any(|(k, _)| *k == "i"));
         assert!(!chain.iter().any(|(k, _)| *k == "l"));
+
+        // A modulator's own params can be cross-modulated ('m') and learned ('l').
+        let m = TreeAddress::Modulator { inst: 0, index: 0 };
+        let macts = action_bar_items(Some(&m), true);
+        assert!(macts.iter().any(|(k, _)| *k == "m"), "modulate missing on modulator: {macts:?}");
+        assert!(macts.iter().any(|(k, _)| *k == "l"), "learn missing on modulator: {macts:?}");
     }
 }
