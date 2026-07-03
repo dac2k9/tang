@@ -417,6 +417,8 @@ fn build_mod_source(
                 Some(plugin::chain::MidiBindSource::Cc(cc))
             } else if mod_config.midi_pitch_bend {
                 Some(plugin::chain::MidiBindSource::PitchBend)
+            } else if mod_config.midi_aftertouch {
+                Some(plugin::chain::MidiBindSource::Aftertouch)
             } else {
                 None
             };
@@ -433,6 +435,7 @@ fn build_mod_source(
             let desc = match bind {
                 Some(plugin::chain::MidiBindSource::Cc(n)) => format!("MIDI CC {n}"),
                 Some(plugin::chain::MidiBindSource::PitchBend) => "MIDI pitch bend".to_string(),
+                Some(plugin::chain::MidiBindSource::Aftertouch) => "MIDI aftertouch".to_string(),
                 None => "MIDI (learning)".to_string(),
             };
             (source, loaded_source, desc)

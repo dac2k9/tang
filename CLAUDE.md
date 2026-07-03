@@ -297,29 +297,35 @@ param = "cutoff"
 depth = 0.5
 ```
 
-**MIDI-learn modulator** (a hardware CC or the pitch-bend wheel drives the
-target):
+**MIDI-learn modulator** (a hardware CC, the pitch-bend wheel, or key
+pressure / aftertouch drives the target):
 
 ```toml
 [[instrument.modulator]]
 type = "midi"
 midi_cc = 74            # bound CC number …
-# midi_pitch_bend = true  # … or the pitch-bend wheel (mutually exclusive)
-                        # omit both = unbound (re-arms for learning on load)
+# midi_pitch_bend = true  # … or the pitch-bend wheel …
+# midi_aftertouch = true  # … or key pressure (channel pressure / poly
+                        # aftertouch — the "press harder" dimension on MPE
+                        # controllers). The three are mutually exclusive;
+                        # omit all = unbound (re-arms for learning on load).
 
 [[instrument.modulator.target]]
 param = "cutoff"
-depth = 1.0             # 1.0 = the control spans the parameter's full range
+depth = 1.0             # full deflection = ±depth·range around your set value
 ```
 
 Create one from the TUI with **`l` (learn)** on a selected parameter (in the
 param pane): it adds an armed MIDI modulator bound to that parameter, and the
-next incoming CC / pitch-bend on any channel is captured and bound (the audio
-thread notifies the main thread, which fills in and persists the binding). It
-targets anything the param pane can select — plugin params (instrument, effect,
-group-bus effect) and modulator fields (bind a knob to an LFO's rate, an
-envelope stage, or a target's depth). In the tree it shows as `CC 74 → cutoff`
-(or `MIDI (learning…)` while armed). `t` and `d` work on it like any modulator.
+next incoming CC / pitch-bend / aftertouch on any channel is captured and bound
+(the audio thread notifies the main thread, which fills in and persists the
+binding). It targets anything the param pane can select — plugin params
+(instrument, effect, group-bus effect) and modulator fields (bind a knob to an
+LFO's rate, an envelope stage, or a target's depth). In the tree it shows as
+`CC 74 → cutoff` / `Pitch Bend → …` / `Aftertouch → …` (or `MIDI (learning…)`
+while armed). `t` and `d` work on it like any modulator. A learned control
+*combines* with your set value (see the apply math below) rather than
+overwriting it.
 
 Modulators are applied once per audio buffer; the base value tracks the
 user's set value automatically. The source types apply differently:
@@ -623,7 +629,7 @@ numeric `params` values (the index into the label list).
 | `v` | Set the output volume of the selected instrument or group (host-side gain, opens value popup) |
 | `a` | Add effect to the selected instrument, or — on a group/group-effect node — to the group's bus chain (opens effect selector popup). New effects default to 0.5 mix (half-wet); `builtin:filter` defaults to 1.0 (fully wet, since a half-wet filter barely filters) |
 | `m` | Chain focus: add an empty LFO modulator — to the instrument's lane rack on an instrument-side node, or to the group's rack on a group / group-bus node. Param focus: modulate the selected parameter — opens a popup to bind it to a new (LFO/envelope) or existing modulator (a group bus-effect param binds a group modulator; an instrument/effect param binds a lane modulator) |
-| `l` | Param focus: MIDI-learn the selected parameter — arms a MIDI modulator and binds the next incoming CC / pitch-bend to it (works on plugin params and modulator fields) |
+| `l` | Param focus: MIDI-learn the selected parameter — arms a MIDI modulator and binds the next incoming CC / pitch-bend / aftertouch to it (works on plugin params and modulator fields) |
 | `x` | Set the dry/wet mix of the selected effect or group bus effect (host-side blend, opens value popup) |
 | `g` | Assign the selected instrument to a submix group (new / existing / ungroup, opens popup) |
 | `d` | Delete selected instrument/effect/modulator/pattern/group/group-effect/group-modulator (no confirmation; deleting a group ungroups its members) |

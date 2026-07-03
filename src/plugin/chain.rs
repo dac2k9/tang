@@ -357,6 +357,12 @@ pub enum MidiBindSource {
     Cc(u8),
     /// The pitch-bend wheel.
     PitchBend,
+    /// Key pressure / aftertouch — either channel pressure (0xD0) or polyphonic
+    /// aftertouch (0xA0). This is the "press harder" dimension on expressive
+    /// (MPE) controllers like the ROLI Seaboard. Captured and matched
+    /// interchangeably (a controller sends one kind consistently); unipolar,
+    /// like a CC.
+    Aftertouch,
 }
 
 /// Modulation source: an LFO, an ADSR envelope, or a learned MIDI control.
@@ -478,13 +484,17 @@ impl Modulator {
             ModSource::MidiLearn { source, value, learning } => {
                 for &(_frame, bytes) in midi_events {
                     let status = bytes[0] & 0xF0;
-                    // Normalized 0..1 for a CC (7-bit) or pitch bend (14-bit).
+                    // Normalized 0..1 for a CC (7-bit), pitch bend (14-bit),
+                    // channel pressure (0xD0, value in data1) or polyphonic
+                    // aftertouch (0xA0, value in data2 — data1 is the note).
                     let (this_src, norm) = match status {
                         0xB0 => (Some(MidiBindSource::Cc(bytes[1])), bytes[2] as f32 / 127.0),
                         0xE0 => {
                             let raw = ((bytes[2] as u16) << 7) | bytes[1] as u16;
                             (Some(MidiBindSource::PitchBend), raw as f32 / 16383.0)
                         }
+                        0xD0 => (Some(MidiBindSource::Aftertouch), bytes[1] as f32 / 127.0),
+                        0xA0 => (Some(MidiBindSource::Aftertouch), bytes[2] as f32 / 127.0),
                         _ => (None, 0.0),
                     };
                     let Some(this_src) = this_src else { continue };
@@ -533,7 +543,7 @@ impl Modulator {
                 let range = target.param_max - target.param_min;
                 let deflection = match src {
                     MidiBindSource::PitchBend => (self.last_output - 0.5) * 2.0,
-                    MidiBindSource::Cc(_) => self.last_output,
+                    MidiBindSource::Cc(_) | MidiBindSource::Aftertouch => self.last_output,
                 };
                 deflection * target.depth * range
             }
@@ -4987,6 +4997,74 @@ mod tests {
         assert!(
             out[0].iter().all(|&s| (s - 0.2).abs() < 1e-6),
             "CC 0 should return to the base 0.2, got {}",
+            out[0][0]
+        );
+    }
+
+    /// Key pressure is learnable: channel pressure (0xD0) and poly aftertouch
+    /// (0xA0) both bind to `Aftertouch` (interchangeably) and drive the target
+    /// additively above the base — the "press harder" dimension on MPE
+    /// controllers like the ROLI Seaboard.
+    #[test]
+    fn midi_learn_binds_aftertouch() {
+        let (mut graph, cmd_tx, _rr) = make_graph(2);
+        let (learn_tx, learn_rx) = crossbeam_channel::bounded(8);
+        graph.set_learn_tx(learn_tx);
+
+        let inst: Box<dyn Plugin> = Box::new(ParamTrackingInstrument { param_value: 0.5 });
+        let inst_buf = (0..inst.audio_output_count()).map(|_| Vec::new()).collect();
+        cmd_tx
+            .send(GraphCommand::SwapInstrument { inst: 0, instrument: inst, inst_buf, remapper: None })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::InsertModulator {
+                inst: 0,
+                index: 0,
+                source: ModSource::MidiLearn { source: None, value: 0.0, learning: true },
+            })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::AddModTarget {
+                inst: 0,
+                mod_index: 0,
+                target: ModTarget {
+                    kind: ModTargetKind::PluginParam { slot: 0, param_index: 0 },
+                    depth: 0.5,
+                    base_value: 0.2,
+                    param_min: 0.0,
+                    param_max: 1.0,
+                },
+            })
+            .unwrap();
+
+        // Channel pressure (0xD0, value in data1) at max → learns Aftertouch and
+        // pushes to base + depth·range = 0.2 + 0.5 = 0.7.
+        let mut out = make_output();
+        graph.process(&[(0, [0xD0, 127, 0])], &mut out).unwrap();
+        let notif = learn_rx.try_recv().expect("learn notification");
+        assert!(matches!(notif.source, MidiBindSource::Aftertouch));
+        assert!(
+            out[0].iter().all(|&s| (s - 0.7).abs() < 1e-6),
+            "full press should combine to base+depth 0.7, got {}",
+            out[0][0]
+        );
+
+        // Poly aftertouch (0xA0, value in data2) drives the same binding.
+        let mut out = make_output();
+        graph.process(&[(0, [0xA0, 60, 64])], &mut out).unwrap();
+        let expected = 0.2 + (64.0 / 127.0) * 0.5;
+        assert!(
+            out[0].iter().all(|&s| (s - expected).abs() < 1e-4),
+            "poly aftertouch should drive the aftertouch binding, got {}",
+            out[0][0]
+        );
+
+        // Release (0) → back to the base.
+        let mut out = make_output();
+        graph.process(&[(0, [0xD0, 0, 0])], &mut out).unwrap();
+        assert!(
+            out[0].iter().all(|&s| (s - 0.2).abs() < 1e-6),
+            "release should return to the base 0.2, got {}",
             out[0][0]
         );
     }

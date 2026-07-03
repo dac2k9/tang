@@ -170,6 +170,7 @@ impl ModSourceSlot {
             ModSourceSlot::MidiLearn { source, learning } => match source {
                 Some(MidiBindSource::Cc(n)) => format!("CC {n}"),
                 Some(MidiBindSource::PitchBend) => "Pitch Bend".to_string(),
+                Some(MidiBindSource::Aftertouch) => "Aftertouch".to_string(),
                 None if *learning => "MIDI (learning…)".to_string(),
                 None => "MIDI (unbound)".to_string(),
             },
@@ -2483,6 +2484,7 @@ impl State {
                                     _ => None,
                                 },
                                 pitch_bend: matches!(source, Some(MidiBindSource::PitchBend)),
+                                aftertouch: matches!(source, Some(MidiBindSource::Aftertouch)),
                             }
                         }
                     };
@@ -6068,7 +6070,7 @@ fn build_help_lines() -> Vec<String> {
         "  Ctrl+←/→   Coarse adjust (10%)".into(),
         "  Enter      Type a value".into(),
         "  m          Modulate this parameter (new/existing modulator)".into(),
-        "  l          MIDI learn: bind the next CC / pitch-bend to it".into(),
+        "  l          MIDI learn: bind the next CC / pitch-bend / aftertouch".into(),
         "  /          Search parameters".into(),
         "  Esc        Clear filter / back to chain".into(),
         "".into(),
