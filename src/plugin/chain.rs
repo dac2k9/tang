@@ -514,14 +514,16 @@ impl Modulator {
             }
             ModSource::MidiLearn { source, value, learning } => {
                 if *learning {
-                    // Capture the *strongest deliberately-moved* control in this
-                    // buffer, not the first message. An expressive controller
-                    // streams several dimensions at once (a press also nudges
-                    // pitch bend / slide), so first-wins binds the wrong one —
-                    // typically an incidental micro-bend instead of the press
-                    // the user meant. Require a minimum deflection from rest,
-                    // then take the largest.
-                    const LEARN_MIN_DEFLECTION: f32 = 0.2;
+                    // Capture the *strongest-moved* control in this buffer, not
+                    // the first message. An expressive controller streams
+                    // several dimensions at once (a press also nudges pitch
+                    // bend / slide), so first-wins binds the wrong one — often
+                    // an incidental micro-bend instead of the press the user
+                    // meant. Take the largest deflection from rest, above a
+                    // small noise floor (a Seaboard's glide/pressure values can
+                    // be modest, so this must stay low or real gestures never
+                    // clear it).
+                    const LEARN_MIN_DEFLECTION: f32 = 0.05;
                     let mut best: Option<(MidiBindSource, f32, f32)> = None;
                     for &(_frame, bytes) in midi_events {
                         if let Some((src, norm, defl)) = parse_learnable(bytes) {
