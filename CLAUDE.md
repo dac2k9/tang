@@ -1004,7 +1004,9 @@ Plugin loading is behind a trait. Three formats supported:
 
 - **Oscillator** (`builtin:osc`) — one polyphonic oscillator with a
   selectable waveform, per-voice ADSR amplitude envelope. Parameters:
-  `waveform` (enum: sine/triangle/square/saw), `detune` (±2 semitones), `volume`
+  `waveform` (enum: sine/triangle/square/saw), `detune` (±24 semitones / ±2
+  octaves — wide so a modulator can sweep pitch dramatically; use small values
+  or low modulator depth for subtle detuning), `volume`
   (0–1, smoothed ~5 ms), `attack`/`decay`/`release` (0–10 s), `sustain`
   (0–1), `pan` (−1 left … 0 center … +1 right, balance-style so center leaves
   both channels at full; smoothed ~5 ms). Envelope defaults (A=4 ms, S=1.0, R=12 ms) reproduce the original

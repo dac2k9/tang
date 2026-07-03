@@ -97,8 +97,11 @@ pub const PARAM_COUNT: usize = 8; // waveform, detune, volume, attack, decay, su
 const PAN_MIN: f32 = -1.0;
 const PAN_MAX: f32 = 1.0;
 
-const DETUNE_MIN: f32 = -2.0;
-const DETUNE_MAX: f32 = 2.0;
+// ±2 octaves. Wide enough that a modulator (e.g. a learned pitch bend) can
+// produce a dramatic pitch sweep; use the target's depth to dial the amount
+// down for subtle detuning.
+const DETUNE_MIN: f32 = -24.0;
+const DETUNE_MAX: f32 = 24.0;
 
 // Envelope defaults preserve the oscillator's original behavior: ramps just
 // long enough to avoid clicks on note start/stop, full sustain.
@@ -547,6 +550,18 @@ mod tests {
         assert_eq!(osc.get_parameter(7), Some(1.0)); // clamped to hard right
         osc.set_parameter(7, -5.0).unwrap();
         assert_eq!(osc.get_parameter(7), Some(-1.0)); // clamped to hard left
+    }
+
+    #[test]
+    fn detune_round_trips_and_clamps_to_two_octaves() {
+        let mut osc = Oscillator::new(SAMPLE_RATE, Waveform::Sine);
+        assert_eq!(osc.get_parameter(1), Some(0.0)); // default: no detune
+        osc.set_parameter(1, 12.0).unwrap();
+        assert_eq!(osc.get_parameter(1), Some(12.0)); // an octave up
+        osc.set_parameter(1, 100.0).unwrap();
+        assert_eq!(osc.get_parameter(1), Some(24.0)); // clamped to +2 octaves
+        osc.set_parameter(1, -100.0).unwrap();
+        assert_eq!(osc.get_parameter(1), Some(-24.0)); // clamped to −2 octaves
     }
 
     #[test]
