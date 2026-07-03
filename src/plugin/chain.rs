@@ -521,17 +521,21 @@ impl Modulator {
                 -(1.0 - self.last_output) * target.depth * (target.base_value - target.param_min)
             }
             // Unbound (armed for learning, or bound to nothing yet): leave the
-            // parameter at its base. Otherwise last_output=0 would map to
-            // param_min and slam the parameter down the instant you arm learn,
+            // parameter at its base, so arming learn doesn't move the sound
             // before you've touched a control.
             ModSource::MidiLearn { source: None, .. } => 0.0,
-            ModSource::MidiLearn { .. } => {
-                // Absolute: map the control across the param range, blended
-                // toward the base by (1 - depth). At depth 1.0 the control sets
-                // the parameter directly across its full range.
-                let mapped =
-                    target.param_min + self.last_output * (target.param_max - target.param_min);
-                (mapped - target.base_value) * target.depth
+            // Bound: an additive offset around the base, like the LFO — so a
+            // learned control *combines* with your set value instead of
+            // overwriting it. The rest position contributes nothing:
+            //   - pitch bend is bipolar (centre = 0, ±full bend = ±depth·range)
+            //   - a CC / pressure is unipolar (0 = 0, full = +depth·range)
+            ModSource::MidiLearn { source: Some(src), .. } => {
+                let range = target.param_max - target.param_min;
+                let deflection = match src {
+                    MidiBindSource::PitchBend => (self.last_output - 0.5) * 2.0,
+                    MidiBindSource::Cc(_) => self.last_output,
+                };
+                deflection * target.depth * range
             }
         }
     }
@@ -4947,21 +4951,23 @@ mod tests {
                 source: ModSource::MidiLearn { source: None, value: 0.0, learning: true },
             })
             .unwrap();
+        // Base 0.2, depth 0.5: a CC is unipolar, so it *adds* up to depth·range
+        // on top of the base (rest = base). CC max → 0.2 + 0.5·1.0 = 0.7.
         cmd_tx
             .send(GraphCommand::AddModTarget {
                 inst: 0,
                 mod_index: 0,
                 target: ModTarget {
                     kind: ModTargetKind::PluginParam { slot: 0, param_index: 0 },
-                    depth: 1.0,
-                    base_value: 0.5,
+                    depth: 0.5,
+                    base_value: 0.2,
                     param_min: 0.0,
                     param_max: 1.0,
                 },
             })
             .unwrap();
 
-        // CC 74 at max → learns CC 74 and sets cutoff to its max (1.0).
+        // CC 74 at max → learns CC 74 and pushes cutoff to base + depth (0.7).
         let cc = |v: u8| (0u64, [0xB0, 74, v]);
         let mut out = make_output();
         graph.process(&[cc(127)], &mut out).unwrap();
@@ -4970,19 +4976,78 @@ mod tests {
         assert!(matches!(notif.source, MidiBindSource::Cc(74)));
         assert!(matches!(notif.location, ModulatorLocation::Lane(0)));
         assert!(
-            out[0].iter().all(|&s| (s - 1.0).abs() < 1e-6),
-            "CC max should drive cutoff to 1.0, got {}",
+            out[0].iter().all(|&s| (s - 0.7).abs() < 1e-6),
+            "CC max should combine to base+depth = 0.7, got {}",
             out[0][0]
         );
 
-        // A later CC 74 = 0 drives it to the minimum (0.0).
+        // A later CC 74 = 0 returns to the base (0.2) — it does not slam to 0.
         let mut out = make_output();
         graph.process(&[cc(0)], &mut out).unwrap();
         assert!(
-            out[0].iter().all(|&s| s.abs() < 1e-6),
-            "CC 0 should drive cutoff to 0, got {}",
+            out[0].iter().all(|&s| (s - 0.2).abs() < 1e-6),
+            "CC 0 should return to the base 0.2, got {}",
             out[0][0]
         );
+    }
+
+    /// A learned pitch-bend control is bipolar: the centre position leaves the
+    /// parameter at its base (so a manually-set value shows through), and the
+    /// bend sweeps ±depth·range around it. This is the ROLI/expressive case and
+    /// the essence of "sources combine" — the control does not pin the value.
+    #[test]
+    fn midi_learn_pitch_bend_is_bipolar_around_base() {
+        let (mut graph, cmd_tx, _rr) = make_graph(2);
+        let inst: Box<dyn Plugin> = Box::new(ParamTrackingInstrument { param_value: 0.5 });
+        let inst_buf = (0..inst.audio_output_count()).map(|_| Vec::new()).collect();
+        cmd_tx
+            .send(GraphCommand::SwapInstrument { inst: 0, instrument: inst, inst_buf, remapper: None })
+            .unwrap();
+
+        cmd_tx
+            .send(GraphCommand::InsertModulator {
+                inst: 0,
+                index: 0,
+                source: ModSource::MidiLearn {
+                    source: Some(MidiBindSource::PitchBend),
+                    value: 0.5,
+                    learning: false,
+                },
+            })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::AddModTarget {
+                inst: 0,
+                mod_index: 0,
+                target: ModTarget {
+                    kind: ModTargetKind::PluginParam { slot: 0, param_index: 0 },
+                    depth: 0.5,
+                    base_value: 0.5,
+                    param_min: 0.0,
+                    param_max: 1.0,
+                },
+            })
+            .unwrap();
+
+        // 14-bit pitch bend → (lsb, msb) split.
+        let bend = |raw: u16| (0u64, [0xE0, (raw & 0x7F) as u8, (raw >> 7) as u8]);
+
+        // Centre (8192) → no offset → the base (0.5).
+        let mut out = make_output();
+        graph.process(&[bend(8192)], &mut out).unwrap();
+        assert!(
+            out[0].iter().all(|&s| (s - 0.5).abs() < 2e-4),
+            "centre bend should leave the base 0.5, got {}",
+            out[0][0]
+        );
+
+        // Full up → base + depth·range = 1.0; full down → base − depth·range = 0.0.
+        let mut out = make_output();
+        graph.process(&[bend(16383)], &mut out).unwrap();
+        assert!(out[0].iter().all(|&s| (s - 1.0).abs() < 2e-4), "full-up bend = 1.0, got {}", out[0][0]);
+        let mut out = make_output();
+        graph.process(&[bend(0)], &mut out).unwrap();
+        assert!(out[0].iter().all(|&s| s.abs() < 2e-4), "full-down bend = 0.0, got {}", out[0][0]);
     }
 
     /// An armed MidiLearn modulator must leave its target at the base value
@@ -5026,6 +5091,55 @@ mod tests {
         assert!(
             out[0].iter().all(|&s| (s - 0.5).abs() < 1e-6),
             "unbound learn should leave cutoff at base 0.5, got {}",
+            out[0][0]
+        );
+    }
+
+    /// Changing a parameter that a modulator targets must move the modulator's
+    /// base value, so the user's edit is combined with (not overwritten by) the
+    /// modulation. Uses depth 0 to isolate the base from the LFO wobble.
+    #[test]
+    fn changing_a_modulated_param_moves_the_base() {
+        let (mut graph, cmd_tx, _rr) = make_graph(2);
+        let inst: Box<dyn Plugin> = Box::new(ParamTrackingInstrument { param_value: 0.5 });
+        let inst_buf = (0..inst.audio_output_count()).map(|_| Vec::new()).collect();
+        cmd_tx
+            .send(GraphCommand::SwapInstrument { inst: 0, instrument: inst, inst_buf, remapper: None })
+            .unwrap();
+
+        cmd_tx
+            .send(GraphCommand::InsertModulator {
+                inst: 0,
+                index: 0,
+                source: ModSource::Lfo { waveform: LfoWaveform::Sine, rate: 1.0, phase: 0.0 },
+            })
+            .unwrap();
+        cmd_tx
+            .send(GraphCommand::AddModTarget {
+                inst: 0,
+                mod_index: 0,
+                target: ModTarget {
+                    kind: ModTargetKind::PluginParam { slot: 0, param_index: 0 },
+                    depth: 0.0, // no wobble: applied value == base
+                    base_value: 0.5,
+                    param_min: 0.0,
+                    param_max: 1.0,
+                },
+            })
+            .unwrap();
+
+        let mut out = make_output();
+        graph.process(&[], &mut out).unwrap();
+        assert!((out[0][0] - 0.5).abs() < 1e-6, "starts at base 0.5, got {}", out[0][0]);
+
+        // User drags the param to 0.8 — the base must follow.
+        cmd_tx
+            .send(GraphCommand::SetParameter { inst: 0, slot: 0, param_index: 0, value: 0.8 })
+            .unwrap();
+        graph.process(&[], &mut out).unwrap();
+        assert!(
+            (out[0][0] - 0.8).abs() < 1e-6,
+            "base should track the user's change to 0.8, got {}",
             out[0][0]
         );
     }

@@ -333,9 +333,17 @@ user's set value automatically. The source types apply differently:
   volume at 1.0 with an envelope at depth 1.0 gives silence→full→sustain→
   silence. (A purely additive envelope could only push values *above* the
   base, which on an already-maxed parameter clamps to no effect at all.)
-- **MIDI learn** (absolute, output 0..1): `base + depth * (min + output*range -
-  base)` — the control maps across the parameter's range; at depth 1.0 the CC /
-  bend sets it directly (0→min, max→max), overriding the base.
+- **MIDI learn** (additive around the base, like the LFO): the control
+  *offsets* the parameter around the user's set value rather than overwriting
+  it, so it combines with the base and any other modulators (an unbound /
+  still-learning control contributes nothing — the base shows through). Two
+  rest-aware laws by source:
+  - **Pitch bend** (bipolar): `base + (output − 0.5) * 2 * depth * range` —
+    centre = no change, full bend = ±depth·range around the base. This makes
+    the wheel behave like a pitch/mod wheel and is the natural mapping for
+    expressive (MPE) controllers.
+  - **CC** (unipolar): `base + output * depth * range` — rest (0) = no change,
+    full = +depth·range above the base.
 
 Envelope behavior: note-on retriggers from Attack phase (continuing from the
 current level — a quick retrigger does not restart from silence). Release
