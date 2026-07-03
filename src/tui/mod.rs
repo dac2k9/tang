@@ -567,6 +567,8 @@ struct State {
     /// Center MIDI octave for the piano view (0..=8). Default 4.
     piano_view_octave: i8,
     scale_selector: Option<ScaleSelectorState>,
+    /// Live incoming-MIDI monitor, shown at the bottom under `--debug`.
+    midi_monitor: Arc<crate::midi_monitor::MidiMonitor>,
 }
 
 impl State {
@@ -2682,6 +2684,7 @@ pub fn run(
     learn_rx: crossbeam_channel::Receiver<crate::plugin::chain::MidiLearnedNotification>,
     held: Arc<HeldNotes>,
     piano_filter: Arc<PianoFilter>,
+    midi_monitor: Arc<crate::midi_monitor::MidiMonitor>,
 ) -> anyhow::Result<()> {
     // Suppress Rust logging for the whole TUI lifetime when stderr is the
     // terminal: the background catalog scan and plugin loads log verbosely and
@@ -2855,6 +2858,7 @@ pub fn run(
         piano_filter,
         piano_view_octave: 4,
         scale_selector: None,
+        midi_monitor,
     };
 
     // Probe keyboard enhancement support (must be done before entering raw mode).
@@ -4362,10 +4366,13 @@ fn render(
 ) -> io::Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
-        let [tab_area, content_area, action_area] = Layout::vertical([
+        // `--debug` carves a MIDI-monitor strip off the bottom (0 rows otherwise).
+        let debug_h: u16 = if s.midi_monitor.is_enabled() { 9 } else { 0 };
+        let [tab_area, content_area, action_area, debug_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
             Constraint::Length(1),
+            Constraint::Length(debug_h),
         ])
         .areas(area);
 
@@ -4469,8 +4476,40 @@ fn render(
             3 => render_help(frame, content_area, &s.help_lines, s.help_offset),
             _ => {}
         }
+
+        if s.midi_monitor.is_enabled() {
+            render_midi_monitor(frame, debug_area, &s.midi_monitor);
+        }
     })?;
     Ok(())
+}
+
+/// Live incoming-MIDI tally shown at the bottom under `--debug`. Each row is one
+/// message kind (note / bend / channel pressure / poly aftertouch / CC N) with
+/// its latest raw bytes and a hit count — so you can see at a glance what a
+/// controller actually emits (e.g. whether a hard press sends Channel Pressure).
+fn render_midi_monitor(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    monitor: &crate::midi_monitor::MidiMonitor,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(DIM))
+        .title(" MIDI in  (--debug) ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = monitor.snapshot();
+    let text = if rows.is_empty() {
+        "waiting for MIDI…  play a note, then wiggle / press hard and watch what appears".to_string()
+    } else {
+        rows.join("\n")
+    };
+    frame.render_widget(Paragraph::new(text).style(Style::default().fg(Color::White)), inner);
 }
 
 #[allow(clippy::too_many_arguments)]

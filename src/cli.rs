@@ -36,6 +36,11 @@ pub struct Cli {
     #[arg(long, default_value = "48000")]
     pub sample_rate: u32,
 
+    /// Show a live incoming-MIDI monitor at the bottom of the TUI (for
+    /// diagnosing what a controller actually sends).
+    #[arg(long)]
+    pub debug: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

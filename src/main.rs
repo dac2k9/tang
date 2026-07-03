@@ -7,6 +7,7 @@ mod config;
 mod enumerate;
 mod held_notes;
 mod midi;
+mod midi_monitor;
 mod piano;
 mod piano_filter;
 mod plugin;
@@ -79,11 +80,12 @@ fn main() -> anyhow::Result<()> {
         midi_device,
         buffer_size,
         sample_rate,
+        debug,
         command,
     } = cli;
 
     match command {
-        None => run_session(session, audio_device, midi_device, buffer_size, sample_rate, true),
+        None => run_session(session, audio_device, midi_device, buffer_size, sample_rate, debug, true),
         Some(Command::Enumerate(target)) => {
             env_logger::init();
             match target {
@@ -139,7 +141,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Command::Play { session: play_session }) => {
-            run_session(play_session, audio_device, midi_device, buffer_size, sample_rate, false)
+            run_session(play_session, audio_device, midi_device, buffer_size, sample_rate, debug, false)
         }
     }
 }
@@ -680,12 +682,14 @@ fn load_group_modulators(
     Ok(loaded)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_session(
     session: Option<String>,
     audio_device: Option<String>,
     midi_device: Option<String>,
     buffer_size: u32,
     sample_rate: u32,
+    debug: bool,
     use_tui: bool,
 ) -> anyhow::Result<()> {
     // Set up raw mode logger early so plugin loading messages are visible
@@ -793,7 +797,15 @@ fn run_session(
     if let Some(sp) = &splash {
         sp.status("Opening MIDI inputs…");
     }
-    let mut midi_mgr = midi::MidiManager::new(midi_tx.clone(), midi_device, held.clone(), piano_filter.clone());
+    // Live incoming-MIDI monitor for `--debug` (a no-op when disabled).
+    let midi_monitor = std::sync::Arc::new(midi_monitor::MidiMonitor::new(debug));
+    let mut midi_mgr = midi::MidiManager::new(
+        midi_tx.clone(),
+        midi_device,
+        held.clone(),
+        piano_filter.clone(),
+        midi_monitor.clone(),
+    );
     midi_mgr.open_ports()?;
     log::info!("MIDI inputs connected: {}", midi_mgr.connection_count());
 
@@ -1264,7 +1276,7 @@ fn run_session(
     // --- Branch: TUI view vs plain play mode ---
     if use_tui {
         let session_path = Some(std::path::PathBuf::from(source));
-        tui::run(loaded_instruments, loaded_groups, cmd_tx, midi_tx, runtime, sample_rate_f, max_block_size, session_path, pattern_rx, learn_rx, held.clone(), piano_filter.clone())?;
+        tui::run(loaded_instruments, loaded_groups, cmd_tx, midi_tx, runtime, sample_rate_f, max_block_size, session_path, pattern_rx, learn_rx, held.clone(), piano_filter.clone(), midi_monitor.clone())?;
     } else {
         // --- Plain play mode (original) ---
 

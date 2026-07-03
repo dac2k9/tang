@@ -30,6 +30,15 @@ These flags apply to both the TUI and the `play` subcommand:
 | `--audio-device <name>` | system default | Use the named audio output |
 | `--buffer-size <frames>` | 1024 (Linux), 256 (macOS/Windows) | Audio buffer size in frames |
 | `--sample-rate <hz>` | 48000 | Sample rate |
+| `--debug` | off | Show a live incoming-MIDI monitor at the bottom of the TUI (diagnoses what a controller actually sends) |
+
+`--debug` adds a strip at the bottom of the TUI tallying incoming MIDI by kind
+(note / pitch bend / channel pressure / poly aftertouch / each CC number), each
+row showing the latest raw bytes and a hit count. Useful for confirming what an
+expressive controller emits — e.g. whether a hard key press sends Channel
+Pressure (learnable) or is routed to a CC. Implemented as a lock-free-ish
+`Arc<MidiMonitor>` (`src/midi_monitor.rs`) written by the MIDI input thread and
+read by the render loop; a no-op when the flag is off.
 
 The `play` subcommand takes the session path as a required positional argument.
 When launched without a session path, the TUI starts an in-memory default
