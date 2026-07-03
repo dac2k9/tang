@@ -399,9 +399,22 @@ modulation (targeting own index) is prevented.
 ### MIDI routing
 
 - Note-on/note-off: filtered by instrument's key range (inclusive)
-- CC, pitch bend, channel pressure: duplicated to all instruments
 - Instrument with no range: receives all notes (full range)
 - Overlapping ranges: notes go to all matching instruments
+- **Per-note expression** (CC, pitch bend, channel pressure, poly aftertouch):
+  routed by MIDI channel following the MPE convention. **Channel 1** (the MPE
+  master / non-MPE global channel) is duplicated to all instruments, so an
+  ordinary mod wheel / sustain / pitch wheel affects everything as before.
+  **Member channels 2–16** carry per-note MPE expression and reach only the
+  lane currently sounding a note on that channel — so on an MPE controller
+  (e.g. a ROLI Seaboard) the pressure/glide of a note played in one
+  instrument's zone can't bleed into another instrument's modulators. Each lane
+  tracks its active note channels (`InstrumentLane.active_note_channels`) from
+  range-filtered note on/off; the tally resets when the lane's range changes.
+  **Limitation:** modulators are block-rate and lane-global, not per-voice, so
+  a *chord* on one MPE instrument still collapses its notes' per-note expression
+  to a single value (last channel wins) — true per-voice expression would need
+  voice-level modulation.
 
 ### Pattern recorder/player
 
@@ -905,7 +918,9 @@ MIDI sources (hardware keyboards + virtual piano)
 ```
 
 Each instrument has its own effect chain. MIDI note events are filtered by the
-instrument's key range; CC/pitch bend messages are duplicated to all instruments.
+instrument's key range; channel-1 (global) CC/pitch-bend/pressure is duplicated
+to all instruments, while member-channel (2–16) per-note MPE expression is
+routed only to the lane sounding a note on that channel (see "MIDI routing").
 
 **Groups (submix buses).** An instrument can belong to a group. All members of
 a group are summed, then run through the group's own end-of-chain effect chain

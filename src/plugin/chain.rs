@@ -2198,6 +2198,12 @@ struct InstrumentLane {
     /// If `Some(g)`, this lane is a member of group `g`: its output is summed
     /// into that group's bus (and its group FX) instead of straight to master.
     group: Option<usize>,
+    /// Count of currently-held notes per MIDI channel (0..15), maintained from
+    /// range-filtered note on/off. Drives MPE per-note expression routing:
+    /// member-channel (2..16) pressure / bend / CC reaches only the lane that
+    /// is sounding a note on that channel, so one instrument's expression can't
+    /// bleed into another's modulators.
+    active_note_channels: [u16; 16],
 }
 
 impl InstrumentLane {
@@ -2219,6 +2225,7 @@ impl InstrumentLane {
             pattern: PatternPlayer::new(48000.0),
             transpose: 0,
             group: None,
+            active_note_channels: [0; 16],
         }
     }
 
@@ -2235,29 +2242,41 @@ impl InstrumentLane {
     /// CC, pitch bend, channel pressure, etc.: always pass through.
     fn filter_midi(&mut self, midi_events: &[(u64, [u8; 3])]) {
         self.filtered_midi.clear();
-        let range = match self.range {
-            Some(r) => r,
-            None => {
-                // Full range — pass everything
-                self.filtered_midi.extend_from_slice(midi_events);
-                return;
-            }
-        };
-
         for &(frame, bytes) in midi_events {
-            let status_type = bytes[0] & 0xF0;
-            match status_type {
+            let status = bytes[0] & 0xF0;
+            let ch = (bytes[0] & 0x0F) as usize;
+            match status {
                 0x80 | 0x90 => {
-                    // Note-on or note-off: filter by range
+                    // Note on/off: filter by range (no range = full range).
                     let note = bytes[1];
-                    if note >= range.0 && note <= range.1 {
+                    let in_range = self.range.is_none_or(|(lo, hi)| note >= lo && note <= hi);
+                    if in_range {
+                        // Track which channels this lane is sounding, so per-note
+                        // MPE expression on member channels can be routed to us.
+                        if status == 0x90 && bytes[2] > 0 {
+                            self.active_note_channels[ch] =
+                                self.active_note_channels[ch].saturating_add(1);
+                        } else {
+                            self.active_note_channels[ch] =
+                                self.active_note_channels[ch].saturating_sub(1);
+                        }
                         self.filtered_midi.push((frame, bytes));
                     }
                 }
-                _ => {
-                    // CC, pitch bend, channel pressure, etc. — duplicate to all instruments
-                    self.filtered_midi.push((frame, bytes));
+                // Per-note expression (poly aftertouch, CC, channel pressure,
+                // pitch bend). MIDI channel 1 (index 0) is the MPE master /
+                // non-MPE global channel — always passed. Member channels
+                // (2..16) carry per-note MPE expression, so they reach only the
+                // lane holding a note on that channel; otherwise one
+                // instrument's pressure/bend/slide bleeds into another's
+                // modulators. (A non-MPE controller on channel 1 is unaffected.)
+                0xA0 | 0xB0 | 0xD0 | 0xE0 => {
+                    if ch == 0 || self.active_note_channels[ch] > 0 {
+                        self.filtered_midi.push((frame, bytes));
+                    }
                 }
+                // System / everything else: pass through.
+                _ => self.filtered_midi.push((frame, bytes)),
             }
         }
     }
@@ -2886,6 +2905,10 @@ impl AudioGraph {
                 GraphCommand::SetInstrumentRange { inst, range } => {
                     if let Some(lane) = self.get_instrument_mut(inst) {
                         lane.range = range;
+                        // A held note counted under the old range would never be
+                        // decremented (its note-off no longer matches), leaving
+                        // its channel stuck "active". Reset the tally.
+                        lane.active_note_channels = [0; 16];
                     }
                 }
                 GraphCommand::ClearInstrument { inst } => {
@@ -5266,6 +5289,58 @@ mod tests {
             "unbound learn should leave cutoff at base 0.5, got {}",
             out[0][0]
         );
+    }
+
+    /// MPE per-note expression (member channels 2..16) must route only to the
+    /// lane sounding a note on that channel, while channel-1 (master / non-MPE)
+    /// expression stays global. Otherwise one instrument's pressure/bend bleeds
+    /// into another's modulators.
+    #[test]
+    fn mpe_expression_routes_by_active_channel() {
+        let mut lane = InstrumentLane::new(2);
+        lane.range = Some((60, 72));
+
+        // Note on 64 on member channel index 1, plus expression on various channels.
+        let events = [
+            (0u64, [0x91, 64, 100]),    // note on, ch idx 1 (in range)
+            (0u64, [0xd1, 90, 0]),      // channel pressure, ch idx 1 → own note → keep
+            (0u64, [0xd2, 90, 0]),      // channel pressure, ch idx 2 → no note → drop
+            (0u64, [0xd0, 90, 0]),      // channel pressure, ch idx 0 (master) → keep
+            (0u64, [0xe2, 0x00, 0x60]), // pitch bend, ch idx 2 → no note → drop
+        ];
+        lane.filter_midi(&events);
+        let kept: Vec<u8> = lane.filtered_midi.iter().map(|(_, b)| b[0]).collect();
+        assert!(kept.contains(&0x91), "note kept: {kept:02x?}");
+        assert!(kept.contains(&0xd1), "own-channel pressure kept: {kept:02x?}");
+        assert!(!kept.contains(&0xd2), "other-channel pressure dropped: {kept:02x?}");
+        assert!(kept.contains(&0xd0), "master-channel expression kept: {kept:02x?}");
+        assert!(!kept.contains(&0xe2), "other-channel bend dropped: {kept:02x?}");
+
+        // Releasing the note stops routing its channel's expression here.
+        let after = [
+            (0u64, [0x81, 64, 0]), // note off, ch idx 1
+            (0u64, [0xd1, 40, 0]), // channel pressure, ch idx 1 → now dropped
+        ];
+        lane.filter_midi(&after);
+        let kept2: Vec<u8> = lane.filtered_midi.iter().map(|(_, b)| b[0]).collect();
+        assert!(kept2.contains(&0x81), "note-off kept: {kept2:02x?}");
+        assert!(!kept2.contains(&0xd1), "pressure dropped after note-off: {kept2:02x?}");
+    }
+
+    /// A single full-range instrument must still receive its own notes' per-note
+    /// expression (its channels become active) and global channel-1 messages.
+    #[test]
+    fn full_range_lane_receives_its_own_expression() {
+        let mut lane = InstrumentLane::new(2); // range None → full range
+        let events = [
+            (0u64, [0x93, 60, 100]), // note on, ch idx 3
+            (0u64, [0xd3, 77, 0]),   // pressure, ch idx 3 → own note → keep
+            (0u64, [0xb0, 1, 64]),   // CC1 on master channel → keep (global)
+        ];
+        lane.filter_midi(&events);
+        let kept: Vec<u8> = lane.filtered_midi.iter().map(|(_, b)| b[0]).collect();
+        assert!(kept.contains(&0xd3), "own-channel pressure kept: {kept:02x?}");
+        assert!(kept.contains(&0xb0), "global CC kept: {kept:02x?}");
     }
 
     /// Changing a parameter that a modulator targets must move the modulator's
