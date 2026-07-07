@@ -283,7 +283,9 @@ rate = 0.5              # Hz (default: 1.0)
 [[instrument.modulator.target]]
 param = "cutoff"        # parameter name (resolved within `slot`'s plugin)
 slot = 1               # chain slot: 0 = instrument (default), 1..N = effect
-depth = 0.5             # fraction of param range, 0.0–1.0 (default: 0.5)
+depth = 0.5             # fraction of param range, −1.0–1.0 (default: 0.5).
+                        # Negative depth inverts the direction (LFO in
+                        # anti-phase; a control that lowers instead of raises).
 ```
 
 Modulators always serialize under `[[instrument.modulator]]` (the instrument
@@ -337,7 +339,10 @@ while armed). `t` and `d` work on it like any modulator. A learned control
 overwriting it.
 
 Modulators are applied once per audio buffer; the base value tracks the
-user's set value automatically. The source types apply differently:
+user's set value automatically. Target `depth` runs **−1.0 … 1.0**: negative
+depth flips the sign of the offset below, inverting the direction (an LFO in
+anti-phase, a control that lowers the parameter instead of raising it, an
+envelope that dips below the base). The source types apply differently:
 
 - **LFO** (bipolar output -1..1): `base + output * depth * range` — wobbles
   ±depth around the user's value.

@@ -1033,7 +1033,7 @@ impl State {
             }
             for (tgt_idx, tgt) in sib.targets.iter().enumerate() {
                 push(&mut entries, &mut items, format!("{prefix}{} depth", tgt.param_name),
-                    crate::plugin::chain::ModTargetKind::ModulatorDepth { mod_index: sib_idx, target_index: tgt_idx }, 0.0, 1.0, tgt.depth);
+                    crate::plugin::chain::ModTargetKind::ModulatorDepth { mod_index: sib_idx, target_index: tgt_idx }, DEPTH_MIN, DEPTH_MAX, tgt.depth);
             }
         }
 
@@ -1409,7 +1409,7 @@ impl State {
                     ModSourceSlot::MidiLearn { .. } => {} // only its target depths below
                 }
                 for (ti, t) in mm.targets.iter().enumerate() {
-                    push_mm(&format!("{} depth", t.param_name), CrossModField::Depth(ti), 0.0, 1.0, t.depth);
+                    push_mm(&format!("{} depth", t.param_name), CrossModField::Depth(ti), DEPTH_MIN, DEPTH_MAX, t.depth);
                 }
             }
         }
@@ -1466,7 +1466,7 @@ impl State {
             }
             for (tgt_idx, tgt) in sib.targets.iter().enumerate() {
                 push(&mut entries, &mut items, format!("{prefix}{} depth", tgt.param_name),
-                    ModTargetKind::ModulatorDepth { mod_index: sib_idx, target_index: tgt_idx }, 0.0, 1.0, tgt.depth);
+                    ModTargetKind::ModulatorDepth { mod_index: sib_idx, target_index: tgt_idx }, DEPTH_MIN, DEPTH_MAX, tgt.depth);
             }
         }
 
@@ -2099,7 +2099,7 @@ impl State {
                     } else if pa == 3 {
                         // Separator row — no-op.
                     } else if let Some(t) = m.targets.get_mut(pa - 4) {
-                        t.depth = (t.depth + delta).clamp(0.0, 1.0);
+                        t.depth = (t.depth + delta).clamp(DEPTH_MIN, DEPTH_MAX);
                         let _ = self.cmd_tx.send(GraphCommand::SetModTargetDepth {
                             inst, mod_index,
                             target_index: pa - 4,
@@ -2127,7 +2127,7 @@ impl State {
                         _ => {
                             let target_idx = pa - 6;
                             if let Some(t) = m.targets.get_mut(target_idx) {
-                                t.depth = (t.depth + delta).clamp(0.0, 1.0);
+                                t.depth = (t.depth + delta).clamp(DEPTH_MIN, DEPTH_MAX);
                                 let _ = self.cmd_tx.send(GraphCommand::SetModTargetDepth {
                                     inst, mod_index,
                                     target_index: target_idx,
@@ -2147,7 +2147,7 @@ impl State {
                     // Rows: 0 = source info, 1 = Targets separator, 2+ = depths.
                     if pa >= 2 {
                         if let Some(t) = m.targets.get_mut(pa - 2) {
-                            t.depth = (t.depth + delta).clamp(0.0, 1.0);
+                            t.depth = (t.depth + delta).clamp(DEPTH_MIN, DEPTH_MAX);
                             let _ = self.cmd_tx.send(GraphCommand::SetModTargetDepth {
                                 inst, mod_index,
                                 target_index: pa - 2,
@@ -2279,7 +2279,7 @@ impl State {
                     // Separator — not settable.
                     return;
                 } else if let Some(t) = m.targets.get_mut(pa - 4) {
-                    t.depth = value.clamp(0.0, 1.0);
+                    t.depth = value.clamp(DEPTH_MIN, DEPTH_MAX);
                     let _ = self.cmd_tx.send(GraphCommand::SetModTargetDepth {
                         inst, mod_index,
                         target_index: pa - 4,
@@ -2297,7 +2297,7 @@ impl State {
                     _ => {
                         let target_idx = pa - 6;
                         if let Some(t) = m.targets.get_mut(target_idx) {
-                            t.depth = value.clamp(0.0, 1.0);
+                            t.depth = value.clamp(DEPTH_MIN, DEPTH_MAX);
                             let _ = self.cmd_tx.send(GraphCommand::SetModTargetDepth {
                                 inst, mod_index,
                                 target_index: target_idx,
@@ -2317,7 +2317,7 @@ impl State {
                 // Rows: 0 = source info, 1 = Targets separator, 2+ = depths.
                 if pa >= 2 {
                     if let Some(t) = m.targets.get_mut(pa - 2) {
-                        t.depth = value.clamp(0.0, 1.0);
+                        t.depth = value.clamp(DEPTH_MIN, DEPTH_MAX);
                         let _ = self.cmd_tx.send(GraphCommand::SetModTargetDepth {
                             inst, mod_index,
                             target_index: pa - 2,
@@ -2379,7 +2379,7 @@ impl State {
                     } else if pa == 3 {
                         // Separator row — no-op.
                     } else if let Some(t) = m.targets.get_mut(pa - 4) {
-                        t.depth = (t.depth + delta).clamp(0.0, 1.0);
+                        t.depth = (t.depth + delta).clamp(DEPTH_MIN, DEPTH_MAX);
                         let _ = self.cmd_tx.send(GraphCommand::SetGroupModTargetDepth {
                             group, mod_index,
                             target_index: pa - 4,
@@ -2397,7 +2397,7 @@ impl State {
                         _ => {
                             let target_idx = pa - 6;
                             if let Some(t) = m.targets.get_mut(target_idx) {
-                                t.depth = (t.depth + delta).clamp(0.0, 1.0);
+                                t.depth = (t.depth + delta).clamp(DEPTH_MIN, DEPTH_MAX);
                                 let _ = self.cmd_tx.send(GraphCommand::SetGroupModTargetDepth {
                                     group, mod_index,
                                     target_index: target_idx,
@@ -2417,7 +2417,7 @@ impl State {
                     // Rows: 0 = source info, 1 = Targets separator, 2+ = depths.
                     if pa >= 2 {
                         if let Some(t) = m.targets.get_mut(pa - 2) {
-                            t.depth = (t.depth + delta).clamp(0.0, 1.0);
+                            t.depth = (t.depth + delta).clamp(DEPTH_MIN, DEPTH_MAX);
                             let _ = self.cmd_tx.send(GraphCommand::SetGroupModTargetDepth {
                                 group, mod_index,
                                 target_index: pa - 2,
@@ -2453,7 +2453,7 @@ impl State {
                 } else if pa == 3 {
                     return; // Separator.
                 } else if let Some(t) = m.targets.get_mut(pa - 4) {
-                    t.depth = value.clamp(0.0, 1.0);
+                    t.depth = value.clamp(DEPTH_MIN, DEPTH_MAX);
                     let _ = self.cmd_tx.send(GraphCommand::SetGroupModTargetDepth {
                         group, mod_index,
                         target_index: pa - 4,
@@ -2471,7 +2471,7 @@ impl State {
                     _ => {
                         let target_idx = pa - 6;
                         if let Some(t) = m.targets.get_mut(target_idx) {
-                            t.depth = value.clamp(0.0, 1.0);
+                            t.depth = value.clamp(DEPTH_MIN, DEPTH_MAX);
                             let _ = self.cmd_tx.send(GraphCommand::SetGroupModTargetDepth {
                                 group, mod_index,
                                 target_index: target_idx,
@@ -2491,7 +2491,7 @@ impl State {
                 // Rows: 0 = source info, 1 = Targets separator, 2+ = depths.
                 if pa >= 2 {
                     if let Some(t) = m.targets.get_mut(pa - 2) {
-                        t.depth = value.clamp(0.0, 1.0);
+                        t.depth = value.clamp(DEPTH_MIN, DEPTH_MAX);
                         let _ = self.cmd_tx.send(GraphCommand::SetGroupModTargetDepth {
                             group, mod_index,
                             target_index: pa - 2,
@@ -4770,8 +4770,8 @@ fn render_session(
                             mod_params.push(ParamSlot {
                                 name: format!("{} depth", t.param_name),
                                 index: (i + depth_offset) as u32,
-                                min: 0.0,
-                                max: 1.0,
+                                min: DEPTH_MIN,
+                                max: DEPTH_MAX,
                                 default: 0.5,
                                 value: t.depth,
                                 kind: ParamKind::Float,
@@ -5655,6 +5655,14 @@ fn to_plugin_slot(lp: LoadedPlugin) -> PluginSlot {
     }
 }
 
+/// Depth range for a modulator target. Negative depth **inverts** the
+/// modulation direction — e.g. a control that lowers the parameter instead of
+/// raising it, an LFO wobbling in anti-phase, or an envelope that dips below
+/// the base. The audio-side math is a plain multiply, so this is only the
+/// editor's bound; sessions already round-trip negative depth.
+const DEPTH_MIN: f32 = -1.0;
+const DEPTH_MAX: f32 = 1.0;
+
 /// Number of param-pane rows for a modulator: source params + "Targets"
 /// separator + one row per target. Scope-independent (lane or group).
 fn modulator_param_len(m: &ModulatorSlot) -> usize {
@@ -5677,7 +5685,7 @@ fn modulator_param_range(m: &ModulatorSlot, pa: usize) -> Option<(f32, f32)> {
             1 => None, // Waveform enum
             2 => Some((0.01, 50.0)),
             3 => None, // Separator
-            _ => m.targets.get(pa - 4).map(|_| (0.0f32, 1.0f32)),
+            _ => m.targets.get(pa - 4).map(|_| (DEPTH_MIN, DEPTH_MAX)),
         },
         ModSourceSlot::Envelope { .. } => match pa {
             1 => Some((0.001, 10.0)),
@@ -5685,12 +5693,12 @@ fn modulator_param_range(m: &ModulatorSlot, pa: usize) -> Option<(f32, f32)> {
             3 => Some((0.0, 1.0)),
             4 => Some((0.001, 10.0)),
             5 => None, // Separator
-            _ => m.targets.get(pa - 6).map(|_| (0.0f32, 1.0f32)),
+            _ => m.targets.get(pa - 6).map(|_| (DEPTH_MIN, DEPTH_MAX)),
         },
         // Row 0 = source info (handled above), 1 = Targets separator, 2+ = depths.
         ModSourceSlot::MidiLearn { .. } => match pa {
             1 => None,
-            _ => m.targets.get(pa - 2).map(|_| (0.0f32, 1.0f32)),
+            _ => m.targets.get(pa - 2).map(|_| (DEPTH_MIN, DEPTH_MAX)),
         },
     }
 }
@@ -5723,8 +5731,8 @@ fn modulator_edit_state(m: &ModulatorSlot, pa: usize) -> Option<EditState> {
             _ => m.targets.get(pa - 4).map(|t| EditState {
                 input: TextInputState::new(&format!("{:.2}", t.depth)),
                 param_name: format!("{} depth", t.param_name),
-                param_min: 0.0,
-                param_max: 1.0,
+                param_min: DEPTH_MIN,
+                param_max: DEPTH_MAX,
             }),
         },
         ModSourceSlot::Envelope { attack, decay, sustain, release } => {
@@ -5735,7 +5743,7 @@ fn modulator_edit_state(m: &ModulatorSlot, pa: usize) -> Option<EditState> {
                 4 => Some((*release, "Release (s)".to_string(), 0.001, 10.0)),
                 5 => None, // Separator
                 _ => m.targets.get(pa - 6).map(|t| {
-                    (t.depth, format!("{} depth", t.param_name), 0.0f32, 1.0f32)
+                    (t.depth, format!("{} depth", t.param_name), DEPTH_MIN, DEPTH_MAX)
                 }),
             };
             edit.map(|(val, pname, min, max)| EditState {
@@ -5751,8 +5759,8 @@ fn modulator_edit_state(m: &ModulatorSlot, pa: usize) -> Option<EditState> {
             _ => m.targets.get(pa - 2).map(|t| EditState {
                 input: TextInputState::new(&format!("{:.2}", t.depth)),
                 param_name: format!("{} depth", t.param_name),
-                param_min: 0.0,
-                param_max: 1.0,
+                param_min: DEPTH_MIN,
+                param_max: DEPTH_MAX,
             }),
         },
     }
@@ -5772,7 +5780,7 @@ fn modulator_row_to_cross_mod(
         let ti = pa - off;
         m.targets
             .get(ti)
-            .map(|t| (K::ModulatorDepth { mod_index, target_index: ti }, 0.0f32, 1.0f32, t.depth, format!("Mod {mod_index} depth {ti}")))
+            .map(|t| (K::ModulatorDepth { mod_index, target_index: ti }, DEPTH_MIN, DEPTH_MAX, t.depth, format!("Mod {mod_index} depth {ti}")))
     };
     match &m.source {
         ModSourceSlot::Lfo { rate, .. } => match pa {
@@ -6250,5 +6258,28 @@ mod tests {
         let macts = action_bar_items(Some(&m), true);
         assert!(macts.iter().any(|(k, _)| *k == "m"), "modulate missing on modulator: {macts:?}");
         assert!(macts.iter().any(|(k, _)| *k == "l"), "learn missing on modulator: {macts:?}");
+    }
+
+    #[test]
+    fn modulator_target_depth_allows_negative() {
+        // A depth row must be editable across -1..1 so modulation can invert.
+        let m = ModulatorSlot {
+            source: ModSourceSlot::Lfo {
+                waveform: crate::plugin::chain::LfoWaveform::Sine,
+                rate: 1.0,
+            },
+            targets: vec![ModTargetSlot {
+                slot: 0,
+                param_name: "cutoff".into(),
+                kind: crate::plugin::chain::ModTargetKind::PluginParam { slot: 0, param_index: 0 },
+                depth: -0.5,
+                param_min: 0.0,
+                param_max: 1.0,
+            }],
+        };
+        // LFO rows: 0=Type, 1=Waveform, 2=Rate, 3=Targets separator, 4=first depth.
+        assert_eq!(modulator_param_range(&m, 4), Some((-1.0, 1.0)));
+        let edit = modulator_edit_state(&m, 4).expect("depth row is editable");
+        assert_eq!((edit.param_min, edit.param_max), (-1.0, 1.0));
     }
 }
