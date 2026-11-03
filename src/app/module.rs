@@ -296,6 +296,7 @@ pub fn to_text_of(model: &SessionModel, nodes: &[NodeId]) -> Result<String, Stri
                 chosen_modulators.insert(index);
             }
             Some(NodePath::Source(_)) => return Err("a source of notes is not part of a module: a module is made of effects and instruments, and the modulators that go with them".to_string()),
+            Some(NodePath::Module(_)) => return Err("a module that was added is not a plugin: choose the plugins and modulators in it".to_string()),
             None => return Err(format!("there is no node {}", node.0)),
         }
     }

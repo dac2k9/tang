@@ -14,7 +14,7 @@ use crossbeam_channel::Sender;
 use crate::app::controller::outputs_fit_the_chain;
 use crate::app::model::{
     AudioCable, BPM_MAX, BPM_MIN, CABLE_GAIN_MAX, CEILING_MAX, CEILING_MIN, Driven, EdgeId, EventCable, FREE, GroupNode, InstrumentNode, MASTER_VOLUME_MAX, MasterNode, ModGain, ModSourceSlot,
-    ModTargetSlot, ModulatorSlot, NEW_CABLE_GAIN, NodeId, NodeIds,
+    ModTargetSlot, ModuleInstance, ModulatorSlot, NEW_CABLE_GAIN, NodeId, NodeIds,
     ParamKind, ParamSlot, PatternState, PluginSlot, SYNC_DIVISIONS, SessionModel, SourceKind, SourceNode, format_from_id, mod_source_slot_to_graph, modulator_slot_commands,
     setting_of, sync_from_name, sync_name, tempo_of_patterns,
 };
@@ -647,11 +647,40 @@ pub fn load_session(
     if master != (MasterNode { limiter: false, ..MasterNode::default() }) {
         let _ = cmd_tx.send(crate::app::controller::master_command(&master, sample_rate));
     }
-    let mut model = SessionModel { instruments, groups, ids, slots, ui, bpm, master, cables: Vec::new(), sources: Vec::new(), event_cables: Vec::new(), free_modulators };
+    let mut model = SessionModel { instruments, groups, ids, slots, ui, bpm, master, cables: Vec::new(), sources: Vec::new(), event_cables: Vec::new(), free_modulators, modules: Vec::new() };
     // The sources of notes, and then the cables: every lane, group, effect and source that one of them is at is there by now.
     load_sources(config, &mut model);
     load_cables(&config.cables, &mut model, cmd_tx)?;
+    // The modules last (a record of what is there already, with a node of its own, so that a session that has none uses no id for them).
+    load_modules(config, &mut model);
     Ok(model)
+}
+
+/// Make the modules that the file says came together (`[[module]]`, step 108), each a record of the lanes and the modulators that it names by their places (`instrument[1]`, `modulator[0]`) with a node of its own. It
+/// is a record of what is there, which a front-end draws as one box, and no part of the sound: a layout is not worth refusing a session for, so a place that is not in the session is left out (and logged), so is a node
+/// that is in a module already (a node is in one at most), and a module that has no member left is not made.
+fn load_modules(config: &session::SessionConfig, model: &mut SessionModel) {
+    for (at, module) in config.modules.iter().enumerate() {
+        let mut members: Vec<NodeId> = Vec::new();
+        for member in &module.members {
+            let node = match member {
+                session::MemberPlace::Lane(lane) => model.instruments.get(*lane).map(|lane| lane.node),
+                session::MemberPlace::Modulator(index) => model.free_modulators.get(*index).map(|modulator| modulator.node),
+            };
+            match node {
+                None => log::warn!("module[{at}].members: {member} is not in the session: left out"),
+                Some(node) if members.contains(&node) || model.module_of(node).is_some() => log::warn!("module[{at}].members: {member} is in a module already: left out"),
+                Some(node) => members.push(node),
+            }
+        }
+        if members.is_empty() {
+            log::warn!("module[{at}] has no member that is in the session: left out");
+            continue;
+        }
+        let node = model.alloc_node();
+        place(&mut model.ui, node, module.ui);
+        model.modules.push(ModuleInstance { node, name: module.name.clone(), members });
+    }
 }
 
 /// The output mix that a session has: what its `[master]` table says, and for each key that is not there what the master is without it (a volume of 1, the limiter in the sound, a ceiling of
@@ -3489,6 +3518,100 @@ plugin = "builtin:osc"
         assert_eq!(again.cables, model.cables);
         let (instruments, groups, cables, sources) = crate::app::save::to_save(&again);
         assert_eq!(session::to_toml(&instruments, &groups, &cables, &sources, None, again.master_ui(), again.bpm_to_save()).unwrap(), saved, "and the file is the same");
+    }
+
+    // -- the modules that were added as one thing (`[[module]]`, step 108) --
+
+    /// Two lanes that came with a module, an LFO that did, a lane that did not, and a second module of one lane.
+    const MODULES: &str = r#"
+[[instrument]]
+plugin = "builtin:osc"
+
+[[instrument]]
+route = "none"
+[[instrument.effect]]
+plugin = "builtin:filter"
+
+[[instrument]]
+route = "none"
+[[instrument.effect]]
+plugin = "builtin:reverb"
+
+[[instrument]]
+route = "none"
+[[instrument.effect]]
+plugin = "builtin:delay"
+
+[[modulator]]
+hears = "instrument[1]"
+[[modulator.target]]
+to = "instrument[1].effect[0]"
+param = "cutoff"
+
+[[module]]
+name = "Room"
+members = ["instrument[1]", "instrument[2]", "modulator[0]"]
+ui = { x = 40, y = 80.5 }
+
+[[module]]
+name = "Echo"
+members = ["instrument[3]"]
+"#;
+
+    #[test]
+    fn a_module_that_a_file_has_is_a_record_of_the_lanes_and_the_modulators_it_names_under_a_node_of_its_own_made_after_the_sources_and_the_cables() {
+        let run = load(MODULES);
+        let model = &run.model;
+        let lanes: Vec<NodeId> = model.instruments.iter().map(|lane| lane.node).collect();
+        let modulator = model.free_modulators[0].node;
+        assert_eq!(model.modules.len(), 2);
+        assert_eq!((model.modules[0].name.as_str(), model.modules[0].members.clone()), ("Room", vec![lanes[1], lanes[2], modulator]));
+        assert_eq!((model.modules[1].name.as_str(), model.modules[1].members.clone()), ("Echo", vec![lanes[3]]));
+        assert_eq!(model.ui.get(&model.modules[0].node), Some(&NodeUi { x: 40.0, y: 80.5 }), "where the box is drawn");
+        assert_eq!(model.ui.get(&model.modules[1].node), None);
+        let last = model.nodes().map(|(node, _)| node.0).max().unwrap();
+        assert_eq!(model.modules[1].node.0, last, "the boxes have the last ids, so that a session that has none uses no id for them");
+        assert!(model.modules[0].node < model.modules[1].node && model.modules.iter().all(|module| module.node > modulator));
+        assert_eq!(model.locate(model.modules[1].node), Some(NodePath::Module(1)));
+        assert!(run.commands.iter().all(|command| !command.contains("odule")), "the audio thread is told nothing of them: {:?}", run.commands);
+        model.check_ids().unwrap();
+        // A session that has none has none, and its ids are what they were.
+        let without = load(&MODULES[..MODULES.find("[[module]]").unwrap()]).model;
+        assert!(without.modules.is_empty());
+        assert_eq!(without.nodes().map(|(node, _)| node.0).max(), Some(model.modules[0].node.0 - 1));
+    }
+
+    #[test]
+    fn what_a_module_has_is_saved_as_it_is_loaded_the_same_record_and_place_and_the_same_file() {
+        let model = load(MODULES).model;
+        let text = saved(&model);
+        assert!(text.contains("[[module]]\nname = \"Room\"\nmembers = [\"instrument[1]\", \"instrument[2]\", \"modulator[0]\"]\nui = { x = 40, y = 80.5 }\n\n[[module]]\nname = \"Echo\"\nmembers = [\"instrument[3]\"]\n"), "{text}");
+        assert!(text.find("[[modulator]]").unwrap() < text.find("[[module]]").unwrap(), "after the modulators that it names: {text}");
+        let again = load(&text).model;
+        assert_eq!(again.modules.iter().map(|module| (module.name.clone(), module.members.len())).collect::<Vec<_>>(), [("Room".to_string(), 3), ("Echo".to_string(), 1)]);
+        assert_eq!(again.ui.get(&again.modules[0].node), Some(&NodeUi { x: 40.0, y: 80.5 }));
+        assert_eq!(saved(&again), text, "and the file is the same");
+        // Where a member is is told by its place among the lanes and the modulators, which a lane that is taken out changes: the file that is saved after names the places that it has then.
+        let mut fewer = load(MODULES).model;
+        let gone = fewer.instruments[0].node;
+        assert!(fewer.remove_lane(0).is_some() && gone != fewer.modules[0].node);
+        let text = saved(&fewer);
+        assert!(text.contains("members = [\"instrument[0]\", \"instrument[1]\", \"modulator[0]\"]") && text.contains("members = [\"instrument[2]\"]"), "{text}");
+    }
+
+    #[test]
+    fn what_a_module_names_that_is_not_there_or_is_in_a_module_already_is_left_out_and_a_module_with_none_left_is_not_made_and_the_session_loads() {
+        let lanes = "[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument]]\nplugin = \"builtin:osc\"\n[[modulator]]\n";
+        let modules = |tables: &str| load(&format!("{lanes}{tables}")).model.modules.iter().map(|module| (module.name.clone(), module.members.len())).collect::<Vec<_>>();
+        // A lane and a modulator that are not there.
+        assert_eq!(modules("[[module]]\nname = \"A\"\nmembers = [\"instrument[0]\", \"instrument[7]\", \"modulator[3]\", \"modulator[0]\"]\n"), [("A".to_string(), 2)]);
+        // A node that is in a module already is not in a second, and a node that is named twice is in once.
+        assert_eq!(modules("[[module]]\nname = \"A\"\nmembers = [\"instrument[0]\", \"instrument[0]\"]\n[[module]]\nname = \"B\"\nmembers = [\"instrument[0]\", \"instrument[1]\"]\n"), [("A".to_string(), 1), ("B".to_string(), 1)]);
+        // A module with no member that is there is not made; one with no name is called by the default; one with no members is not made.
+        assert_eq!(modules("[[module]]\nname = \"A\"\nmembers = [\"instrument[9]\"]\n[[module]]\nmembers = [\"instrument[1]\"]\n[[module]]\nname = \"C\"\n"), [("Module".to_string(), 1)]);
+        let model = load(&format!("{lanes}[[module]]\nname = \"A\"\nmembers = [\"instrument[9]\"]\n[[module]]\nmembers = [\"instrument[1]\"]\n")).model;
+        model.check_ids().unwrap();
+        assert_eq!(model.nodes().filter(|(_, path)| matches!(path, NodePath::Module(_))).count(), 1, "the one that was made, and no node was used for the one that was not");
     }
 
     /// Every `SetGlobalBpm` that a session sent the audio thread, as the tempo it says.

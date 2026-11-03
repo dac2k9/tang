@@ -28,6 +28,7 @@ import { HearsMenu } from "./HearsMenu";
 import { InspectorContext, paramsButtonId } from "./inspector";
 import { LevelStrip } from "./LevelStrip";
 import { ModulateMenu } from "./ModulateMenu";
+import { ModuleTagButton } from "./ModuleTag";
 import { NodeScope, ScopeButton, ScopePanel } from "./NodeScope";
 import { NotesFromMenu, NotesToMenu } from "./NotesMenus";
 import { PatternCell } from "./PatternCell";
@@ -40,7 +41,7 @@ import type { CableRow, PatchNode } from "./toFlow";
  * it left the name 40 pixels in a lane that has a number in its name and a "×" ("Os…"), and 30 in a lane of Pianoteq 9 ("Pian…"). `sub` is what goes after the badge on that line (the button that
  * sends the audio of the node: a lane's header has no room in its row of buttons for another).
  */
-function Header({ name, badge, sub, children, field }: { name: string; badge?: string | null; sub?: ReactNode; children?: ReactNode; field?: ReactNode }) {
+export function Header({ name, badge, sub, children, field }: { name: string; badge?: string | null; sub?: ReactNode; children?: ReactNode; field?: ReactNode }) {
   const badged = badge ? <span className="tang-node__badge">{badge}</span> : null;
   return (
     <header className="tang-node__header">
@@ -260,7 +261,7 @@ function MoveEffectButtons({ node, name }: { node: NodeId; name: string }) {
  * The button of a modulator, an effect or a source that takes it out, with the cables that drive it (or, for a source, the cables of notes from it); the focus goes to `focusTo`, the button that adds one
  * like it (to its lane or group, or to the session), if there is one to go to.
  */
-function RemoveNodeButton({ node, name, focusTo }: { node: NodeId; name: string; focusTo: string | null }) {
+export function RemoveNodeButton({ node, name, focusTo }: { node: NodeId; name: string; focusTo: string | null }) {
   const editor = useEditor();
   return (
     <button
@@ -409,6 +410,8 @@ export function PluginNode({ data, type }: NodeProps<PatchNode>) {
   const held = data.heldIn;
   return (
     <div className={`tang-node tang-node--${type}${unheard} nokey`}>
+      {/* (A lane of a module that is open has the tag that closes the module again: the effect that stands for a lane that has no card has it.) */}
+      {data.module ? <ModuleTagButton tag={data.module} /> : null}
       {/* (An effect takes audio in, at two places if it has a second input, and a lane takes notes in, from the sources: but not a lane whose instrument takes no notes, an audio input.) */}
       {effect ? (
         data.side ? (

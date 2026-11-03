@@ -13,7 +13,7 @@ use crate::app::intent::{Applied, Event, Gain, Intent, IntentError, ModulatorFie
 use crate::app::journal::{Inverse, Journal, RowBefore};
 use crate::app::module::{self, Module, ModuleDrives, ModuleOutput, ModuleTarget};
 use crate::app::model::{
-    BPM_MAX, BPM_MIN, CABLE_GAIN_MAX, DEPTH_MAX, DEPTH_MIN, EdgeId, FieldTarget, LinkOf, MAX_NAME, MAX_PINNED, ModSourceSlot, NEW_CABLE_DEPTH, NEW_CABLE_GAIN, NodeId, NodePath, ParamKind, ParamSlot,
+    BPM_MAX, BPM_MIN, CABLE_GAIN_MAX, DEPTH_MAX, DEPTH_MIN, EdgeId, FieldTarget, LinkOf, MAX_NAME, MAX_PINNED, ModSourceSlot, ModuleInstance, NEW_CABLE_DEPTH, NEW_CABLE_GAIN, NodeId, NodePath, ParamKind, ParamSlot,
     PatternState, PluginSlot, STEP_MAX, STEP_MIN, sync_beats,
 };
 use crate::piano_filter::PianoMode;
@@ -835,7 +835,7 @@ impl Controller {
             NodePath::Modulator { at: ModulatorLocation::Free, index } => (ModulatorLocation::Free, self.model.free_modulators.get(index).and_then(|slot| self.model.ear_of(slot))),
             // (A group has no plugin: what a cable can drive in it is its volume and its pan, and the modulator hears the group.)
             NodePath::Group(group) if to.port.gain().is_some() => (ModulatorLocation::Free, Some(self.model.groups[group].node)),
-            NodePath::Group(_) | NodePath::Source(_) => return Err(invalid("a modulator drives a parameter of a plugin, a volume, a mix or a pan, or a setting of a modulator, and that is none of them")),
+            NodePath::Group(_) | NodePath::Source(_) | NodePath::Module(_) => return Err(invalid("a modulator drives a parameter of a plugin, a volume, a mix or a pan, or a setting of a modulator, and that is none of them")),
         };
         let index = self.model.modulators(at).map_or(0, |rack| rack.len());
         let cable = match to.port {
@@ -1034,13 +1034,14 @@ impl Controller {
         }
         // (What the intent takes out is written down when it is carried out and has nothing here to put back: a preset loaded for the module is part of what it is made of.)
         let journal = self.journal.take();
-        let made = self.make_module(&module, loaded);
+        let made = self.make_module(name, &module, loaded);
         self.journal = journal;
         made
     }
 
-    /// The lanes, the plugins and the cables of `module`, made from the plugins that were loaded for them in the order of its lanes (`load_module`): for each lane its instrument, if it has one, and its effects.
-    fn make_module(&mut self, module: &Module, loaded: Vec<LoadedLane>) -> Result<(), IntentError> {
+    /// The lanes, the plugins and the cables of `module`, made from the plugins that were loaded for them in the order of its lanes (`load_module`): for each lane its instrument, if it has one, and its effects. **The
+    /// module as one thing is made last** (step 108): the record of the lanes and the modulators that came with it, which a front-end draws as one box, under a node of its own, so that what is made before it has the ids it had.
+    fn make_module(&mut self, name: &str, module: &Module, loaded: Vec<LoadedLane>) -> Result<(), IntentError> {
         // (The nodes of each lane: its own, which is its instrument's, and its effects', in the order of the file.)
         let mut made: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
         for ((instrument, effects), lane) in loaded.into_iter().zip(&module.lanes) {
@@ -1074,7 +1075,10 @@ impl Controller {
                 log::warn!("a cable of the module is left out: {error}");
             }
         }
-        self.make_module_modulators(module, &made);
+        let modulators = self.make_module_modulators(module, &made);
+        let members: Vec<NodeId> = made.iter().map(|(lane, _)| *lane).chain(modulators).collect();
+        let node = self.model.alloc_node();
+        self.model.modules.push(ModuleInstance { node, name: name.to_string(), members });
         Ok(())
     }
 
@@ -1082,7 +1086,8 @@ impl Controller {
     /// each hearing the lane of the module that it heard (the lane that was made, or every note), so that a cable can drive the settings of one that comes after it, and then their cables. A cable that drives the depth of
     /// another has to wait for it: those are made last, in sweeps over the ones that wait, each as soon as the cable that it drives is there (a cable that drives one that is never made is left out). Every other cable is made
     /// in the order of the file. What cannot be made (a parameter that the plugin has not, a cable that drives what it drives already) is logged and left out, as the loader leaves it out of a session; nothing is used for it.
-    fn make_module_modulators(&mut self, module: &Module, made: &[(NodeId, Vec<NodeId>)]) {
+    /// The nodes of the modulators that were made, in the order of the file.
+    fn make_module_modulators(&mut self, module: &Module, made: &[(NodeId, Vec<NodeId>)]) -> Vec<NodeId> {
         let at = ModulatorLocation::Free;
         let mut places = Vec::new();
         for modulator in &module.modulators {
@@ -1129,6 +1134,7 @@ impl Controller {
         for (m, t) in waiting {
             log::warn!("cable {t} of modulator {m} of the module drives the depth of a cable that is not there: left out");
         }
+        nodes
     }
 
     /// The cable that `target` is, drawn from the modulator at `place` of the session's own rack: to the parameter of a plugin of the module that has the name (`made` has the nodes of the module's lanes and effects), to
@@ -1273,6 +1279,12 @@ impl Controller {
             NodePath::Source(index) => {
                 self.remove_source(index);
             }
+            // (A module goes with all that came with it: its modulators, and its lanes with their plugins, as one step. A session keeps one lane.)
+            NodePath::Module(index) => {
+                if !self.remove_module(index) {
+                    return Err(invalid("a session keeps its last lane"));
+                }
+            }
         }
         Ok(Done::Restructured)
     }
@@ -1289,7 +1301,7 @@ impl Controller {
                 refuse_a_loop(self.model.loop_if_effect_goes_to(node, to), "moving that effect there")?;
                 self.move_bus_effect(group, from, to);
             }
-            NodePath::Instrument(_) | NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) => return Err(invalid("only an effect can be moved")),
+            NodePath::Instrument(_) | NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) | NodePath::Module(_) => return Err(invalid("only an effect can be moved")),
         }
         Ok(Done::Restructured)
     }
@@ -1354,7 +1366,7 @@ impl Controller {
             NodePath::Instrument(inst) => Ok(PluginAt::Lane { inst, slot: 0 }),
             NodePath::Effect { inst, index } => Ok(PluginAt::Lane { inst, slot: index + 1 }),
             NodePath::GroupEffect { group, index } => Ok(PluginAt::Bus { group, index }),
-            NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) => Err(invalid("that node has no plugin")),
+            NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) | NodePath::Module(_) => Err(invalid("that node has no plugin")),
         }
     }
 
@@ -5447,7 +5459,7 @@ type = "midi"
                     NodePath::Instrument(i) => ctl.model.instruments[i].instrument.as_ref(),
                     NodePath::Effect { inst, index } => ctl.model.instruments[inst].effects.get(index),
                     NodePath::GroupEffect { group, index } => ctl.model.groups[group].effects.get(index),
-                    NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) => return None,
+                    NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) | NodePath::Module(_) => return None,
                 };
                 Some((id, slot.map_or(0, |plugin| plugin.params[0].index)))
             })
@@ -7668,7 +7680,8 @@ to = "master"
         assert_eq!((names(first), names(second)), (vec!["Filter".to_string()], vec!["Math".to_string()]));
         assert_eq!(first.effects[0].mix, 0.9);
         let (new_filter, new_math) = (first.effects[0].node, second.effects[0].node);
-        assert_eq!(ctl.last_made().nodes, [first.node, new_filter, second.node, new_math], "the ids come in the order of the file: a lane and its plugins, and the next lane");
+        let boxed = ctl.model.modules.last().expect("the module is one thing: a box").node;
+        assert_eq!(ctl.last_made().nodes, [first.node, new_filter, second.node, new_math, boxed], "the ids come in the order of the file: a lane and its plugins, and the next lane; and the box of the module last");
         assert_eq!(param(&ctl, NodePath::Effect { inst: 4, index: 0 }, "mode").1, 4.0);
         assert_eq!(ctl.model.cables.len(), cables_before + 1, "one cable, the one that was between the two");
         assert!(ctl.model.cables.iter().any(|cable| (cable.from, cable.to, cable.gain) == (CableFrom::Effect(new_filter), CableTo::EffectSide(new_math), 0.7)), "the cable, at the second input and at its level");
@@ -7721,7 +7734,8 @@ to = "master"
         assert_eq!(plugin.pinned_names(), ["detune".to_string()]);
         assert_eq!(plugin.node, lane.node, "an instrument sits in its lane's node");
         let (new_osc, new_filter, new_math) = (lane.node, lane.effects[0].node, ctl.model.instruments[4].effects[0].node);
-        assert_eq!(ctl.last_made().nodes, [new_osc, new_filter, ctl.model.instruments[4].node, new_math], "an instrument has the lane's node, and no node of its own");
+        let boxed = ctl.model.modules.last().expect("the module is one thing: a box").node;
+        assert_eq!(ctl.last_made().nodes, [new_osc, new_filter, ctl.model.instruments[4].node, new_math, boxed], "an instrument has the lane's node, and no node of its own; the box of the module is the last");
         let kept: Vec<_> = ctl.model.cables[cables_before..].iter().map(|cable| (cable.from, cable.to, cable.gain)).collect();
         assert_eq!(kept, [(CableFrom::Instrument(new_osc), CableTo::Effect(new_math), 0.3), (CableFrom::Effect(new_filter), CableTo::EffectSide(new_math), 0.7)]);
         ctl.model.check_ids().unwrap();
@@ -7748,7 +7762,9 @@ to = "master"
         assert_eq!(ctl.model.instruments.len(), 4);
         let lane = &ctl.model.instruments[3];
         assert!(lane.instrument.is_some() && lane.effects.is_empty());
-        assert_eq!(ctl.last_made().nodes, [lane.node]);
+        assert_eq!(ctl.last_made().nodes.first(), Some(&lane.node));
+        assert_eq!(ctl.last_made().nodes.len(), 2, "the lane, and the box that it is the one member of (step 108)");
+        assert_eq!(ctl.model.modules.last().map(|module| module.members.clone()), Some(vec![lane.node]));
         ctl.apply(Intent::Undo).unwrap();
         assert_eq!(ctl.model.instruments.len(), 3, "the lane is taken out");
         ctl.apply(Intent::Redo).unwrap();
@@ -7899,7 +7915,9 @@ to = "master"
         assert_eq!(told.iter().filter(|command| command.starts_with("AddFreeModTarget")).count(), 10, "a cable for each one that stays");
         assert_eq!(told.iter().filter(|command| command.starts_with("SetModulatorEar")).count(), 2, "an ear for each that hears a lane");
         // The nodes that were made come in the order of the file: each lane and its plugins, and then the modulators.
-        assert_eq!(ctl.last_made().nodes, [lane_one, new_filter, new_delay, new_reverb, lane_two, new_math, made[0], made[1], made[2], made[3], made[4]]);
+        let boxed = ctl.model.modules.last().expect("the module is one thing: a box").node;
+        assert_eq!(ctl.last_made().nodes, [lane_one, new_filter, new_delay, new_reverb, lane_two, new_math, made[0], made[1], made[2], made[3], made[4], boxed]);
+        assert_eq!(ctl.model.modules.last().map(|module| module.members.clone()), Some([vec![lane_one, lane_two], made.to_vec()].concat()), "the lanes, and then the modulators, in the order they were made");
 
         // One step of the history, which Undo takes out whole, the modulators first, and Redo makes again under the ids that they had.
         assert_eq!(ctl.history_state().undo.as_deref(), Some("add Rack"));
@@ -8620,6 +8638,356 @@ depth = 0.5
         assert!(
             committed == fresh,
             "{} is not what a graph module comes to now: run `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture` and commit the result",
+            path.display()
+        );
+    }
+
+    // -- a module as one box (step 108: the record of the lanes and the modulators that came with it) --
+
+    /// The module `Pair` of `A_GRAPH_TO_KEEP` (the filter of lane 0, the math of lane 1 and the LFO that hears lane 0, with the cable among them), saved and added to the session: the nodes of its two lanes, of its modulator and of
+    /// the box.
+    struct Boxed {
+        lanes: [NodeId; 2],
+        modulator: NodeId,
+        module: NodeId,
+    }
+
+    /// `A_GRAPH_TO_KEEP` with `Pair` added to it, and what came of it.
+    fn a_module_added(dir: &std::path::Path) -> (StubEngine, Controller, Boxed) {
+        let (engine, mut ctl) = a_graph(dir);
+        let (filter, math, lfo) = (ctl.model.instruments[0].effects[0].node, ctl.model.instruments[1].effects[0].node, ctl.model.free_modulators[1].node);
+        save_selection(&mut ctl, &[filter, math, lfo], "Pair").unwrap();
+        add_free_effect(&mut ctl, "module:Pair").unwrap();
+        let module = *ctl.last_made().nodes.last().expect("the box is made");
+        let boxed = Boxed { lanes: [ctl.model.instruments[3].node, ctl.model.instruments[4].node], modulator: ctl.model.free_modulators[6].node, module };
+        (engine, ctl, boxed)
+    }
+
+    /// The session as a client sees it, for what must come back as it was.
+    fn seen(ctl: &Controller) -> serde_json::Value {
+        testutil::wire(&ctl.snapshot().graph)
+    }
+
+    #[test]
+    fn a_module_that_is_added_is_one_record_of_its_lanes_and_its_modulators_under_a_node_that_is_made_last_and_a_module_that_is_saved_makes_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_engine, mut ctl) = a_graph(dir.path());
+        let (filter, math, lfo) = (ctl.model.instruments[0].effects[0].node, ctl.model.instruments[1].effects[0].node, ctl.model.free_modulators[1].node);
+        save_selection(&mut ctl, &[filter, math, lfo], "Pair").unwrap();
+        assert!(ctl.model.modules.is_empty(), "a module that is saved is in the library and is not in the session");
+        add_free_effect(&mut ctl, "module:Pair").unwrap();
+        let made = ctl.last_made().nodes.clone();
+        let (first, second, modulator) = (ctl.model.instruments[3].node, ctl.model.instruments[4].node, ctl.model.free_modulators[6].node);
+        let module = *made.last().expect("the box is the last that was made");
+        assert_eq!(made.iter().filter(|node| **node == module).count(), 1);
+        assert!(made.contains(&first) && made.contains(&second) && made.contains(&modulator), "what came with it was made before the box, so that the ids of those are what they were: {made:?}");
+        assert_eq!(ctl.model.modules, [ModuleInstance { node: module, name: "Pair".to_string(), members: vec![first, second, modulator] }], "the lanes in the order of the file and then its modulators; the effects are in the lanes");
+        assert_eq!(ctl.model.locate(module), Some(NodePath::Module(0)));
+        ctl.model.check_ids().unwrap();
+        // An effect that stands by itself and is no module is no box, and a second module is the second record.
+        add_free_effect(&mut ctl, "builtin:reverb").unwrap();
+        assert_eq!(ctl.model.modules.len(), 1);
+        add_free_effect(&mut ctl, "module:Pair").unwrap();
+        assert_eq!(ctl.model.modules.len(), 2);
+        assert_eq!(ctl.model.modules[1].name, "Pair");
+        assert!(ctl.model.modules[0].members.iter().all(|node| !ctl.model.modules[1].members.contains(node)), "a node is in one module");
+        ctl.model.check_ids().unwrap();
+        // The box is a node of the graph that a client gets: after the modulators and before the master, named for the module, with the nodes that came with it.
+        let graph = ctl.snapshot().graph;
+        let at = graph.nodes.iter().position(|node| node.id == module).expect("the box is in the graph");
+        let node = &graph.nodes[at];
+        assert_eq!((node.name.as_str(), node.parent, node.ui), ("Pair", None, None));
+        assert_eq!(node.kind, NodeKind::Module { members: vec![first, second, modulator] });
+        assert!(graph.nodes[..at].iter().filter(|node| matches!(node.kind, NodeKind::Modulator { .. })).count() == ctl.model.free_modulators.len(), "after every modulator");
+        assert!(matches!(graph.nodes[at + 2].kind, NodeKind::Master { .. }), "the next is the second box, and then the master: {:?}", graph.nodes.iter().map(|node| node.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_record_of_a_module_goes_with_its_last_member_when_the_add_is_undone_and_comes_back_under_the_same_node_when_it_is_redone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_engine, mut ctl, boxed) = a_module_added(dir.path());
+        let record = ctl.model.modules.clone();
+        assert_eq!(ctl.history_state().undo.as_deref(), Some("add Pair"), "one step, in the words of the button");
+        for round in 0..2 {
+            ctl.apply(Intent::Undo).unwrap();
+            assert!(ctl.model.modules.is_empty(), "round {round}: a record with no member is gone");
+            assert_eq!(ctl.model.locate(boxed.module), None);
+            assert_eq!((ctl.model.instruments.len(), ctl.model.free_modulators.len()), (3, 6));
+            ctl.model.check_ids().unwrap();
+            ctl.apply(Intent::Redo).unwrap();
+            assert_eq!(ctl.model.modules, record, "round {round}: the same record, under the same node, with the members in the order they were made");
+            ctl.model.check_ids().unwrap();
+        }
+    }
+
+    #[test]
+    fn taking_a_module_out_takes_out_its_modulators_and_its_lanes_as_one_step_that_undo_puts_back_whole_with_its_record_and_redo_takes_out_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl, boxed) = a_module_added(dir.path());
+        let (record, before) = (ctl.model.modules.clone(), seen(&ctl));
+        let cables = ctl.model.cables.len();
+        sent(&engine);
+        ctl.apply(Intent::RemoveNode { node: boxed.module }).unwrap();
+        assert!(ctl.model.modules.is_empty());
+        assert_eq!((ctl.model.instruments.len(), ctl.model.free_modulators.len()), (3, 6), "the two lanes and the modulator that came with it are gone");
+        assert_eq!(ctl.model.cables.len(), cables - 1, "and the cable between its plugins");
+        assert!(ctl.model.free_modulators.iter().all(|modulator| modulator.node != boxed.modulator));
+        ctl.model.check_ids().unwrap();
+        let told = sent(&engine);
+        assert!(told.iter().any(|command| command.starts_with("RemoveFreeModulator")) && told.iter().filter(|command| command.starts_with("RemoveInstrument")).count() == 2, "the audio thread is told what goes: {told:?}");
+        assert!(told.iter().position(|command| command.starts_with("RemoveFreeModulator")) < told.iter().position(|command| command.starts_with("RemoveInstrument")), "the modulators, which were made last, go first: {told:?}");
+        assert_eq!(ctl.history_state().undo.as_deref(), Some("remove Pair"), "one step, in the words of the button that adds one");
+        let after = seen(&ctl);
+
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(ctl.model.modules, record, "the record is back, as it was");
+        assert_eq!(seen(&ctl), before, "and so is everything that came with it, as it was");
+        ctl.model.check_ids().unwrap();
+        ctl.apply(Intent::Redo).unwrap();
+        sent(&engine);
+        assert!(ctl.model.modules.is_empty());
+        assert_eq!(seen(&ctl), after);
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(seen(&ctl), before, "and again");
+        assert_eq!(ctl.model.modules, record);
+    }
+
+    #[test]
+    fn a_node_that_is_taken_out_of_a_module_leaves_it_and_a_module_that_has_none_left_is_gone_and_undo_gives_each_back_as_the_module_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl, boxed) = a_module_added(dir.path());
+        let [first, second] = boxed.lanes;
+        let members = |ctl: &Controller| ctl.model.modules.first().map(|module| module.members.clone());
+        let name = ctl.model.modules[0].name.clone();
+        assert_eq!(members(&ctl), Some(vec![first, second, boxed.modulator]));
+        ctl.apply(Intent::RemoveNode { node: boxed.modulator }).unwrap();
+        assert_eq!(members(&ctl), Some(vec![first, second]), "the modulator is not in it any more");
+        ctl.apply(Intent::RemoveNode { node: second }).unwrap();
+        assert_eq!(members(&ctl), Some(vec![first]));
+        assert_eq!(ctl.model.modules[0].node, boxed.module, "the box is the same node");
+        ctl.apply(Intent::RemoveNode { node: first }).unwrap();
+        // (The audio thread hands the lanes back when it is looked at, which undo waits for.)
+        sent(&engine);
+        assert_eq!(members(&ctl), None, "a module that has no member is gone");
+        assert_eq!(ctl.model.locate(boxed.module), None);
+        ctl.model.check_ids().unwrap();
+        for expected in [vec![first], vec![first, second], vec![first, second, boxed.modulator]] {
+            ctl.apply(Intent::Undo).unwrap();
+            assert_eq!(members(&ctl), Some(expected), "undo gives the module back as it was");
+            assert_eq!((ctl.model.modules[0].node, ctl.model.modules[0].name.as_str()), (boxed.module, name.as_str()));
+            ctl.model.check_ids().unwrap();
+        }
+        // A node that is in no module takes none with it.
+        let outside = ctl.model.instruments[0].node;
+        ctl.apply(Intent::RemoveNode { node: outside }).unwrap();
+        assert_eq!(members(&ctl), Some(vec![first, second, boxed.modulator]));
+        sent(&engine);
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(members(&ctl), Some(vec![first, second, boxed.modulator]));
+    }
+
+    #[test]
+    fn two_modules_are_put_back_in_the_order_they_were_added_whether_the_second_is_taken_out_whole_or_by_its_last_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl, boxed) = a_module_added(dir.path());
+        add_free_effect(&mut ctl, "module:Pair").unwrap();
+        let (first, second) = (boxed.module, ctl.model.modules[1].node);
+        let order = |ctl: &Controller| ctl.model.modules.iter().map(|module| module.node).collect::<Vec<_>>();
+        assert_eq!(order(&ctl), [first, second]);
+        // The second, taken out whole: Undo puts its record back second, and not first.
+        ctl.apply(Intent::RemoveNode { node: second }).unwrap();
+        assert_eq!(order(&ctl), [first]);
+        sent(&engine);
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(order(&ctl), [first, second], "the record is where it was among the records");
+        ctl.model.check_ids().unwrap();
+        // Its members taken out one by one: the last to go takes the record with it, and Undo of that puts the record back second.
+        let members = ctl.model.modules[1].members.clone();
+        for member in &members {
+            ctl.apply(Intent::RemoveNode { node: *member }).unwrap();
+        }
+        assert_eq!(order(&ctl), [first], "a record with no member is gone");
+        sent(&engine);
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(order(&ctl), [first, second], "the record that went with its last member is back second");
+        assert_eq!(ctl.model.modules[1].members, [*members.last().expect("it has members")], "with the member that came back");
+        ctl.model.check_ids().unwrap();
+    }
+
+    #[test]
+    fn a_module_that_has_every_lane_of_the_session_is_not_taken_out_a_session_keeps_a_lane_and_nothing_is_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_engine, mut ctl, boxed) = a_module_added(dir.path());
+        for inst in [0, 0, 0] {
+            let node = ctl.model.instruments[inst].node;
+            ctl.apply(Intent::RemoveNode { node }).unwrap();
+        }
+        assert_eq!(ctl.model.instruments.len(), 2, "the two lanes of the module are all that is left");
+        let (before, history, rev) = (seen(&ctl), ctl.history_state(), ctl.rev);
+        let error = ctl.apply(Intent::RemoveNode { node: boxed.module }).expect_err("refused");
+        assert_eq!(error, invalid("a session keeps its last lane"));
+        assert_eq!((seen(&ctl), ctl.history_state(), ctl.rev), (before, history, rev), "nothing was taken out, the step is not there and no revision was used");
+        assert_eq!(ctl.model.modules.len(), 1);
+        ctl.model.check_ids().unwrap();
+    }
+
+    #[test]
+    fn the_box_of_a_module_is_placed_as_any_node_is_and_keeps_its_place_through_a_removal_and_its_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl, boxed) = a_module_added(dir.path());
+        let applied = place(&mut ctl, boxed.module, 120.0, -40.5).unwrap();
+        assert_eq!(applied, Applied::of(ctl.rev, vec![Event::NodeUiSet { node: boxed.module, ui: Some(NodeUi { x: 120.0, y: -40.5 }) }]));
+        let at = |ctl: &Controller| ctl.snapshot().graph.nodes.into_iter().find(|node| node.id == boxed.module).and_then(|node| node.ui);
+        assert_eq!(at(&ctl), Some(NodeUi { x: 120.0, y: -40.5 }));
+        ctl.apply(Intent::RemoveNode { node: boxed.module }).unwrap();
+        sent(&engine);
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(at(&ctl), Some(NodeUi { x: 120.0, y: -40.5 }), "the box comes back where it was");
+        assert!(place(&mut ctl, NodeId(9_999), 0.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn a_box_has_no_plugin_and_no_value_and_no_port_of_its_own_so_every_intent_that_names_a_plugin_a_value_or_a_cable_refuses_it_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl, boxed) = a_module_added(dir.path());
+        let module = boxed.module;
+        let mix = Endpoint { node: NodeId::MASTER, port: Port::AudioIn };
+        let box_out = Endpoint { node: module, port: Port::AudioOut };
+        let box_in = Endpoint { node: module, port: Port::AudioIn };
+        let lane_out = Endpoint { node: boxed.lanes[0], port: Port::AudioOut };
+        let intents = vec![
+            Intent::SetMute { node: module, muted: true },
+            Intent::SetSolo { node: module, solo: true },
+            Intent::SetRoute { node: module, route: Route::None },
+            Intent::SetFeed { node: module, feed: Feed::None },
+            Intent::SetGain { node: module, gain: Gain::Volume, value: 0.5 },
+            Intent::SetParam { node: module, param: 0, value: 0.5 },
+            Intent::SetPinned { node: module, params: Vec::new() },
+            Intent::LoadPreset { node: module, preset: "x".to_string() },
+            Intent::SetRange { node: module, range: None },
+            Intent::AddEffect { parent: module, plugin: "builtin:filter".to_string() },
+            Intent::ReplaceInstrument { node: module, plugin: "builtin:osc".to_string() },
+            Intent::ClearInstrument { node: module },
+            Intent::MoveEffect { node: module, index: 0 },
+            Intent::AddCable { from: box_out, to: mix, gain: None },
+            Intent::AddCable { from: lane_out, to: box_in, gain: None },
+            Intent::AddFreeModulator { kind: ModulatorKind::Lfo, hears: Some(module) },
+            Intent::Modulate { to: Endpoint { node: module, port: Port::Mix }, kind: ModulatorKind::Lfo, depth: None },
+            Intent::AddModEdge { modulator: boxed.modulator, to: Endpoint { node: module, port: Port::Mix } },
+            Intent::SetModulatorEar { node: boxed.modulator, ear: Some(module) },
+            Intent::SetLaneGroup { node: boxed.lanes[0], group: Some(module) },
+            Intent::RenameGroup { node: module, name: "x".to_string() },
+            Intent::SaveSelectionAsModule { nodes: vec![module], name: "Box".to_string() },
+            Intent::SaveModule { node: module, name: "Box".to_string() },
+        ];
+        let (before, rev, history) = (seen(&ctl), ctl.rev, ctl.history_state());
+        sent(&engine);
+        for intent in intents {
+            let refused = ctl.apply(intent.clone());
+            assert!(matches!(refused, Err(IntentError::Invalid(_))), "{intent:?}: {refused:?}");
+        }
+        // (A cable at a box is turned away by the rule for the ends of a cable, in its words, and not by a later check that the end is not there.)
+        assert_eq!(ctl.apply(Intent::AddCable { from: box_out, to: mix, gain: None }).expect_err("refused"), invalid("a module has no output of audio of its own: cables start at the plugins in it"));
+        assert_eq!(ctl.apply(Intent::AddCable { from: lane_out, to: box_in, gain: None }).expect_err("refused"), invalid("a module has no input of audio of its own: cables end at the plugins in it"));
+        assert_eq!((seen(&ctl), ctl.rev, ctl.history_state()), (before, rev, history), "no refusal changed anything or used a revision");
+        assert!(sent(&engine).is_empty(), "and the audio thread heard nothing");
+        let error = ctl.apply(Intent::SaveSelectionAsModule { nodes: vec![module], name: "Box".to_string() }).expect_err("refused").to_string();
+        assert!(error.contains("a module that was added is not a plugin"), "{error}");
+        ctl.model.check_ids().unwrap();
+    }
+
+    /// A session of two lanes and a modulator, small, for the fixture of what a module comes to as one box: lane 0 is an oscillator with a filter, lane 1 has no instrument and a reverb, and an LFO that hears lane 0 drives the
+    /// filter's cutoff.
+    const A_BOX_TO_ADD: &str = r#"
+[[instrument]]
+plugin = "builtin:osc"
+
+[[instrument.effect]]
+plugin = "builtin:filter"
+
+[[instrument]]
+route = "none"
+
+[[instrument.effect]]
+plugin = "builtin:reverb"
+
+[[modulator]]
+type = "lfo"
+hears = "instrument[0]"
+
+[[modulator.target]]
+to = "instrument[0].effect[0]"
+param = "cutoff"
+depth = 0.25
+"#;
+
+    /// What the controller makes of a module as one box (step 108), as the web client's tests read it (`web/src/client/fixtures/moduleBoxes.json`): the filter, the reverb and the LFO of `A_BOX_TO_ADD` saved as `Pair`, added, placed,
+    /// taken out whole, put back, taken out again, and what is in it taken out one node after the other and put back, a second one added and the first taken out, on a session of its own that is small, so that the fixture is. Each step is
+    /// answered by the events it made (stamped), whether it changed the structure, what Undo and Redo would do after it, and the nodes, the cables and the layout of the telemetry that the session has then. `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture`
+    /// rewrites it.
+    #[test]
+    fn the_web_clients_fixture_of_what_a_module_comes_to_as_one_box_is_current() {
+        let library = tempfile::tempdir().unwrap();
+        let (handles, engine) = testutil::stub_engine_of(4_096);
+        let mut ctl = Controller::new(load(A_BOX_TO_ADD).model, handles, None);
+        ctl.catalog.add(plugin::builtin::enumerate_plugins());
+        ctl.modules_dir = Some(library.path().to_path_buf());
+        ctl.subscribe(Box::new(|_: &Applied| {}));
+        let normalized = |mut layout: serde_json::Value| {
+            layout["rev"] = serde_json::json!(1);
+            layout
+        };
+        let mut snapshot = testutil::wire(&ctl.snapshot());
+        snapshot["telemetry"]["rev"] = serde_json::json!(1);
+        let (filter, reverb, lfo) = (ctl.model.instruments[0].effects[0].node, ctl.model.instruments[1].effects[0].node, ctl.model.free_modulators[0].node);
+        let mut steps = Vec::new();
+        let mut take = |ctl: &mut Controller, intent: Intent| {
+            let applied = ctl.apply(intent.clone()).unwrap_or_else(|error| panic!("{intent:?}: {error}"));
+            engine.drain();
+            let state = ctl.snapshot();
+            let history = ctl.history_state();
+            steps.push(serde_json::json!({
+                "intent": testutil::wire(&intent),
+                "events": testutil::wire(&applied.stamped()),
+                "restructured": applied.restructured,
+                "history": { "undo": history.undo, "redo": history.redo },
+                "graph": testutil::wire(&state.graph),
+                "telemetry": normalized(testutil::wire(&state.telemetry)),
+            }));
+        };
+        let add = || Intent::AddFreeEffect { plugin: "module:Pair".to_string() };
+        take(&mut ctl, Intent::SaveSelectionAsModule { nodes: vec![filter, reverb, lfo], name: "Pair".to_string() });
+        take(&mut ctl, add());
+        let first_box = ctl.model.modules[0].node;
+        take(&mut ctl, Intent::SetNodeUi { node: first_box, ui: Some(NodeUi { x: 24.0, y: 48.5 }) });
+        take(&mut ctl, Intent::RemoveNode { node: first_box });
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::Redo);
+        take(&mut ctl, Intent::Undo);
+        // (What is in the module leaves it one node after the other, the modulator and then a lane, and comes back as the module was: the second lane is left, and then the first, which is the last member.)
+        let (modulator, first_lane, second_lane) = (ctl.model.modules[0].members[2], ctl.model.modules[0].members[0], ctl.model.modules[0].members[1]);
+        take(&mut ctl, Intent::RemoveNode { node: modulator });
+        take(&mut ctl, Intent::RemoveNode { node: first_lane });
+        take(&mut ctl, Intent::RemoveNode { node: second_lane });
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::Undo);
+        // (A second box, and the first taken out and put back while the second stays.)
+        take(&mut ctl, add());
+        take(&mut ctl, Intent::RemoveNode { node: first_box });
+        take(&mut ctl, Intent::Undo);
+        let fixture = serde_json::json!({ "snapshot": snapshot, "steps": steps });
+        let fresh = serde_json::to_string_pretty(&fixture).unwrap() + "\n";
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/src/client/fixtures/moduleBoxes.json");
+        if std::env::var_os("TANG_UPDATE_TYPES").is_some() {
+            std::fs::write(&path, &fresh).unwrap();
+            return;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            committed == fresh,
+            "{} is not what a module comes to as one box now: run `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture` and commit the result",
             path.display()
         );
     }

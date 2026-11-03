@@ -31,7 +31,7 @@ use crossbeam_channel::{Receiver, Sender};
 use crate::app::apply::{Done, PluginAt};
 use crate::app::controller::{has_audio_output, outputs_fit_the_chain, ChainAt, Controller};
 use crate::app::intent::{Applied, IntentError};
-use crate::app::model::{mod_source_slot_to_graph, modulator_slot_commands, AudioCable, EventCable, GroupNode, InstrumentNode, ModTargetSlot, ModulatorSlot, NodeId, NodePath, ParamKind, PluginSlot, RemovedCable, SourceKind, SourceNode};
+use crate::app::model::{mod_source_slot_to_graph, modulator_slot_commands, AudioCable, EventCable, GroupNode, InstrumentNode, ModTargetSlot, ModuleInstance, ModulatorSlot, NodeId, NodePath, ParamKind, PluginSlot, RemovedCable, SourceKind, SourceNode};
 use crate::plugin::chain::{GraphCommand, KeptGroup, KeptLane, ModTarget, ModulatorLocation, NoteRemapper};
 use crate::plugin::{self, Plugin};
 use crate::session::RemapTarget;
@@ -68,6 +68,9 @@ pub(super) enum Inverse {
     EventCable(EventCable),
     /// A source of notes, which goes back among the sources at `index`, under the node it had. (The cables of notes that started at it were taken out before it, each written down, and come back after it.)
     Source { index: usize, source: SourceNode },
+    /// A module (step 108) as it was before a member left it or it went with all its members: undo gives it back, as it was, at its place among the modules (one that is still there, with a member less, is
+    /// replaced by what it was). It is written down before the member that left, so that it is put back after it.
+    Module { index: usize, module: ModuleInstance },
     /// Something went that cannot be put back one thing at a time (cables that drive each other's depths, `RemovedCable::still_driven`): what
     /// the operation did is not a step of the history, which is forgotten as it is for what cannot be undone.
     NoWayBack,
@@ -402,7 +405,8 @@ impl Controller {
                         return Err(IntentError::Invalid(format!("node {} is not there to have its preset put back", node.0)));
                     }
                 }
-                Inverse::NoWayBack => {}
+                // (A module comes back as it was, whether it is gone or has a member less now: nothing of it is in the way.)
+                Inverse::Module { .. } | Inverse::NoWayBack => {}
             }
         }
         // The plugins first: what can fail fails before anything is changed. (What was recovered stays in hand if a later one cannot be had, and goes with the
@@ -505,6 +509,9 @@ impl Controller {
             }
             Inverse::Source { index, source } => {
                 self.model.insert_source_at(index, source);
+            }
+            Inverse::Module { index, module } => {
+                self.model.insert_module_at(index, module);
             }
             Inverse::Modulator { at, index, modulator, bases } => {
                 debug_assert_eq!(modulator.targets.len(), bases.len(), "a base for each cable");

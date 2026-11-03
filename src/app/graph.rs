@@ -91,6 +91,10 @@ pub enum NodeKind {
     Master { volume: f32, limiter: bool, ceiling: f32 },
     /// A source of notes that a person put in the session: the keys, or a MIDI device. Its output of events is where the event cables start.
     Source { source: SourceInfo },
+    /// A module that was added to the session as one thing (step 108): `name` is what it is called in the library, and `members` the lanes and the modulators that came with it, which a front-end draws as one
+    /// box (the effects of a lane are in the lane: they are in the module with it). The nodes in it are in the graph as any are, and the cables to them: a module is the record of what came together, and has no
+    /// part in the sound.
+    Module { members: Vec<NodeId> },
 }
 
 /// What an effect that has a second audio input calls its two inputs (`Plugin::side_input`): what a front-end names the two handles by.
@@ -432,7 +436,7 @@ impl From<MidiBindSource> for MidiControl {
 impl SessionModel {
     /// The session as a graph: the sources of notes first, then groups (each followed by its bus effects and
     /// modulators), then lanes (each followed by its effects and modulators), then the modulators that are in no lane and
-    /// no group (they have no parent), then the master. The edges are the audio path, the sources' links to the lanes that hear every source, the audio cables, the event cables, then the
+    /// no group (they have no parent), then the modules that were added as one thing, then the master. The edges are the audio path, the sources' links to the lanes that hear every source, the audio cables, the event cables, then the
     /// modulation targets in the order of the nodes that own them: the groups' modulators', the lanes' and the free ones'.
     pub fn graph(&self) -> Graph {
         let mut nodes = Vec::new();
@@ -491,6 +495,9 @@ impl SessionModel {
 
         // The modulators belong to no lane and no group: they have no parent (what they hear is `hears`).
         nodes.extend(self.free_modulators.iter().map(|m| modulator_node(m, None, self.ear_of(m))));
+
+        // The modules that were added as one thing come after the modulators: each a node of its own, with the nodes that came with it.
+        nodes.extend(self.modules.iter().map(|module| Node { id: module.node, parent: None, name: module.name.clone(), ui: None, kind: NodeKind::Module { members: module.members.clone() } }));
 
         nodes.push(Node { id: NodeId::MASTER, parent: None, name: "Master".to_string(), ui: None, kind: NodeKind::Master { volume: self.master.volume, limiter: self.master.limiter, ceiling: self.master.ceiling } });
         // Where each of these nodes is drawn, if it has been placed (the table also has the places of nodes that have gone).
@@ -2046,6 +2053,33 @@ depth = 0.2
         let graph = model.graph();
         let wire: Vec<serde_json::Value> = model.instruments[0].effects.iter().map(|fx| serde_json::to_value(&node(&graph, fx.node).kind).unwrap()).collect();
         assert_eq!((wire[0]["kind"].clone(), wire[0]["feed"].clone(), wire[1]["feed"].clone()), (json!("effect"), json!("chain"), json!("none")));
+    }
+
+    #[test]
+    fn a_module_is_a_node_with_the_nodes_that_came_with_it_after_the_modulators_and_before_the_master_and_says_so_on_the_wire() {
+        use crate::app::model::ModuleInstance;
+        let mut model = load("[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument]]\nroute = \"none\"\n[[instrument.effect]]\nplugin = \"builtin:filter\"\n[[modulator]]\nhears = \"instrument[1]\"\n").model;
+        let (lane, modulator) = (model.instruments[1].node, model.free_modulators[0].node);
+        let id = model.alloc_node();
+        model.modules.push(ModuleInstance { node: id, name: "Room".to_string(), members: vec![lane, modulator] });
+        model.ui.insert(id, NodeUi { x: 12.0, y: 34.5 });
+        let graph = model.graph();
+        let order: Vec<NodeId> = graph.nodes.iter().map(|node| node.id).collect();
+        assert_eq!(order.iter().rev().take(3).copied().collect::<Vec<_>>(), [NodeId::MASTER, id, modulator], "the box comes after the modulators and before the master");
+        let found = node(&graph, id);
+        assert_eq!((found.name.as_str(), found.parent, found.ui), ("Room", None, Some(NodeUi { x: 12.0, y: 34.5 })));
+        assert_eq!(found.kind, NodeKind::Module { members: vec![lane, modulator] });
+        let wire = serde_json::to_value(found).unwrap();
+        assert_eq!(wire, json!({"id": id.0, "parent": null, "name": "Room", "ui": {"x": 12.0, "y": 34.5}, "kind": "module", "members": [lane.0, modulator.0]}));
+        // The nodes that came with it are in the graph as any are, and so are their cables: the box is the record of what came together, and no part of the sound.
+        assert!(graph.nodes.iter().any(|node| node.id == lane) && graph.nodes.iter().any(|node| node.id == modulator));
+        assert_eq!(graph.edges, SessionModel::graph(&{
+            let mut without = load("[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument]]\nroute = \"none\"\n[[instrument.effect]]\nplugin = \"builtin:filter\"\n[[modulator]]\nhears = \"instrument[1]\"\n").model;
+            without.alloc_node();
+            without
+        })
+        .edges);
+        assert_eq!(serde_json::from_value::<Graph>(serde_json::to_value(&graph).unwrap()).unwrap(), graph);
     }
 
     #[test]

@@ -3,8 +3,9 @@ import { describe, expect, test } from "vitest";
 import { MODULE_FORMAT } from "../../client/catalog";
 import type { ClientState } from "../../client/connection";
 import { builtinCatalog, moduleGraphsFixture, nodeNamed, tracerSnapshot } from "../../client/fixtures";
-import type { CatalogEntry, Node, NodeId, Snapshot } from "../../protocol";
+import type { CatalogEntry, Graph, Node, NodeId, Snapshot } from "../../protocol";
 import type { ContextItem } from "../../ui/ContextMenu";
+import { effect, lane, link, master as theMaster, moduleNode } from "./boxesKit";
 import { edgeMenu, edgeSpec, nodeMenu, nodeSpec, paneMenu, SAVE_CHOSEN, selectionMenu } from "./contextMenus";
 import type { CanvasActions, MenuDeps, MenuEditor } from "./contextMenus";
 import { modulePluginsOf } from "./selection";
@@ -101,6 +102,7 @@ function rig(snapshot: Snapshot | null, options: { state?: Partial<ClientState>;
     arrange: say("arrange"),
     canArrange: true,
     fit: say("fit"),
+    toggleModule: (module) => canvasAsked.push(`toggleModule ${String(module)}`),
     ...options.canvas,
   };
   const state = stateOf(snapshot, options.state);
@@ -158,6 +160,8 @@ function dataOf(found: Node, overrides: Partial<PatchNodeData> = {}): PatchNodeD
     source: found.kind === "source" ? found.source : null,
     heldIn: null,
     side: null,
+    box: null,
+    module: null,
     ...overrides,
   };
 }
@@ -184,7 +188,7 @@ describe("the menu of the canvas", () => {
     expect(asked).toEqual([["addInstrument", first.id, { x: 120, y: -40 }]]);
   });
 
-  test("adds an effect where the pointer was, and a module wherever the layout puts it, since it is more than one node; the modules come first", () => {
+  test("adds an effect where the pointer was, and a module too, which is one box on the canvas; the modules come first", () => {
     const module: CatalogEntry = { id: "module:Dub chain", name: "Dub chain", format: MODULE_FORMAT, isInstrument: false, params: 2, presets: 0 };
     const { deps, asked } = rig(tracerSnapshot, { at: { x: 10, y: 20 }, state: { catalog: { scanning: false, entries: [...builtinCatalog, module] } } });
     const effects = opened(paneMenu(deps), "add-effect");
@@ -195,7 +199,7 @@ describe("the menu of the canvas", () => {
     if (!plugin?.run) throw new Error("a built-in effect is there to choose");
     plugin.run();
     expect(asked).toEqual([
-      ["addFreeEffect", "module:Dub chain", undefined],
+      ["addFreeEffect", "module:Dub chain", { x: 10, y: 20 }],
       ["addFreeEffect", plugin.id, { x: 10, y: 20 }],
     ]);
   });
@@ -716,5 +720,53 @@ describe("the menu that a right click on a node opens", () => {
     const spec = nodeSpec(several.deps, onCanvas(keys, false));
     expect(spec.label).toBe("Keys");
     expect(idsOf(spec.items)).toEqual(["notes", "remove"]);
+  });
+});
+
+describe("the menus of a module that is a box, and of the lanes of one that is open (step 108)", () => {
+  const graph: Graph = { nodes: [lane(2, "Oscillator"), effect(3, 2, "Filter"), moduleNode(1, "Voice", [2]), theMaster], edges: [link(2, 3)] };
+  const snapshot: Snapshot = { ...tracerSnapshot, graph };
+  const at = (id: NodeId): Node => {
+    const found = graph.nodes.find((candidate) => candidate.id === id);
+    if (!found) throw new Error(`no node ${String(id)}`);
+    return found;
+  };
+  const box = { node: 1, plugins: 2, modulators: 1, inputs: [], outputs: [], modIn: [], modOut: [] };
+
+  test("a box opens, or is taken out with all that is in it, in the words that its × says", () => {
+    const { deps, asked, canvasAsked } = rig(snapshot);
+    const items = nodeMenu(deps, 1, dataOf(at(1), { box }));
+    expect(idsOf(items)).toEqual(["open-module", "remove"]);
+    expect(labelsOf(items)).toEqual(["Open Voice", "Remove Voice for good: the 2 plugins · 1 modulator in it go with it"]);
+    expect(items[1]?.danger).toBe(true);
+    choose(items, "open-module");
+    expect(canvasAsked).toEqual(["toggleModule 1"]);
+    expect(asked).toEqual([]);
+    choose(items, "remove");
+    expect(asked).toEqual([["removeNode", 1]]);
+  });
+
+  test("a box that does not say what is in it is taken out in words that do not either", () => {
+    const { deps } = rig(snapshot);
+    expect(labelsOf(nodeMenu(deps, 1, dataOf(at(1))))).toEqual(["Open Voice", "Remove Voice for good"]);
+  });
+
+  test("a lane of a module that is open has the item that closes it first, with a rule under it, and a node that is in no open module has none", () => {
+    const { deps, canvasAsked } = rig(snapshot);
+    const tagged = nodeMenu(deps, 2, dataOf(at(2), { module: { node: 1, name: "Voice" } }));
+    expect(tagged[0]).toMatchObject({ id: "close-module", label: "Close Voice" });
+    expect(tagged[1]?.rule).toBe(true);
+    choose(tagged, "close-module");
+    expect(canvasAsked).toEqual(["toggleModule 1"]);
+    // (The rest of the menu is the lane's own, as it is for a lane that is in none.)
+    const plain = nodeMenu(deps, 2, dataOf(at(2)));
+    expect(idsOf(plain)).not.toContain("close-module");
+    expect(idsOf(tagged).slice(1)).toEqual(idsOf(plain));
+  });
+
+  test("the effect that stands for a lane that has no card closes the module as well", () => {
+    const { deps } = rig(snapshot);
+    const tagged = nodeMenu(deps, 3, dataOf(at(3), { module: { node: 1, name: "Voice" } }));
+    expect(idsOf(tagged)[0]).toBe("close-module");
   });
 });

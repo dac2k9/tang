@@ -81,6 +81,93 @@
   --kind: var(--tang-notes);
 }
 
+.tang-node--module {
+  --kind: var(--tang-module);
+  /* The room under the line that says what is in it (`NODE_PADDING`). */
+  padding-bottom: 16px;
+}
+
+/*
+ * A box that stands for a module that is closed (step 108): a row for each of its inputs (on the left, with a port on the edge) and outputs (on the right), as tall as the layout assumes (`BOX_ROW_HEIGHT`, 28), and
+ * under them the line that says what is in it (`BOX_DETAIL_HEIGHT`, 20).
+ */
+.tang-box__ports {
+  height: calc(var(--box-rows, 1) * 28px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tang-box__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--tang-space-3);
+  height: 28px;
+  padding: 0 var(--tang-space-3);
+  font-size: var(--tang-text-small);
+}
+
+.tang-box__row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tang-box__in--notes {
+  color: var(--tang-notes);
+}
+
+.tang-box__out {
+  margin-left: auto;
+  text-align: right;
+}
+
+.tang-box__detail {
+  height: 20px;
+  margin: 0;
+  padding: 0 var(--tang-space-3);
+  overflow: hidden;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* (The one that opens a module that is a box: a glyph, like the others in the header.) */
+.tang-menu-button.tang-node__open {
+  min-width: 26px;
+}
+
+/*
+ * The tag over a lane of a module that is open (step 108): the module's name, over the top edge of the card at its left, which closes the module. It is in the room between the rows (`ROW_GAP`, 56), and quiet
+ * until it is looked at.
+ */
+.tang-node__module-tag {
+  position: absolute;
+  top: -21px;
+  left: -1px;
+  max-width: 200px;
+  height: 18px;
+  padding: 0 var(--tang-space-2);
+  overflow: hidden;
+  border: 1px solid var(--tang-module);
+  border-bottom: 0;
+  border-radius: var(--tang-radius) var(--tang-radius) 0 0;
+  background: var(--tang-surface);
+  color: var(--tang-module);
+  font: 11px / 16px var(--tang-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tang-node__module-tag:hover,
+.tang-node__module-tag:focus-visible {
+  background: var(--tang-module);
+  color: var(--tang-surface);
+}
+
 .tang-node__header {
   display: flex;
   align-items: center;

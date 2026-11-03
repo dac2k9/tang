@@ -27,6 +27,14 @@ import type { Drivable } from "../../client/reach";
 import type { Edge, EdgeId, Graph, Node, NodeId, NodeUi, Plugin, Port, SideInfo, SourceInfo } from "../../protocol";
 import { arrange } from "./arrange";
 import type { Block, Wire } from "./arrange";
+import { boxRows, collapse } from "./boxes";
+import type { Box as ModuleBox } from "./boxes";
+import { handleOf, SETTING_HANDLES } from "./handles";
+import type { SettingHandle } from "./handles";
+
+// (The names of the handles are in `handles.ts`, which the boxes need too: they are said here as they always were said.)
+export { depthHandle, handleOf, paramHandle, SETTING_HANDLES } from "./handles";
+export type { SettingHandle } from "./handles";
 
 /** The width of every node, so that the columns of the canvas are known without measuring anything. */
 export const NODE_WIDTH = 304;
@@ -67,12 +75,16 @@ export const SOURCE_HEIGHT = HEADER_HEIGHT + 18 + 12;
 export const NODE_SCOPE_HEIGHT = 157;
 /** The pattern of a lane, under its controls (record, clear and its length, its three switches, the line that says what it is), as tall whatever it shows: a lane's node is this much taller (measured in a browser: 97, in both states of the record button). */
 export const PATTERN_HEIGHT = 97;
+/** A box that stands for a module has a row for each of its inputs and outputs, this tall (the style says so: `.tang-box__ports`)... */
+export const BOX_ROW_HEIGHT = 28;
+/** ...and the line under them that says what is in it, this tall. */
+export const BOX_DETAIL_HEIGHT = 20;
 /** A cable that a modulator's node lists is a row this tall (the style says so: `.tang-cable-row`)... */
 export const CABLE_ROW_HEIGHT = 20;
 /** ...and the list has this much room before it, as much as the rest of what is in the body of the node (`.tang-node__body`'s gap). */
 export const CABLES_GAP = 8;
 
-export type PatchNodeKind = "instrument" | "effect" | "modulator" | "group" | "master" | "source";
+export type PatchNodeKind = "instrument" | "effect" | "modulator" | "group" | "master" | "source" | "module";
 
 export interface PatchNodeData extends Record<string, unknown> {
   /** The node of the session this one is the picture of. */
@@ -103,6 +115,16 @@ export interface PatchNodeData extends Record<string, unknown> {
   heldIn: HeldIn | null;
   /** For an effect that has a second input of audio (a Math): what its plugin calls its two inputs, which the node has a port each for; nothing for the other nodes. */
   side: SideInfo | null;
+  /** For a module that is closed, which is a box on the canvas (step 108): its ports and what is in it (`collapse`); nothing for the other nodes. */
+  box: ModuleBox | null;
+  /** For a lane of a module that is open (a lane that has no card: the first of its effects): the module, which the tag over the card closes; nothing for the other nodes. */
+  module: ModuleTag | null;
+}
+
+/** The module that a lane on the canvas is part of, while the module is open: its node, and its name, for the tag over the card that closes it again. */
+export interface ModuleTag {
+  node: NodeId;
+  name: string;
 }
 
 /** What the module of an effect has of the lane that holds it, a lane the canvas draws no card for (`holdersOf`). */
@@ -172,46 +194,6 @@ export interface Flow {
   arranged: boolean;
 }
 
-/**
- * The settings of a modulator that a cable ends at, by the names of their handles (the names of the ports), in the order a
- * modulator has them: an LFO's rate, the four stages of an envelope.
- */
-export const SETTING_HANDLES = ["rate", "attack", "decay", "sustain", "release"] as const;
-
-export type SettingHandle = (typeof SETTING_HANDLES)[number];
-
-/** The name of the handle of a parameter of a plugin, by the plugin's own index. */
-export const paramHandle = (index: number): string => `param-${String(index)}`;
-
-/** The name of the handle in a modulator's node where a cable can end to drive the depth of the cable `edge`, which starts at that modulator. */
-export const depthHandle = (edge: EdgeId): string => `depth-${String(edge)}`;
-
-/** The name of the handle of a node where a port is. */
-export function handleOf(port: Port): string {
-  switch (port.type) {
-    case "audioIn":
-    case "audioInSide":
-    case "audioOut":
-    case "eventsIn":
-    case "eventsOut":
-    case "modOut":
-    case "rate":
-    case "attack":
-    case "decay":
-    case "sustain":
-    case "release":
-    case "volume":
-    case "mix":
-    case "pan":
-      // (A cable ends at the volume of a lane or a group, the mix of an effect and the pan of a group by the name of the port: the host-side values.)
-      return port.type;
-    case "param":
-      return paramHandle(port.index);
-    case "depth":
-      return depthHandle(port.edge);
-  }
-}
-
 /** The parameters that a modulation cable ends at, for each node. */
 function modulatedParams(graph: Graph): Map<NodeId, Set<number>> {
   const modulated = new Map<NodeId, Set<number>>();
@@ -266,9 +248,12 @@ export function canScope(node: Node): boolean {
  * How tall a node is, as the layout assumes it (the components' styles keep to it). `cables` is how many a modulator lists (`CableRow`); it is nothing to the other nodes.
  * `scope` is whether an instrument, an effect or a group shows its scope, which it is taller by (`NODE_SCOPE_HEIGHT`); it is nothing to a modulator, and to the master.
  * `carriesLane` is whether an effect has the cell of the lane that holds it, and `groupCell` whether a lane has the choice of group (`controlCount`): they are nothing to the other nodes.
+ * `rows` is how many rows of ports a box that stands for a module has (`boxRows`): it is nothing to the other nodes.
  */
-export function nodeHeight(node: Node, knobs: number, cables = 0, scope = false, carriesLane = false, groupCell = false): number {
+export function nodeHeight(node: Node, knobs: number, cables = 0, scope = false, carriesLane = false, groupCell = false, rows = 1): number {
   switch (node.kind) {
+    case "module":
+      return HEADER_HEIGHT + Math.max(1, rows) * BOX_ROW_HEIGHT + BOX_DETAIL_HEIGHT + NODE_PADDING;
     case "modulator": {
       const listed = cables > 0 ? CABLES_GAP + cables * CABLE_ROW_HEIGHT : 0;
       if (node.source.type === "midiLearn") return MODULATOR_HEIGHT + listed;
@@ -306,7 +291,7 @@ interface Strip {
 type OwnerOf = (node: Node) => NodeId | null;
 
 function ownersOf(graph: Graph): OwnerOf {
-  const heads = new Set(graph.nodes.flatMap((node) => (node.kind === "instrument" || node.kind === "group" ? [node.id] : [])));
+  const heads = new Set(graph.nodes.flatMap((node) => (node.kind === "instrument" || node.kind === "group" || node.kind === "module" ? [node.id] : [])));
   return (node) => (node.kind === "modulator" && node.parent === null && node.hears !== undefined && heads.has(node.hears) ? node.hears : node.parent);
 }
 
@@ -438,9 +423,17 @@ function layout(graph: Graph, heightOfNode: (node: Node) => number, holders: Rea
     y = placeStrip(lane, 0, rowTop);
   }
 
+  // A strip for each module that is a box (step 108), under the lanes: the box, with the modulators that hear what is in it above it.
+  const boxes = graph.nodes.filter((node) => node.kind === "module").map((module) => stripOf(graph, module, ownerOf));
+  for (const box of boxes) {
+    const rowTop = y + aboveOf(box);
+    rowTops.set(box.head.id, rowTop);
+    y = placeStrip(box, 0, rowTop);
+  }
+
   // A strip for each group, to the right of the longest lane, its row level with the middle of its members'.
   const groups = graph.nodes.filter((node) => node.kind === "group").map((group) => stripOf(graph, group, ownerOf));
-  const lanesWidth = Math.max(0, ...lanes.map(widthOf));
+  const lanesWidth = Math.max(0, ...lanes.map(widthOf), ...boxes.map(widthOf));
   const wanted = groups.map((group) => {
     const tops = lanes.filter((lane) => lane.head.parent === group.head.id).map((lane) => rowTops.get(lane.head.id) ?? 0);
     return { group, rowTop: tops.length > 0 ? tops.reduce((sum, top) => sum + top, 0) / tops.length : y + aboveOf(group) };
@@ -514,7 +507,7 @@ function slotsOf(graph: Graph, fresh: ReadonlyMap<NodeId, Position>, ownerOf: Ow
   const slots = new Map<NodeId, string>();
   for (const node of graph.nodes) {
     if (node.kind === "group" || node.kind === "master") slots.set(node.id, `${node.kind}:${String(fresh.get(node.id)?.x ?? 0)}`);
-    else if (node.kind === "instrument" || node.kind === "source") slots.set(node.id, node.kind);
+    else if (node.kind === "instrument" || node.kind === "source" || node.kind === "module") slots.set(node.id, node.kind);
   }
   const effects = new Map<NodeId | null, number>();
   for (const node of graph.nodes) {
@@ -715,6 +708,9 @@ function cableRows(graph: Graph, names: ReadonlyMap<NodeId, string>): Map<NodeId
 /** Nothing remembered: every node goes where the layout puts it. */
 const NOTHING_REMEMBERED: Places = new Map();
 
+/** No module is open: every module is a box. */
+const NONE_OPEN: ReadonlySet<NodeId> = new Set();
+
 /** What else `toFlow` is asked for. */
 export interface FlowOptions {
   /**
@@ -722,6 +718,8 @@ export interface FlowOptions {
    * (`Node.ui`) is a pin that the arrangement would have to keep, and it is left out of the question: with one, the layout is the rows'.
    */
   arrange?: boolean;
+  /** The modules that are open (the viewer's own choice, like the scopes): their nodes are on the canvas and they are no box; a module that is not here is a box. */
+  open?: ReadonlySet<NodeId>;
 }
 
 /** How much a pixel of a cable matters to the arrangement: the faint links by which a lane hears every source are the least of the cables. */
@@ -793,15 +791,17 @@ function arrangedFrom(graph: Graph, fresh: ReadonlyMap<NodeId, Position>, height
  * The nodes of a layout and the cables of the session as the arrangement sees them, for `measure` to say what the layout is worth: the boxes are where `flow` has the nodes, as tall as the layout
  * assumes (`nodeHeight`, from what the node says it shows). The nodes that the canvas draws no card for (a lane that only holds effects) are not among them, and the cables at them are dropped.
  */
-export function blocksOf(graph: Graph, flow: Flow): { blocks: Block[]; wires: Wire[] } {
-  const known = new Map(graph.nodes.map((node) => [node.id, node]));
+export function blocksOf(graph: Graph, flow: Flow, open: ReadonlySet<NodeId> = NONE_OPEN): { blocks: Block[]; wires: Wire[] } {
+  // (What is on the canvas: a closed module's nodes are not, and the cables at them are at its box.)
+  const seen = collapse(graph, displayNames(graph), open).graph;
+  const known = new Map(seen.nodes.map((node) => [node.id, node]));
   const blocks = flow.nodes.flatMap((placed): Block[] => {
     const node = known.get(placed.data.node);
     if (!node) return [];
-    const height = nodeHeight(node, placed.data.knobs.length, placed.data.cables.length, placed.data.scope, placed.data.heldIn?.first ?? false, placed.data.groupCell);
+    const height = nodeHeight(node, placed.data.knobs.length, placed.data.cables.length, placed.data.scope, placed.data.heldIn?.first ?? false, placed.data.groupCell, placed.data.box ? boxRows(placed.data.box) : 1);
     return [{ id: node.id, x: placed.position.x, y: placed.position.y, width: NODE_WIDTH, height }];
   });
-  return { blocks, wires: wiresOf(graph, new Map(flow.nodes.map((placed) => [placed.data.node, placed.data.knobs]))) };
+  return { blocks, wires: wiresOf(seen, new Map(flow.nodes.map((placed) => [placed.data.node, placed.data.knobs]))) };
 }
 
 /** No node shows a scope. */
@@ -812,15 +812,20 @@ const NO_SCOPES: ReadonlySet<NodeId> = new Set();
  * the slot it was put for, so that what is drawn or added or taken out does not rearrange the canvas; without it every node goes where the layout puts it. `scopes` are the
  * nodes that the viewer shows a scope in (a scope is not part of the session): those of them that have a signal are taller by it, and room is made for it as for a knob that is
  * pinned. A lane that only holds effects (`holdersOf`) has no card on the canvas: it is laid out, remembered and drawn without it and without the links at it, and its first effect has
- * what the card said of the lane (`heldIn`).
+ * what the card said of the lane (`heldIn`). A module that is closed is one box (`collapse`, step 108): its nodes are not on the canvas, the cables at them are at the box, and the nodes of one that is
+ * in `options.open` are on the canvas as any are, with a tag that closes the module again.
  */
 export function toFlow(graph: Graph, remembered: Places = NOTHING_REMEMBERED, scopes: ReadonlySet<NodeId> = NO_SCOPES, options: FlowOptions = {}): Flow {
   const holders = holdersOf(graph);
   // (What is said of a node, its name and the words of a cable, is read from the whole graph: the effects of a held lane are called what they are called with the lane in it.)
-  const shown: Graph = holders.size === 0 ? graph : { nodes: graph.nodes.filter((node) => !holders.has(node.id)), edges: graph.edges.filter((edge) => !holders.has(edge.from.node) && !holders.has(edge.to.node)) };
+  const names = displayNames(graph);
+  const open = options.open ?? NONE_OPEN;
+  // (What is on the canvas: a closed module's nodes are left out, and it is a box that the cables at them go to.)
+  const collapsed = collapse(graph, names, open);
+  const seen = collapsed.graph;
+  const shown: Graph = holders.size === 0 ? seen : { nodes: seen.nodes.filter((node) => !holders.has(node.id)), edges: seen.edges.filter((edge) => !holders.has(edge.from.node) && !holders.has(edge.to.node)) };
   const carriers = new Set([...holders.values()].flatMap(([first]) => (first ? [first.id] : [])));
   const anchors = new Map([...holders].flatMap(([lane, [first]]) => (first ? [[lane, first.id] as const] : [])));
-  const names = displayNames(graph);
   const modulated = modulatedParams(graph);
   const settingsDriven = drivenSettings(graph);
   const listed = cableRows(graph, names);
@@ -834,9 +839,12 @@ export function toFlow(graph: Graph, remembered: Places = NOTHING_REMEMBERED, sc
   const withScope = new Set(graph.nodes.filter((node) => scopes.has(node.id) && canScope(node)).map((node) => node.id));
   // (The page offers no way to make a group: a lane has the choice of one only while the session has a group.)
   const groups = graph.nodes.some((node) => node.kind === "group");
-  const heightOf = (node: Node): number => nodeHeight(node, knobCounts.get(node.id) ?? 0, cableCounts.get(node.id) ?? 0, withScope.has(node.id), carriers.has(node.id), groups);
-  const ownerOf = ownersOf(graph);
-  const baseline = layout(graph, heightOf, holders, ownerOf);
+  const heightOf = (node: Node): number => {
+    const box = collapsed.boxes.get(node.id);
+    return nodeHeight(node, knobCounts.get(node.id) ?? 0, cableCounts.get(node.id) ?? 0, withScope.has(node.id), carriers.has(node.id), groups, box ? boxRows(box) : 1);
+  };
+  const ownerOf = ownersOf(seen);
+  const baseline = layout(seen, heightOf, holders, ownerOf);
   // (The slots are those of the rows' layout, whatever the places are: a layout that goes on from an arrangement finds the nodes in the slots that were remembered.)
   const slots = slotsOf(shown, baseline, ownerOf);
   const fresh = options.arrange === true && shown.nodes.every((node) => node.ui === undefined) ? arrangedFrom(shown, baseline, heightOf, knobs) : baseline;
@@ -862,6 +870,13 @@ export function toFlow(graph: Graph, remembered: Places = NOTHING_REMEMBERED, sc
     return held === undefined || node.parent === null ? null : { lane: node.parent, first: held[0]?.id === node.id, alone: held.length === 1 && lanes > 1 };
   };
 
+  /** The module that a lane on the canvas is part of while the module is open, for its tag: a lane that has a card, or the first effect of one that has none. */
+  const moduleOfLane = (node: Node): ModuleTag | null => {
+    const lane = node.kind === "instrument" ? node.id : node.kind === "effect" && node.parent !== null && holders.get(node.parent)?.[0]?.id === node.id ? node.parent : null;
+    const module = lane === null ? undefined : collapsed.moduleOf.get(lane);
+    return module === undefined ? null : { node: module, name: names.get(module) ?? "module" };
+  };
+
   const nodes: PatchNode[] = shown.nodes.map((node) => ({
     id: String(node.id),
     type: node.kind,
@@ -884,6 +899,8 @@ export function toFlow(graph: Graph, remembered: Places = NOTHING_REMEMBERED, sc
       source: node.kind === "source" ? node.source : null,
       heldIn: heldIn(node),
       side: node.kind === "effect" ? (node.side ?? null) : null,
+      box: collapsed.boxes.get(node.id) ?? null,
+      module: moduleOfLane(node),
     },
     draggable: true,
     deletable: false,
@@ -891,8 +908,10 @@ export function toFlow(graph: Graph, remembered: Places = NOTHING_REMEMBERED, sc
 
   const edges: PatchEdge[] = [];
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
-  for (const edge of shown.edges) {
-    const common = { source: String(edge.from.node), target: String(edge.to.node), sourceHandle: handleOf(edge.from.port), targetHandle: handleOf(edge.to.port), deletable: false };
+  // (What each cable is, in words and by its buttons, is the session's: the cable as it is there, and not as it is drawn, with an end at the box. The ends and the handles are the canvas's.)
+  for (const { edge: drawn, real: edge, sourceHandle, targetHandle } of collapsed.edges) {
+    if (holders.has(drawn.from.node) || holders.has(drawn.to.node)) continue;
+    const common = { source: String(drawn.from.node), target: String(drawn.to.node), sourceHandle, targetHandle, deletable: false };
     if (edge.kind === "modulation") {
       edges.push({ ...common, id: `mod:${String(edge.id)}`, type: "modulation", data: { cable: edge.id, modulator: edge.from.node, label: cableWords(graph, names, edge) }, zIndex: 10 });
     } else if (edge.kind === "cable") {
@@ -973,6 +992,8 @@ function sameNodeStructure(x: Node, y: Node): boolean {
   }
   // (Whom a modulator hears is part of it: the menu on its node has it, and the structure is what the menus are given.)
   if (x.kind === "modulator" && y.kind === "modulator") return x.source.type === y.source.type && x.hears === y.hears;
+  // (What is in a module is part of it: the box has a port for what a cable crosses its edge at, and what is inside is on the canvas while it is open.)
+  if (x.kind === "module" && y.kind === "module") return x.members.length === y.members.length && x.members.every((member, i) => member === y.members[i]);
   if (x.kind === "source" && y.kind === "source") return sameSource(x.source, y.source);
   return true;
 }

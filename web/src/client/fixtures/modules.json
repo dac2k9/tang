@@ -1210,6 +1210,15 @@
             }
           },
           {
+            "id": 10,
+            "kind": "module",
+            "members": [
+              8
+            ],
+            "name": "Odd",
+            "parent": null
+          },
+          {
             "ceiling": -1.0,
             "id": 4294967295,
             "kind": "master",
@@ -6850,6 +6859,15 @@
             }
           },
           {
+            "id": 12,
+            "kind": "module",
+            "members": [
+              8
+            ],
+            "name": "Room",
+            "parent": null
+          },
+          {
             "ceiling": -1.0,
             "id": 4294967295,
             "kind": "master",
@@ -9874,6 +9892,15 @@
             }
           },
           {
+            "id": 12,
+            "kind": "module",
+            "members": [
+              8
+            ],
+            "name": "Room",
+            "parent": null
+          },
+          {
             "ceiling": -1.0,
             "id": 4294967295,
             "kind": "master",
@@ -11687,6 +11714,15 @@
             }
           },
           {
+            "id": 12,
+            "kind": "module",
+            "members": [
+              8
+            ],
+            "name": "Room",
+            "parent": null
+          },
+          {
             "ceiling": -1.0,
             "id": 4294967295,
             "kind": "master",
@@ -11949,14 +11985,14 @@
           },
           {
             "from": {
-              "node": 12,
+              "node": 13,
               "port": {
                 "type": "audioOut"
               }
             },
             "kind": "audio",
             "to": {
-              "node": 13,
+              "node": 14,
               "port": {
                 "type": "audioIn"
               }
@@ -11964,14 +12000,14 @@
           },
           {
             "from": {
-              "node": 14,
+              "node": 15,
               "port": {
                 "type": "audioOut"
               }
             },
             "kind": "audio",
             "to": {
-              "node": 15,
+              "node": 16,
               "port": {
                 "type": "audioIn"
               }
@@ -12064,7 +12100,7 @@
           },
           {
             "from": {
-              "node": 13,
+              "node": 14,
               "port": {
                 "type": "audioOut"
               }
@@ -12073,7 +12109,7 @@
             "id": 5,
             "kind": "cable",
             "to": {
-              "node": 14,
+              "node": 15,
               "port": {
                 "type": "audioIn"
               }
@@ -12081,7 +12117,7 @@
           },
           {
             "from": {
-              "node": 13,
+              "node": 14,
               "port": {
                 "type": "audioOut"
               }
@@ -12090,7 +12126,7 @@
             "id": 6,
             "kind": "cable",
             "to": {
-              "node": 15,
+              "node": 16,
               "port": {
                 "type": "audioInSide"
               }
@@ -13551,7 +13587,7 @@
             }
           },
           {
-            "id": 12,
+            "id": 13,
             "kind": "instrument",
             "muted": false,
             "name": "(empty)",
@@ -13566,11 +13602,11 @@
           },
           {
             "feed": "chain",
-            "id": 13,
+            "id": 14,
             "kind": "effect",
             "mix": 0.8,
             "name": "Filter",
-            "parent": 12,
+            "parent": 13,
             "plugin": {
               "currentPreset": null,
               "format": "Built-in",
@@ -13643,11 +13679,11 @@
           },
           {
             "feed": "none",
-            "id": 14,
+            "id": 15,
             "kind": "effect",
             "mix": 0.4,
             "name": "Reverb",
-            "parent": 12,
+            "parent": 13,
             "plugin": {
               "currentPreset": "Cathedral",
               "format": "Built-in",
@@ -13808,11 +13844,11 @@
           },
           {
             "feed": "chain",
-            "id": 15,
+            "id": 16,
             "kind": "effect",
             "mix": 1.0,
             "name": "Math",
-            "parent": 12,
+            "parent": 13,
             "plugin": {
               "currentPreset": null,
               "format": "Built-in",
@@ -14076,6 +14112,24 @@
             }
           },
           {
+            "id": 12,
+            "kind": "module",
+            "members": [
+              8
+            ],
+            "name": "Room",
+            "parent": null
+          },
+          {
+            "id": 17,
+            "kind": "module",
+            "members": [
+              13
+            ],
+            "name": "Copy",
+            "parent": null
+          },
+          {
             "ceiling": -1.0,
             "id": 4294967295,
             "kind": "master",
@@ -14199,7 +14253,7 @@
           },
           {
             "kind": "peak",
-            "node": 12,
+            "node": 13,
             "port": {
               "type": "audioOut"
             },
@@ -14207,7 +14261,7 @@
           },
           {
             "kind": "clips",
-            "node": 12,
+            "node": 13,
             "port": {
               "type": "audioOut"
             },

@@ -582,6 +582,15 @@ function removeGroupOutcome(snapshot: Snapshot, group: Node): Outcome {
 function removeNodeOutcome(snapshot: Snapshot, node: NodeId): Outcome {
   const found = snapshot.graph.nodes.find((n) => n.id === node && n.kind !== "master");
   if (!found) return noNode(node);
+  if (found.kind === "module") return removeModuleOutcome(snapshot, found);
+  const outcome = removeOtherNodeOutcome(snapshot, found);
+  // A lane or a modulator that goes leaves the module that it came with (`Controller::leave_module`), and a module that has none left is gone.
+  return "restructured" in outcome ? { restructured: leftItsModule(outcome.restructured, node) } : outcome;
+}
+
+/** `removeNodeOutcome` for a node that is no module. */
+function removeOtherNodeOutcome(snapshot: Snapshot, found: Node): Outcome {
+  const node = found.id;
   if (found.kind === "effect") return removeEffectOutcome(snapshot, found);
   if (found.kind === "instrument") return removeLaneOutcome(snapshot, found);
   if (found.kind === "group") return removeGroupOutcome(snapshot, found);
@@ -591,6 +600,34 @@ function removeNodeOutcome(snapshot: Snapshot, node: NodeId): Outcome {
   if (found.kind !== "modulator") return noNode(node);
   const touching = snapshot.graph.edges.filter((e) => isModulation(e) && (e.from.node === node || e.to.node === node)).map((e) => (e as { id: EdgeId }).id);
   return { restructured: without(snapshot, cablesThatGo(snapshot.graph.edges, touching), new Set([node])) };
+}
+
+/** The session with `node`, which has gone, out of the module that it came with, as `SessionModel::leave_module` does it: the module has one member less, and is gone if it has none. */
+function leftItsModule(snapshot: Snapshot, node: NodeId): Snapshot {
+  if (!snapshot.graph.nodes.some((n) => n.kind === "module" && n.members.includes(node))) return snapshot;
+  const nodes = snapshot.graph.nodes.flatMap((n): Node[] => {
+    if (n.kind !== "module" || !n.members.includes(node)) return [n];
+    const members = n.members.filter((member) => member !== node);
+    return members.length === 0 ? [] : [{ ...n, members }];
+  });
+  return { ...snapshot, graph: { ...snapshot.graph, nodes } };
+}
+
+/**
+ * A module taken out, as the controller does it (`Controller::remove_module`, step 108): the record goes first, and then its modulators and its lanes, the last made first, each as the controller takes a modulator or a lane out; a session keeps a lane, so a module that has
+ * every lane that there is is refused, and nothing is changed.
+ */
+function removeModuleOutcome(snapshot: Snapshot, module: Extract<Node, { kind: "module" }>): Outcome {
+  const lanes = module.members.filter((id) => snapshot.graph.nodes.some((n) => n.id === id && n.kind === "instrument")).length;
+  if (lanes >= snapshot.graph.nodes.filter((n) => n.kind === "instrument").length) return invalid("a session keeps its last lane");
+  let session: Snapshot = { ...snapshot, graph: { ...snapshot.graph, nodes: snapshot.graph.nodes.filter((n) => n.id !== module.id) } };
+  for (const id of [...module.members].reverse()) {
+    const member = session.graph.nodes.find((n) => n.id === id);
+    if (member?.kind !== "instrument" && member?.kind !== "modulator") continue;
+    const taken = removeNodeOutcome(session, id);
+    if ("restructured" in taken) session = taken.restructured;
+  }
+  return { restructured: session };
 }
 
 /** What a node of each kind of modulator is called (`ModSourceSlot::node_name`), and what it is to begin with. */
@@ -632,8 +669,9 @@ function withModulator(snapshot: Snapshot, kind: ModulatorKind, counters: Counte
 function withModulatorOf(snapshot: Snapshot, name: string, source: ModulatorSource, counters: Counters, hears: NodeId | null): { session: Snapshot; node: Node } {
   const { nodes } = snapshot.graph;
   const last = nodes.findLastIndex((n) => n.kind === "modulator");
-  const master = nodes.findIndex((n) => n.kind === "master");
-  const at = last >= 0 ? last + 1 : master >= 0 ? master : nodes.length;
+  // (The modules that were added as one thing are listed after the modulators and before the master, as the controller lists them: `SessionModel::graph`.)
+  const tail = nodes.findIndex((n) => n.kind === "module" || n.kind === "master");
+  const at = last >= 0 ? last + 1 : tail >= 0 ? tail : nodes.length;
   const added: Node = { id: counters.node(), parent: null, name, kind: "modulator", source, ...(hears === null ? {} : { hears }) };
   const before = new Set(nodes.slice(0, at).filter((n) => n.kind === "modulator").map((n) => n.id));
   const outputs = snapshot.telemetry.modulation;
@@ -708,10 +746,10 @@ function addEffectOutcome(snapshot: Snapshot, parent: NodeId, plugin: string, co
 
 /**
  * Where the node of a new lane goes among the nodes of a graph: after the lanes there are, with their effects, and before the modulators and the master,
- * as the controller lists them (`SessionModel::graph`: the groups, the lanes, the modulators, the master).
+ * as the controller lists them (`SessionModel::graph`: the groups, the lanes, the modulators, the modules, the master).
  */
 function endOfLanes(nodes: readonly Node[]): number {
-  const at = nodes.findIndex((n) => n.kind === "master" || n.kind === "modulator");
+  const at = nodes.findIndex((n) => n.kind === "master" || n.kind === "modulator" || n.kind === "module");
   return at < 0 ? nodes.length : at;
 }
 
@@ -857,7 +895,20 @@ function addModuleOutcome(snapshot: Snapshot, name: string, counters: Counters, 
     const drawn = addCableOutcome(session, { node: start.id, port: { type: "audioOut" } }, { node: end.id, port: { type: cable.to.side ? "audioInSide" : "audioIn" } }, cable.gain, counters);
     if ("restructured" in drawn) session = drawn.restructured;
   }
-  return { restructured: withModuleModulators(session, module, lanes, counters) };
+  const withModulators = withModuleModulators(session, module, lanes, counters);
+  return { restructured: withModuleRecord(withModulators.session, name, [...lanes.map(({ lane }) => lane.id), ...withModulators.made.map((n) => n.id)], counters) };
+}
+
+/**
+ * The session with the record of a module that was added as one thing (`make_module`, step 108): a node of its own, made last, so that what is made before it has the ids it had, which the graph lists after the modulators and before the master
+ * (`SessionModel::graph`). `members` are the lanes of the module and then its modulators, in the order they were made.
+ */
+function withModuleRecord(snapshot: Snapshot, name: string, members: readonly NodeId[], counters: Counters): Snapshot {
+  const { nodes } = snapshot.graph;
+  const master = nodes.findIndex((n) => n.kind === "master");
+  const at = master >= 0 ? master : nodes.length;
+  const record: Node = { id: counters.node(), parent: null, name, kind: "module", members: [...members] };
+  return { ...snapshot, graph: { ...snapshot.graph, nodes: [...nodes.slice(0, at), record, ...nodes.slice(at)] } };
 }
 
 /**
@@ -919,7 +970,7 @@ function nameOfSource(source: ModulatorSource): string {
  * each as soon as the cable that it drives is there (one that drives a cable that is never made is left out). Every other cable is made in the order of the file. What cannot be made (a parameter that the plugin has not, a
  * cable that drives what it drives already, a setting that the modulator has not) is left out, with nothing used for it.
  */
-function withModuleModulators(snapshot: Snapshot, module: Module, lanes: readonly { lane: Node; effects: readonly Node[] }[], counters: Counters): Snapshot {
+function withModuleModulators(snapshot: Snapshot, module: Module, lanes: readonly { lane: Node; effects: readonly Node[] }[], counters: Counters): { session: Snapshot; made: readonly Node[] } {
   let session = snapshot;
   const made: Node[] = [];
   for (const modulator of module.modulators) {
@@ -966,7 +1017,7 @@ function withModuleModulators(snapshot: Snapshot, module: Module, lanes: readonl
     }
     waiting = still;
   }
-  return session;
+  return { session, made };
 }
 
 /**

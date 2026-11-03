@@ -7,7 +7,7 @@ const node = (id: string, x: number, y: number, dragging?: boolean, selected?: b
   id,
   type: "effect",
   position: { x, y },
-  data: { node: Number(id), name: `Node ${id}`, format: null, knobs: [], modulated: [], targets: [], drivenSettings: [], cables: [], notes: false, groupCell: false, scope: false, source: null, heldIn: null, side: null },
+  data: { node: Number(id), name: `Node ${id}`, format: null, knobs: [], modulated: [], targets: [], drivenSettings: [], cables: [], notes: false, groupCell: false, scope: false, source: null, heldIn: null, side: null, box: null, module: null },
   ...(dragging === undefined ? {} : { dragging }),
   ...(selected === undefined ? {} : { selected }),
 });

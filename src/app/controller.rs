@@ -800,8 +800,45 @@ impl Controller {
         // The whole lane is kept for the history, when an intent is carried out: the audio thread hands it to a channel of its own.
         let (keep, kept) = self.channel_for();
         let _ = self.cmd_tx.send(GraphCommand::RemoveInstrument { inst, keep });
+        let node = self.model.instruments[inst].node;
         if let Some(lane) = self.model.remove_lane(inst) {
+            // (The module that it came with, if any, loses a member before the lane is written down, so that undo puts the lane back first and the module after it.)
+            self.leave_module(node);
             self.took_out(Inverse::Lane { index: inst, lane, kept });
+        }
+        true
+    }
+
+    /// `member`, a lane or a modulator that is going out of the session, leaves the module that came with it (step 108): the module has one member less, and is gone if it has none. Written down for the history, as
+    /// the module was, when an intent is carried out: what undo puts back is the module as it was.
+    fn leave_module(&mut self, member: NodeId) {
+        if let Some((index, module)) = self.model.leave_module(member) {
+            self.took_out(Inverse::Module { index, module });
+        }
+    }
+
+    /// Take module `index` out, with everything that came with it (step 108: what a front-end draws as one box and takes out as one): its modulators, and then its lanes with their plugins, each as `remove_modulator` and
+    /// `remove_lane` take them out (the last made first, as undo of the add takes them out). The record of the module goes first, so that it comes back last, with its members back in. False, sending nothing and changing
+    /// nothing, if there is no such module, or if the lanes in it are all the lanes the session has: a session keeps a lane.
+    pub fn remove_module(&mut self, index: usize) -> bool {
+        let Some(members) = self.model.modules.get(index).map(|module| module.members.clone()) else { return false };
+        let lanes = members.iter().filter(|node| matches!(self.model.locate(**node), Some(NodePath::Instrument(_)))).count();
+        if lanes >= self.model.instruments.len() {
+            return false;
+        }
+        self.forget_the_history_unless_an_intent_asks();
+        let module = self.model.modules.remove(index);
+        self.took_out(Inverse::Module { index, module });
+        for node in members.into_iter().rev() {
+            match self.model.locate(node) {
+                Some(NodePath::Modulator { at, index }) => {
+                    self.remove_modulator(at, index);
+                }
+                Some(NodePath::Instrument(inst)) => {
+                    self.remove_lane(inst);
+                }
+                _ => {}
+            }
         }
         true
     }
@@ -890,6 +927,8 @@ impl Controller {
         // The model does what the audio thread does: the cables of the modulators after it are told the places they have now, and a lane's that is a member
         // of a group tells the group's cables to its modulators.
         if let Some(modulator) = self.model.remove_modulator_at(at, index) {
+            // (The module that it came with, if any, loses a member before the modulator is written down, so that undo puts the modulator back first and the module after it.)
+            self.leave_module(modulator.node);
             self.took_out(Inverse::Modulator { at, index, modulator, bases });
         }
         self.give_back(driven);
@@ -1028,7 +1067,7 @@ impl Controller {
                     let value = value_of(self.model.groups.get(group)?.effects.get(effect)?, index)?;
                     Some(GraphCommand::SetGroupParameter { group, index: effect, param_index: index, value })
                 }
-                NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) => None,
+                NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) | NodePath::Module(_) => None,
             },
             Driven::Setting { modulator, field } => {
                 let NodePath::Modulator { at, index } = self.model.locate(modulator)? else { return None };

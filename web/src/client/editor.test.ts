@@ -5,6 +5,7 @@ import { Client } from "./connection";
 import { MASTER, groupsFixture, movesFixture, nodeNamed, reachFixture, tracerSnapshot } from "./fixtures";
 import { MockServer } from "./mock";
 import type { MockOptions } from "./mock";
+import type { Module } from "./modules";
 import { Editor, refusal } from "./editor";
 import { Notices } from "./notices";
 import { samePort } from "./reach";
@@ -473,6 +474,33 @@ describe("adding a node where a menu on the canvas was opened", () => {
     }
     expect(intentsAsked(server)).toEqual(["addInstrument", "setNodeUi", "addFreeEffect", "setNodeUi", "addFreeModulator", "setNodeUi", "addSource", "setNodeUi"]);
     expect(said(notices)).toEqual([]);
+  });
+
+  test("puts a module where it is told, as the one box it is on the canvas: the node that is placed and shown is the module's, and not the last effect that is in it", async () => {
+    const space: Module = {
+      lanes: [
+        {
+          instrument: null,
+          effects: [
+            { plugin: "builtin:filter", preset: null, params: {}, mix: 1, pinned: [], fed: true },
+            { plugin: "builtin:reverb", preset: null, params: {}, mix: 0.4, pinned: [], fed: true },
+          ],
+        },
+      ],
+      cables: [],
+      modulators: [],
+    };
+    const { client, server, shown, editor } = await open({ modules: { Space: space } });
+    const placed = await editor.addFreeEffect("module:Space", place);
+    const nodes = client.state.snapshot?.graph.nodes ?? [];
+    expect(nodes.find((candidate) => candidate.id === placed)).toMatchObject({ kind: "module", name: "Space", ui: place });
+    expect(intentsAsked(server)).toEqual(["addFreeEffect", "setNodeUi"]);
+    expect(shown).toEqual([]);
+    // Without a place the canvas is asked to show it, and it is the box that it is asked to show.
+    const shownAgain = await editor.addFreeEffect("module:Space");
+    expect(nodes.length).toBeLessThan(client.state.snapshot?.graph.nodes.length ?? 0);
+    expect(client.state.snapshot?.graph.nodes.find((candidate) => candidate.id === shownAgain)?.kind).toBe("module");
+    expect(shown).toEqual([shownAgain]);
   });
 
   test("does not ask the canvas to show a node that it put where the person is looking", async () => {

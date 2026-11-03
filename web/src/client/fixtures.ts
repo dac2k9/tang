@@ -21,6 +21,7 @@ import audioCables from "./fixtures/audioCables.json";
 import sideCables from "./fixtures/sideCables.json";
 import uses from "./fixtures/uses.json";
 import builtinPresetValues from "./fixtures/builtins.presets.json";
+import moduleBoxes from "./fixtures/moduleBoxes.json";
 import moduleGraphs from "./fixtures/moduleGraphs.json";
 import modules from "./fixtures/modules.json";
 import moves from "./fixtures/moves.json";
@@ -137,6 +138,13 @@ export const moduleGraphsFixture = moduleGraphs as unknown as ModuleGraphsFixtur
 export interface ModuleGraphsFixture extends ModulesFixture {
   modulatorSteps: ModulesFixture["steps"];
 }
+
+/**
+ * A small session (an oscillator with a filter, a lane that has a reverb and no instrument, and an LFO that hears the first lane and drives the filter's cutoff) and what the controller makes of a module as one box (step 108): the filter, the reverb
+ * and the LFO saved as a module, added (the lanes, the modulator and the box that is their record), placed, taken out whole, put back, taken out again, taken out one node after the other and put back as the module was, and a second one added with
+ * the first taken out and put back. Steps, as `modulesFixture` has them (with no list of what the catalog says of modules). Written by the controller (`the_web_clients_fixture_of_what_a_module_comes_to_as_one_box_is_current`).
+ */
+export const moduleBoxesFixture = moduleBoxes as unknown as { snapshot: Snapshot; steps: Omit<ModulesFixture["steps"][number], "modules">[] };
 
 /**
  * A session with a group (a bus effect and an LFO in it), a member of it with a reverb and an LFO of its own, a lane with a pattern that was recorded at 90 beats a minute and a

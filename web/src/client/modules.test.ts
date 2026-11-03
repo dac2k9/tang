@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { CatalogEntry, Intent, MidiControl, ModulatorSource, Node, ServerMessage, Snapshot, TelemetryLayout } from "../protocol";
-import { builtinCatalog, MASTER, moduleGraphsFixture, modulesFixture, tracerSnapshot } from "./fixtures";
+import { builtinCatalog, MASTER, moduleBoxesFixture, moduleGraphsFixture, modulesFixture, tracerSnapshot } from "./fixtures";
 import { MockServer } from "./mock";
 import { chainOf, cleanModuleName, moduleEntry, moduleId, moduleNameOf, moduleOf, moduleOfNodes, pluginCount, withModules } from "./modules";
 import type { Module, ModuleDrives, ModuleEffect, ModuleLane, ModuleModulator } from "./modules";
@@ -770,5 +770,60 @@ describe("the modulators that the mock engine makes of a module", () => {
     const drawn = server.snapshot.graph.edges.filter((edge) => edge.kind === "modulation" && edge.from.node === heard?.id);
     expect(drawn).toHaveLength(1);
     expect(drawn[0]?.to.port.type).toBe("param");
+  });
+});
+
+describe("the mock engine's module boxes (step 108)", () => {
+  const fixture = moduleBoxesFixture;
+
+  test("are what the controller makes of a module that is added as one thing, placed, taken out whole, put back, taken out a node at a time and put back as the module was, step by step: the events, the nodes and their records, the cables, the layout of the telemetry, and what Undo and Redo would do", () => {
+    const server = new MockServer({ snapshot: fixture.snapshot });
+    expect(fixture.steps.length).toBeGreaterThanOrEqual(15);
+    for (const [i, step] of fixture.steps.entries()) {
+      const told = server.apply(step.intent);
+      const what = `step ${String(i + 1)}: ${JSON.stringify(step.intent)}`;
+      expect(told.events, what).toEqual(step.events);
+      expect(told.restructured, what).toBe(step.restructured);
+      expect(server.history, what).toEqual(step.history);
+      expect(server.snapshot.graph, what).toEqual(step.graph);
+      expect(layoutOf(server.snapshot.telemetry), what).toEqual(layoutOf(step.telemetry));
+    }
+  });
+
+  test("have the lanes and the modulators that came with the module as members, and the effects in the lanes: the box is the last node made, after the modulators and before the master", () => {
+    const server = new MockServer({ snapshot: fixture.snapshot });
+    for (const step of fixture.steps.slice(0, 2)) server.apply(step.intent);
+    const { nodes } = server.snapshot.graph;
+    const box = nodes.find((node) => node.kind === "module");
+    expect(box?.name).toBe("Pair");
+    const lanes = nodes.filter((node) => node.kind === "instrument").slice(-2).map((node) => node.id);
+    const modulator = nodes.filter((node) => node.kind === "modulator").at(-1)?.id;
+    expect(box?.kind === "module" ? box.members : null).toEqual([...lanes, modulator]);
+    expect(nodes.at(-1)?.kind).toBe("master");
+    expect(nodes.at(-2)).toBe(box);
+    expect(nodes.at(-3)?.kind).toBe("modulator");
+    // (It was made last, so that what came with it has the ids it had: the box has the highest.)
+    expect(Math.max(...nodes.filter((node) => node.id !== MASTER).map((node) => node.id))).toBe(box?.id);
+  });
+
+  test("list a modulator that is added to a session that has none before the module's box, as the controller does: the modulators come first, and then the modules, and then the master", () => {
+    const server = new MockServer({ snapshot: fixture.snapshot });
+    for (const step of fixture.steps.slice(0, 2)) server.apply(step.intent);
+    for (const modulator of server.snapshot.graph.nodes.filter((node) => node.kind === "modulator")) server.apply({ type: "removeNode", node: modulator.id });
+    expect(server.snapshot.graph.nodes.some((node) => node.kind === "modulator")).toBe(false);
+    expect(server.snapshot.graph.nodes.some((node) => node.kind === "module")).toBe(true);
+    server.apply({ type: "addFreeModulator", kind: "lfo", hears: null });
+    expect(server.snapshot.graph.nodes.map((node) => node.kind).filter((kind) => kind === "modulator" || kind === "module" || kind === "master")).toEqual(["modulator", "module", "master"]);
+  });
+
+  test("do not take out a module that has every lane that the session has: a session keeps a lane, and nothing is changed", () => {
+    const server = new MockServer({ snapshot: fixture.snapshot });
+    for (const step of fixture.steps.slice(0, 2)) server.apply(step.intent);
+    for (const lane of fixture.snapshot.graph.nodes.filter((node) => node.kind === "instrument")) server.apply({ type: "removeNode", node: lane.id });
+    const box = server.snapshot.graph.nodes.find((node) => node.kind === "module");
+    expect(server.snapshot.graph.nodes.filter((node) => node.kind === "instrument")).toHaveLength(2);
+    const before = server.snapshot;
+    expect(refusedWith(server, { type: "removeNode", node: box?.id ?? -1 })).toBe("a session keeps its last lane");
+    expect(server.snapshot).toBe(before);
   });
 });

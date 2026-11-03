@@ -45,6 +45,15 @@ export const audioOut = (target: Locator): Locator => target.locator('.react-flo
 /** The input of audio of a node (an effect's, a group's or the master's), where an audio cable ends. */
 export const audioIn = (target: Locator): Locator => target.locator('.react-flow__handle[data-handleid="audioIn"]');
 
+/**
+ * The input of audio of a box (a module that is closed, step 108): the handle that stands for the input of a node inside it, which is named after the port and that node (`audioIn@12`), where an audio cable ends. The first
+ * of them if the box has more than one.
+ */
+export const boxIn = (target: Locator): Locator => target.locator('.react-flow__handle[data-handleid^="audioIn@"]').first();
+
+/** The output of audio of a box, where an audio cable is started: the handle that stands for the output of a node inside it (`audioOut@12`). The first of them if the box has more than one. */
+export const boxOut = (target: Locator): Locator => target.locator('.react-flow__handle[data-handleid^="audioOut@"]').first();
+
 /** The second input of audio of an effect that has one (a Math's B), where an audio cable ends that only a cable feeds. */
 export const audioInSide = (target: Locator): Locator => target.locator('.react-flow__handle[data-handleid="audioInSide"]');
 

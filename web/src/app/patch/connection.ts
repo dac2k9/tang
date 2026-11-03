@@ -5,6 +5,7 @@
 // (docs/patch-graph.md §11.6); or a cable of notes, from a source to a lane. Whether it can be drawn is not decided here: the controller decides (`AddModEdge`,
 // `AddCable`); the list it is looked up in (`drivablesOf`, in the data of each modulator's node, `audioTakers` for the audio and `noteTakers` for the notes) is the
 // client's reading of the same rule, so that the canvas can show the ends that take the cable before it is dropped, and not drop it on one that does not.
+// A cable that is dragged to or from a box (a module that is closed, step 108) is a cable to or from the node inside that the handle of the box stands for (`memberOfHandle`): the connection is resolved to it first.
 import { createContext } from "react";
 
 import type { Editor } from "../../client/editor";
@@ -12,7 +13,7 @@ import { noteTakers } from "../../client/noteWiring";
 import type { NotesEnds } from "../../client/noteWiring";
 import { audioTakers } from "../../client/wiring";
 import type { Graph, NodeId, Port } from "../../protocol";
-import { handleOf, paramHandle, SETTING_HANDLES } from "./toFlow";
+import { handleOf, memberOfHandle, paramHandle, plainHandle, SETTING_HANDLES } from "./handles";
 import type { PatchNode } from "./toFlow";
 
 /** What React Flow says of a connection. */
@@ -33,6 +34,22 @@ export interface CableEnds {
   port: Port;
 }
 
+/**
+ * What a connection is between, if an end of it is a handle of a box: the node inside the module that the handle stands for, and its port. A handle that is not a box's is as it was. The ends of a cable are
+ * the nodes that it joins, whatever the canvas draws it at.
+ */
+function resolved(connection: Connection): Connection {
+  const from = memberOfHandle(connection.sourceHandle);
+  const to = memberOfHandle(connection.targetHandle);
+  if (from === null && to === null) return connection;
+  return {
+    source: from === null ? connection.source : String(from.member),
+    sourceHandle: from === null ? (connection.sourceHandle ?? null) : from.handle,
+    target: to === null ? connection.target : String(to.member),
+    targetHandle: to === null ? (connection.targetHandle ?? null) : to.handle,
+  };
+}
+
 const WHOLE = /^\d+$/;
 const PARAM_HANDLE = /^param-(\d+)$/;
 const DEPTH_HANDLE = /^depth-(\d+)$/;
@@ -50,7 +67,7 @@ function portAt(handle: string): Port | null {
 
 /** The cable a connection asks for; null if it does not go from a modulator's output to a parameter's port, a modulator's setting or the depth of a cable. */
 export function cableOf(connection: Connection): CableEnds | null {
-  const { source, target, sourceHandle, targetHandle } = connection;
+  const { source, target, sourceHandle, targetHandle } = resolved(connection);
   if (sourceHandle !== "modOut" || !targetHandle || ![source, target].every((text) => WHOLE.test(text))) return null;
   const port = portAt(targetHandle);
   return port === null ? null : { modulator: Number(source), node: Number(target), port };
@@ -68,14 +85,14 @@ export interface AudioEnds {
 
 /** The audio cable a connection asks for; null if it does not go from an output of audio to an input of audio, or the nodes are not named by whole numbers. */
 export function audioCableOf(connection: Connection): AudioEnds | null {
-  const { source, target, sourceHandle, targetHandle } = connection;
+  const { source, target, sourceHandle, targetHandle } = resolved(connection);
   if (sourceHandle !== "audioOut" || (targetHandle !== "audioIn" && targetHandle !== "audioInSide") || ![source, target].every((text) => WHOLE.test(text))) return null;
   return { from: Number(source), to: Number(target), side: targetHandle === "audioInSide" };
 }
 
 /** The cable of notes a connection asks for: from the source whose output of events it starts at to the lane whose input of events it ends at; null if it does not go from one to the other, or the nodes are not named by whole numbers. */
 export function notesCableOf(connection: Connection): NotesEnds | null {
-  const { source, target, sourceHandle, targetHandle } = connection;
+  const { source, target, sourceHandle, targetHandle } = resolved(connection);
   if (sourceHandle !== "eventsOut" || targetHandle !== "eventsIn" || ![source, target].every((text) => WHOLE.test(text))) return null;
   return { source: Number(source), lane: Number(target) };
 }
@@ -125,7 +142,10 @@ export function canDrawNotes(graph: Graph, ends: NotesEnds): boolean {
 export type CableKind = "audio" | "notes" | "modulation";
 
 /** The kind of cable that a drag draws, by the handle it starts at (`takersOf` has the ports that take it): audio from an output of audio, notes from an output of events, modulation from anything else that starts a cable. */
-export const kindOfDrag = (handleId: string | null): CableKind => (handleId === "audioOut" ? "audio" : handleId === "eventsOut" ? "notes" : "modulation");
+export const kindOfDrag = (handleId: string | null): CableKind => {
+  const handle = plainHandle(handleId);
+  return handle === "audioOut" ? "audio" : handle === "eventsOut" ? "notes" : "modulation";
+};
 
 /**
  * Ask `editor` for the cable that a connection that was dropped stands for, of whichever kind it is: an audio cable, a cable of notes or a cable of modulation. Nothing for a connection that is none (what the controller
@@ -158,8 +178,12 @@ interface Start {
  * from the output of a node for a drag from that, the inputs of events of the lanes that take notes from a source for a drag from its output; null where no cable starts (an input,
  * a port of a control, no node, no session to say what is where).
  */
-export function takersOf(graph: Graph | null, nodes: readonly PatchNode[], { nodeId, handleType, handleId }: Start): Set<string> | null {
-  if (handleType !== "source" || nodeId === null || !WHOLE.test(nodeId)) return null;
+export function takersOf(graph: Graph | null, nodes: readonly PatchNode[], start: Start): Set<string> | null {
+  // (A drag from a handle of a box is a drag from the port of the node inside that it stands for.)
+  const inside = memberOfHandle(start.handleId);
+  const nodeId = inside === null ? start.nodeId : String(inside.member);
+  const handleId = inside === null ? start.handleId : inside.handle;
+  if (start.handleType !== "source" || nodeId === null || !WHOLE.test(nodeId)) return null;
   if (handleId === "modOut") return drawableFrom(nodes, Number(nodeId));
   if (handleId === "audioOut") return graph ? audioTakersOf(graph, Number(nodeId)) : null;
   if (handleId === "eventsOut") return graph ? notesTakersOf(graph, Number(nodeId)) : null;

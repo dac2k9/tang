@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
 
 import { moduleGraphsFixture } from "../../client/fixtures";
-import type { Node } from "../../protocol";
+import type { Graph, Node } from "../../protocol";
+import { effect, lane, master as theMaster, modulator as lfo, moduleNode } from "./boxesKit";
 import { modulePluginsOf } from "./selection";
 
 // What a module can hold of the nodes that are chosen on the canvas (steps 105 and 106): the plugins (the instrument of a lane that has one, an effect that is in a lane) and the modulators that go with them, and nothing else,
@@ -53,5 +54,26 @@ describe("what a module holds of what is chosen", () => {
     expect(modulePluginsOf(moved, [orphan.id])).toEqual({ nodes: [], plugins: 0, left: 1 });
     expect(modulePluginsOf(moved, [bus.id])).toEqual({ nodes: [], plugins: 0, left: 1 });
     expect(modulePluginsOf(moved, [filter.id])).toEqual({ nodes: [filter.id], plugins: 1, left: 0 });
+  });
+});
+
+describe("what a module holds of a box that is chosen (step 108)", () => {
+  const voice: Graph = {
+    nodes: [lane(2, "Oscillator"), effect(3, 2, "Filter"), lane(4, "Chain", null), effect(5, 4, "Delay"), lfo(20, "LFO", 2), lane(6, "Outside"), moduleNode(1, "Voice", [2, 4, 20]), theMaster],
+    edges: [],
+  };
+
+  test("is what is in it: the instruments of its lanes, their effects and its modulators, in the order of the graph, and a lane that has no instrument is no part of it but for its effects", () => {
+    expect(modulePluginsOf(voice, [1])).toEqual({ nodes: [2, 3, 5, 20], plugins: 3, left: 0 });
+  });
+
+  test("is each node once, whatever else is chosen with it, and what is chosen with it that a module cannot hold is left out as it is without it", () => {
+    expect(modulePluginsOf(voice, [3, 1])).toEqual({ nodes: [3, 2, 5, 20], plugins: 3, left: 0 });
+    expect(modulePluginsOf(voice, [6, 1, 99_999])).toEqual({ nodes: [6, 2, 3, 5, 20], plugins: 4, left: 1 });
+  });
+
+  test("is nothing for a box that has nothing in it that a module holds, and the box is not counted as left out", () => {
+    const hollow: Graph = { nodes: [lane(2, "Chain", null), moduleNode(1, "Empty", [2]), theMaster], edges: [] };
+    expect(modulePluginsOf(hollow, [1])).toEqual({ nodes: [], plugins: 0, left: 0 });
   });
 });

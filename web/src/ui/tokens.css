@@ -22,6 +22,7 @@
   --tang-group: #4cc9d8; /* groups and their buses */
   --tang-instrument: #e6c84c;
   --tang-effect: #5fc86f;
+  --tang-module: #aeb6cc; /* a module that is closed, which is one box */
   --tang-value: #7aa2f7; /* what a parameter is set to */
 
   /* State */

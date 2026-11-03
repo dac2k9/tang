@@ -491,6 +491,15 @@ export function planOf(snapshot: Snapshot, intent: Intent, now: number, catalog:
       // A source of notes goes with the cables of notes that start at it, and comes back with them, at its place among the sources (the controller's `Inverse::Source`), in the words of the button that
       // adds one: the keys, or the device by its name (what the node is called).
       if (node?.kind === "source") return { removed: { label: `remove ${node.name}`, intent, at: now } };
+      // A module goes with its modulators and its lanes, whole, and comes back with them as one (the controller's `Inverse::Module`: its record, as it was), in the words of the button that adds one: its name. Cables that drive each
+      // other's depths are not put back, as for a modulator that goes alone.
+      if (node?.kind === "module") {
+        const { edges } = snapshot.graph;
+        const members = new Set(node.members);
+        const touching = edges.flatMap((e) => (isModulation(e) && (members.has(e.from.node) || members.has(e.to.node)) ? [e.id] : []));
+        if (drivesRoundToItself(edges, cablesThatGo(edges, touching))) return "barrier";
+        return { removed: { label: `remove ${node.name}`, intent, at: now } };
+      }
       // A group goes with its bus effects and the cables that drive them, and its members are in none; it comes back with them, at its place among the groups and with its members put in
       // it again (the controller's `Inverse::Group`). The modulators that heard it stay, hearing every note.
       if (node?.kind === "group") return { removed: { label: `remove ${laneOrGroupWords(snapshot.graph.nodes, node)}`, intent, at: now } };

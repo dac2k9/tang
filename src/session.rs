@@ -138,6 +138,26 @@ fn lenient_names<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Ve
     })
 }
 
+/// The `members` of a `[[module]]`, read leniently like a `pinned` list: what is not a list is left out (and logged), and so is whatever in a list is not a text.
+fn lenient_members<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    Ok(match toml::Value::deserialize(deserializer)? {
+        toml::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                toml::Value::String(place) => Some(place),
+                other => {
+                    log::warn!("ignoring a member of a module that is not a place: {other}");
+                    None
+                }
+            })
+            .collect(),
+        other => {
+            log::warn!("ignoring the `members` of a module that is not a list of places: {other}");
+            Vec::new()
+        }
+    })
+}
+
 /// The top-level `[ui]` table, read leniently like a node's.
 fn lenient_table<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<toml::Table>, D::Error> {
     Ok(match toml::Value::deserialize(deserializer)? {
@@ -178,6 +198,17 @@ pub struct SessionConfig {
     /// Each hears every note unless it says whose (`hears`), and its cables name the plugin they drive by its place in the session (`to = "instrument[0].effect[1]"`).
     /// `move_modulators_to_the_session` puts the modulators of the lanes and of the groups here too.
     pub free_modulators: Vec<ModulatorConfig>,
+    /// The modules that were added to the session as one thing (`[[module]]`, step 108), in the order of the file: a front-end draws each as one box. What a member names that is not there is left out by the loader,
+    /// and a module that has no member left is not made (a layout is not worth refusing a session for).
+    pub modules: Vec<ModuleConfig>,
+}
+
+/// A `[[module]]` table (step 108): the name the module has in the library, the lanes and the modulators that came with it, and where its box is drawn.
+pub struct ModuleConfig {
+    pub name: String,
+    pub members: Vec<MemberPlace>,
+    /// Where the box is drawn.
+    pub ui: Option<NodeUi>,
 }
 
 /// The `[master]` table (step 102): the output mix's volume, whether the limiter is in the sound and where its ceiling is. A key that is not there is what the master is without it: a volume of 1,
@@ -339,6 +370,51 @@ impl std::fmt::Display for CablePlace {
             CablePlace::Device(device) => write!(f, "device[{device}]"),
         }
     }
+}
+
+/// A node that came with a module that was added as one thing (`[[module]]`, step 108): a lane, by its place among the `[[instrument]]` tables (`instrument[2]`; its effects are in it), or a modulator, by its place
+/// among the `[[modulator]]` tables (`modulator[0]`), the numbers whole and from 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberPlace {
+    Lane(usize),
+    Modulator(usize),
+}
+
+impl MemberPlace {
+    /// The place that `text` names, if it names one: `instrument[0]` or `modulator[0]`. A text with a sign, a space or a word that is none of the two names none.
+    pub fn parse(text: &str) -> Option<MemberPlace> {
+        let (word, rest) = text.trim().split_once('[')?;
+        let digits = rest.strip_suffix(']')?;
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let place = digits.parse().ok()?;
+        match word {
+            "instrument" => Some(MemberPlace::Lane(place)),
+            "modulator" => Some(MemberPlace::Modulator(place)),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for MemberPlace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemberPlace::Lane(lane) => write!(f, "instrument[{lane}]"),
+            MemberPlace::Modulator(modulator) => write!(f, "modulator[{modulator}]"),
+        }
+    }
+}
+
+/// What a module that was added as one thing is called when the file has no name for it, or a blank one.
+pub const DEFAULT_MODULE_NAME: &str = "Module";
+
+/// The name that a module is called by, from the text a file has: the text without its control characters and the spaces round it, and `DEFAULT_MODULE_NAME` for one that is nothing then. (A name
+/// is not cut short: the library's names run to a file name's length, and a module that was added under one must be saved and loaded as it is.)
+pub fn module_name(text: &str) -> String {
+    let name: String = text.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim();
+    if name.is_empty() { DEFAULT_MODULE_NAME.to_string() } else { name.to_string() }
 }
 
 /// A cable of a session file (`[[cable]]`): where it starts, where it ends and its level, if the file says one. It is a cable of notes when it starts at a source (`keys`, `device[0]`), which has
@@ -581,6 +657,8 @@ struct SessionRaw {
     groups: Vec<GroupRaw>,
     #[serde(default, rename = "modulator")]
     modulators: Vec<ModulatorConfig>,
+    #[serde(default, rename = "module")]
+    modules: Vec<ModuleRaw>,
     #[serde(default, rename = "cable")]
     cables: Vec<CableRaw>,
     #[serde(default)]
@@ -615,6 +693,17 @@ struct CableRaw {
     to: String,
     #[serde(default)]
     gain: Option<f64>,
+}
+
+/// A `[[module]]` table as the file has it: its members are read leniently, as a place is (a layout is not worth refusing a session for).
+#[derive(Deserialize)]
+struct ModuleRaw {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_members")]
+    members: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_ui")]
+    ui: Option<NodeUi>,
 }
 
 /// A `[keys]` table as the file has it.
@@ -969,9 +1058,29 @@ pub fn parse_raw(content: &str) -> anyhow::Result<SessionConfig> {
             Ok(CableConfig { from, to, gain: cable.gain.map(|gain| gain as f32) })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let modules = raw
+        .modules
+        .into_iter()
+        .enumerate()
+        .map(|(at, module)| ModuleConfig {
+            name: module_name(module.name.as_deref().unwrap_or("")),
+            members: module
+                .members
+                .iter()
+                .filter_map(|text| {
+                    let place = MemberPlace::parse(text);
+                    if place.is_none() {
+                        log::warn!("module[{at}].members: \"{text}\" is not a place of a lane or a modulator (instrument[0], modulator[0]): left out");
+                    }
+                    place
+                })
+                .collect(),
+            ui: module.ui,
+        })
+        .collect();
     let keys = raw.keys.map(|keys| KeysConfig { ui: keys.ui });
     let master = raw.master.map(|master| MasterConfig { volume: master.volume.map(|volume| volume as f32), limiter: master.limiter, ceiling: master.ceiling.map(|ceiling| ceiling as f32) });
-    Ok(SessionConfig { instruments, groups, piano: raw.piano, master_ui, bpm: raw.bpm.map(|bpm| bpm as f32), master, cables, keys, devices, free_modulators: raw.modulators })
+    Ok(SessionConfig { instruments, groups, piano: raw.piano, master_ui, bpm: raw.bpm.map(|bpm| bpm as f32), master, cables, keys, devices, free_modulators: raw.modulators, modules })
 }
 
 /// A place in a rack that no modulator is at: a cable that names it is left out by the loader, as one that names a modulator that is not there is.
@@ -1329,9 +1438,19 @@ pub struct SaveSources {
     pub devices: Vec<SaveDevice>,
     /// The modulators, in order: each cable names the plugin it drives by its place (`SaveModTarget::to`).
     pub modulators: Vec<SaveModulator>,
+    /// The modules that were added as one thing (`[[module]]`, step 108), in order, each naming the lanes and the modulators that came with it by their places.
+    pub modules: Vec<SaveModule>,
     /// The `[master]` table, or none when the master is what it is without one (the model's `master_to_save`). It rides with the rest of what stands outside the lanes and the groups, so that
     /// the writers that take the session in parts take no part more.
     pub master: Option<MasterConfig>,
+}
+
+/// A module that was added as one thing (`[[module]]`).
+pub struct SaveModule {
+    pub name: String,
+    pub members: Vec<MemberPlace>,
+    /// Where the box is drawn.
+    pub ui: Option<NodeUi>,
 }
 
 /// The keys as a source (`[keys]`).
@@ -1438,6 +1557,9 @@ struct SessionOut {
     /// The modulators that belong to no lane and no group come after the lanes and the groups that their cables drive.
     #[serde(skip_serializing_if = "Vec::is_empty", rename = "modulator")]
     modulators: Vec<ModulatorOut>,
+    /// The modules that were added as one thing name the lanes and the modulators above them.
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "module")]
+    modules: Vec<ModuleOut>,
     #[serde(skip_serializing_if = "Vec::is_empty", rename = "cable")]
     cables: Vec<CableOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1468,6 +1590,15 @@ struct KeysOut {
 #[derive(Serialize)]
 struct DeviceOut {
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ui: Option<NodeUiOut>,
+}
+
+/// One `[[module]]` table in the output.
+#[derive(Serialize)]
+struct ModuleOut {
+    name: String,
+    members: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ui: Option<NodeUiOut>,
 }
@@ -1914,6 +2045,7 @@ pub fn to_toml(
         piano: piano.map(|p| PianoOut { scale: p.scale.clone(), locked: p.locked }),
         ui: master_ui.map(|ui| UiOut { master: ui.into() }),
         modulators: mods_to_out(&sources.modulators),
+        modules: sources.modules.iter().map(|module| ModuleOut { name: module.name.clone(), members: module.members.iter().map(ToString::to_string).collect(), ui: module.ui.map(NodeUiOut::from) }).collect(),
         groups: groups
             .iter()
             .map(|g| GroupOut {
@@ -3851,7 +3983,7 @@ to = "instrument[1]"
     }
 
     fn sources(keys: Option<Option<NodeUi>>, devices: &[(&str, Option<NodeUi>)]) -> SaveSources {
-        SaveSources { keys: keys.map(|ui| SaveKeys { ui }), devices: devices.iter().map(|(name, ui)| SaveDevice { name: name.to_string(), ui: *ui }).collect(), modulators: Vec::new(), master: None }
+        SaveSources { keys: keys.map(|ui| SaveKeys { ui }), devices: devices.iter().map(|(name, ui)| SaveDevice { name: name.to_string(), ui: *ui }).collect(), modulators: Vec::new(), modules: Vec::new(), master: None }
     }
 
     #[test]
@@ -4165,5 +4297,72 @@ mod_rate = 2
         assert_eq!(config.free_modulators.len(), 2);
         assert_eq!(config.free_modulators[0].hears.as_deref(), Some("instrument[0]"));
         assert_eq!((config.free_modulators[0].targets[0].mod_rate, config.free_modulators[1].targets[0].mod_rate), (Some(0), Some(0)));
+    }
+
+    // -- the modules that were added as one thing (`[[module]]`, step 108) --
+
+    #[test]
+    fn a_member_of_a_module_is_a_lane_or_a_modulator_by_its_place_and_nothing_else_is_a_place() {
+        for (text, place) in [("instrument[0]", MemberPlace::Lane(0)), ("instrument[12]", MemberPlace::Lane(12)), ("modulator[3]", MemberPlace::Modulator(3)), ("  modulator[0] ", MemberPlace::Modulator(0))] {
+            assert_eq!(MemberPlace::parse(text), Some(place), "{text:?}");
+            assert_eq!(MemberPlace::parse(&place.to_string()), Some(place), "what is written is read back");
+        }
+        assert_eq!((MemberPlace::Lane(2).to_string(), MemberPlace::Modulator(7).to_string()), ("instrument[2]".to_string(), "modulator[7]".to_string()));
+        for text in [
+            "", "instrument", "instrument[]", "instrument[x]", "instrument[-1]", "instrument[+1]", "instrument[ 1]", "instrument[1", "instrument 1]", "Instrument[0]", "modulator", "modulator[0].effect[0]", "instrument[0].effect[0]", "group[0]", "master", "keys",
+            "device[0]", "effect[0]", "instrument[99999999999999999999999]",
+        ] {
+            assert_eq!(MemberPlace::parse(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_module_is_called_by_its_name_without_control_characters_and_the_spaces_round_it_and_by_a_default_if_that_is_nothing() {
+        assert_eq!(module_name("  Room  "), "Room");
+        assert_eq!(module_name("Big\tRoom\n"), "BigRoom");
+        assert_eq!(module_name("a b  c"), "a b  c", "the spaces inside a name are its own");
+        for blank in ["", "   ", "\t\n", "\u{7}"] {
+            assert_eq!(module_name(blank), DEFAULT_MODULE_NAME, "{blank:?}");
+        }
+        let long = "x".repeat(300);
+        assert_eq!(module_name(&long), long, "a name is not cut short: the library's run to a file name's length, and one that was added must be saved and loaded as it is");
+    }
+
+    #[test]
+    fn a_session_file_has_modules_that_name_their_lanes_and_modulators_by_place_and_are_written_after_the_modulators_and_read_back_the_same() {
+        let text = "[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument]]\nplugin = \"builtin:osc\"\n[[modulator]]\n[[module]]\nname = \"  Room \"\nmembers = [\"instrument[1]\", \"modulator[0]\"]\nui = { x = 10, y = 20.5 }\n[[module]]\nmembers = [\"instrument[0]\"]\n";
+        let config = parse(text).unwrap();
+        assert_eq!(config.modules.len(), 2);
+        assert_eq!((config.modules[0].name.as_str(), config.modules[0].members.clone(), config.modules[0].ui), ("Room", vec![MemberPlace::Lane(1), MemberPlace::Modulator(0)], Some(NodeUi { x: 10.0, y: 20.5 })));
+        assert_eq!((config.modules[1].name.as_str(), config.modules[1].members.clone(), config.modules[1].ui), (DEFAULT_MODULE_NAME, vec![MemberPlace::Lane(0)], None), "a module that has no name is called by the default");
+        // Written: after the modulators and before the cables, a table for each, with the name, the members as text and the place where there is one.
+        let saved = SaveSources {
+            modules: vec![
+                SaveModule { name: "Room".to_string(), members: vec![MemberPlace::Lane(1), MemberPlace::Modulator(0)], ui: Some(NodeUi { x: 10.0, y: 20.5 }) },
+                SaveModule { name: "Plain".to_string(), members: vec![MemberPlace::Lane(0)], ui: None },
+            ],
+            ..SaveSources::default()
+        };
+        let written = to_toml(&one_lane(), &[], &[cable(CablePlace::Instrument(0), CablePlace::Master, 1.0)], &saved, None, None, None).unwrap();
+        let (modules, cables) = (written.find("[[module]]").expect("the modules are written"), written.find("[[cable]]").expect("and the cable"));
+        assert!(written.find("[[instrument]]").unwrap() < modules && modules < cables, "{written}");
+        assert!(written.contains("[[module]]\nname = \"Room\"\nmembers = [\"instrument[1]\", \"modulator[0]\"]\nui = { x = 10, y = 20.5 }\n\n[[module]]\nname = \"Plain\"\nmembers = [\"instrument[0]\"]\n"), "{written}");
+        let again = parse(&written).unwrap();
+        assert_eq!(again.modules.iter().map(|module| (module.name.clone(), module.members.clone(), module.ui)).collect::<Vec<_>>(), [("Room".to_string(), vec![MemberPlace::Lane(1), MemberPlace::Modulator(0)], Some(NodeUi { x: 10.0, y: 20.5 })), ("Plain".to_string(), vec![MemberPlace::Lane(0)], None)]);
+        // A session that has none writes none, and is the file it was.
+        let none = to_toml(&one_lane(), &[], &[], &SaveSources::default(), None, None, None).unwrap();
+        assert!(!none.contains("module"), "{none}");
+    }
+
+    #[test]
+    fn what_a_module_says_that_is_not_a_place_is_left_out_and_logged_and_does_not_refuse_the_session_a_layout_is_not_worth_it() {
+        // A member that is a number, a place that is none, a members that is no list, a name that is a number, and a position that is no pair: each is left out, and the session is read.
+        let text = "[[instrument]]\nplugin = \"builtin:osc\"\n[[module]]\nname = \"A\"\nmembers = [1, \"instrument[0]\", \"nowhere\", \"modulator[x]\"]\nui = 5\n[[module]]\nname = \"B\"\nmembers = \"instrument[0]\"\n";
+        let config = parse(text).unwrap();
+        assert_eq!(config.modules.len(), 2);
+        assert_eq!((config.modules[0].members.clone(), config.modules[0].ui), (vec![MemberPlace::Lane(0)], None));
+        assert!(config.modules[1].members.is_empty(), "a members that is no list is no members");
+        // (A name that is not text is a mistake of the file's types, which refuses it as any key of the wrong type does.)
+        assert!(parse("[[instrument]]\nplugin = \"builtin:osc\"\n[[module]]\nname = 5\n").is_err());
     }
 }

@@ -104,6 +104,8 @@ pub enum NodePath {
     Modulator { at: ModulatorLocation, index: usize },
     /// A source of notes: the keys, or a MIDI device.
     Source(usize),
+    /// A module that was added to the session as one thing (step 108): the box that a front-end draws in place of its lanes and modulators.
+    Module(usize),
 }
 
 /// The field of a modulator, as the intents name it, that a cable drives when it drives `setting`.
@@ -200,6 +202,9 @@ pub struct SessionModel {
     /// The modulators that belong to no lane and no group (P5b-2 of `docs/patch-graph.md` §11.6), in the order they were made: each hears every note, and its cables drive any plugin
     /// of the session and the settings of the other free modulators and the depths of their cables.
     pub free_modulators: Vec<ModulatorSlot>,
+    /// The modules that were added to the session as one thing (step 108), in the order they were made: a record of the lanes and the modulators that came with each, which a front-end draws as one box
+    /// (`ModuleInstance`). A record is a node of the graph of its own and has no part in the sound: the engine runs the lanes and the modulators as it runs any.
+    pub modules: Vec<ModuleInstance>,
 }
 
 impl Default for SessionModel {
@@ -216,8 +221,24 @@ impl Default for SessionModel {
             sources: Vec::new(),
             event_cables: Vec::new(),
             free_modulators: Vec::new(),
+            modules: Vec::new(),
         }
     }
+}
+
+/// A module that was added to the session as one thing (step 108, the user's "when we re-add a module it gets rendered like just a single box"): the name that it has in the library, and the nodes that came
+/// with it, which a front-end draws as one box and the engine runs as it runs any lane and any modulator (nothing of it is told to the audio thread). Its node, from the series that the other nodes' are,
+/// is the box's: where it is drawn (`SessionModel::ui`), what is taken out to take the whole module out, and what the ports of the box are told by (the page derives them from the members' ports).
+///
+/// The members are the **lanes** (each with the effects of its chain, which are in the lane, so that an effect that is added to a lane of a module is in it) and the **modulators** that were made with it, in the
+/// order they were made. A node that is taken out leaves the module it was in, and a module that has no member left is gone: it is a record of what came together, and no more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleInstance {
+    pub node: NodeId,
+    /// What the box is called: the name that the module has in the library.
+    pub name: String,
+    /// The lanes and the modulators that are in it, by node, in the order they were made.
+    pub members: Vec<NodeId>,
 }
 
 /// A source of notes that a session has (P4b of `docs/patch-graph.md` §11.6): a node of the graph with an output of events, which event cables start at. Its id is from the
@@ -482,6 +503,34 @@ impl SessionModel {
         index
     }
 
+    /// The place among the modules of the one that `member` came with: a lane or a modulator (a node is in at most one module).
+    pub fn module_of(&self, member: NodeId) -> Option<usize> {
+        self.modules.iter().position(|module| module.members.contains(&member))
+    }
+
+    /// Put a module among the modules at `index` (at the end for one past it); one that is there under the node is replaced, at the place it has: the place it went to.
+    pub fn insert_module_at(&mut self, index: usize, module: ModuleInstance) -> usize {
+        if let Some(at) = self.modules.iter().position(|there| there.node == module.node) {
+            self.modules[at] = module;
+            return at;
+        }
+        let index = index.min(self.modules.len());
+        self.modules.insert(index, module);
+        index
+    }
+
+    /// `member` leaves the module it is in, because it is taken out of the session: the place of the module and the module as it was (for what puts it back), or none if the node is in none. A module that has no
+    /// member left is gone with it.
+    pub fn leave_module(&mut self, member: NodeId) -> Option<(usize, ModuleInstance)> {
+        let at = self.module_of(member)?;
+        let before = self.modules[at].clone();
+        self.modules[at].members.retain(|node| *node != member);
+        if self.modules[at].members.is_empty() {
+            self.modules.remove(at);
+        }
+        Some((at, before))
+    }
+
     /// The event cable `id`, if there is one.
     pub fn event_cable(&self, id: EdgeId) -> Option<&EventCable> {
         self.event_cables.binary_search_by_key(&id, |cable| cable.id).ok().map(|at| &self.event_cables[at])
@@ -599,6 +648,7 @@ impl SessionModel {
                 NodePath::Group(_) => CableFrom::Group(from.node),
                 NodePath::Modulator { .. } => return Err(invalid("a modulator has no output of audio")),
                 NodePath::Source(_) => return Err(invalid("a source of notes has no output of audio: it has an output of events")),
+                NodePath::Module(_) => return Err(invalid("a module has no output of audio of its own: cables start at the plugins in it")),
             }
         };
         let side = to.port == Port::AudioInSide;
@@ -622,6 +672,7 @@ impl SessionModel {
                 NodePath::Instrument(_) => return Err(invalid("a lane has no input of audio: a cable ends at an effect, a group or the mix")),
                 NodePath::Modulator { .. } => return Err(invalid("a modulator has no input of audio")),
                 NodePath::Source(_) => return Err(invalid("a source of notes has no input of audio")),
+                NodePath::Module(_) => return Err(invalid("a module has no input of audio of its own: cables end at the plugins in it")),
             }
         };
         Ok((start, end))
@@ -661,7 +712,7 @@ impl SessionModel {
     }
 
     /// Every node and where it sits: the groups with their bus effects, then the lanes with
-    /// their effects, the sources of notes and the modulators. (A lane's instrument plugin
+    /// their effects, the sources of notes, the modulators and the modules. (A lane's instrument plugin
     /// shares the lane's id.)
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, NodePath)> + '_ {
         let groups = self.groups.iter().enumerate().flat_map(|(group, g)| {
@@ -678,7 +729,8 @@ impl SessionModel {
         });
         let sources = self.sources.iter().enumerate().map(|(index, source)| (source.node, NodePath::Source(index)));
         let free = self.free_modulators.iter().enumerate().map(|(index, m)| (m.node, NodePath::Modulator { at: ModulatorLocation::Free, index }));
-        groups.chain(lanes).chain(sources).chain(free)
+        let modules = self.modules.iter().enumerate().map(|(index, module)| (module.node, NodePath::Module(index)));
+        groups.chain(lanes).chain(sources).chain(free).chain(modules)
     }
 
     /// Where the node `id` sits, if it is still in the session.
@@ -716,6 +768,21 @@ impl SessionModel {
             if let Some(slot) = &lane.instrument {
                 if slot.node != lane.node {
                     return Err(format!("lane {inst} is {:?}, its instrument {:?}", lane.node, slot.node));
+                }
+            }
+        }
+        // The modules: each has a member, each member is a lane or a modulator that is there, and a node is in one module at most.
+        let mut in_a_module = std::collections::HashSet::new();
+        for module in &self.modules {
+            if module.members.is_empty() {
+                return Err(format!("{:?} is a module that has no member", module.node));
+            }
+            for member in &module.members {
+                if !matches!(self.locate(*member), Some(NodePath::Instrument(_) | NodePath::Modulator { .. })) {
+                    return Err(format!("{:?} has {member:?}, which is neither a lane nor a modulator that is there", module.node));
+                }
+                if !in_a_module.insert(*member) {
+                    return Err(format!("{member:?} is in two modules"));
                 }
             }
         }
@@ -900,7 +967,7 @@ impl SessionModel {
             NodePath::Instrument(inst) => self.instruments.get(inst)?.instrument.as_ref(),
             NodePath::Effect { inst, index } => self.instruments.get(inst)?.effects.get(index),
             NodePath::GroupEffect { group, index } => self.groups.get(group)?.effects.get(index),
-            NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) => None,
+            NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) | NodePath::Module(_) => None,
         }
     }
 
@@ -2528,6 +2595,85 @@ param = "pan"
         let other = model.alloc_node();
         model.instruments[0].instrument.as_mut().unwrap().node = other;
         assert!(model.check_ids().unwrap_err().contains("its instrument"), "an instrument in another node");
+    }
+
+    // -- modules that were added as one thing (step 108) --
+
+    /// A session of three lanes and a modulator with two modules: "Room" has the second lane and the modulator, "Echo" the third lane. The nodes of the lanes, of the modulator and of the two boxes.
+    fn the_modules() -> (SessionModel, [NodeId; 3], NodeId, [NodeId; 2]) {
+        let mut model = load("[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument]]\nplugin = \"builtin:osc\"\n[[modulator]]\n").model;
+        let lanes = [model.instruments[0].node, model.instruments[1].node, model.instruments[2].node];
+        let modulator = model.free_modulators[0].node;
+        let boxes = [model.alloc_node(), model.alloc_node()];
+        model.modules.push(ModuleInstance { node: boxes[0], name: "Room".to_string(), members: vec![lanes[1], modulator] });
+        model.modules.push(ModuleInstance { node: boxes[1], name: "Echo".to_string(), members: vec![lanes[2]] });
+        (model, lanes, modulator, boxes)
+    }
+
+    #[test]
+    fn a_module_is_a_node_that_comes_after_the_modulators_and_is_found_by_its_id_and_so_is_the_module_a_node_is_in() {
+        let (model, lanes, modulator, boxes) = the_modules();
+        let nodes: Vec<(NodeId, NodePath)> = model.nodes().collect();
+        assert_eq!(nodes.last().copied(), Some((boxes[1], NodePath::Module(1))));
+        assert_eq!(nodes[nodes.len() - 2], (boxes[0], NodePath::Module(0)));
+        assert_eq!(nodes[nodes.len() - 3], (modulator, NodePath::Modulator { at: ModulatorLocation::Free, index: 0 }), "the modules are listed after the modulators");
+        assert_eq!(model.locate(boxes[0]), Some(NodePath::Module(0)));
+        assert_eq!(model.modules[1].name, "Echo");
+        assert_eq!((model.module_of(lanes[1]), model.module_of(modulator), model.module_of(lanes[2]), model.module_of(lanes[0]), model.module_of(boxes[0])), (Some(0), Some(0), Some(1), None, None));
+        model.check_ids().unwrap();
+    }
+
+    #[test]
+    fn a_member_that_leaves_takes_itself_out_of_its_module_and_a_module_with_none_left_is_gone_and_the_module_as_it_was_is_what_puts_it_back() {
+        let (mut model, lanes, modulator, boxes) = the_modules();
+        let room = model.modules[0].clone();
+        let (at, before) = model.leave_module(lanes[1]).expect("it was in a module");
+        assert_eq!((at, &before), (0, &room), "the module as it was, and its place");
+        assert_eq!(model.modules[0].members, [modulator]);
+        assert_eq!(model.leave_module(lanes[1]), None, "a node that is in none leaves none");
+        assert_eq!(model.leave_module(lanes[0]), None);
+        // The last member: the module is gone, and the one after it is the first now.
+        let (at, last) = model.leave_module(modulator).unwrap();
+        assert_eq!((at, last.members.clone()), (0, vec![modulator]));
+        assert_eq!(model.modules.iter().map(|module| module.node).collect::<Vec<_>>(), [boxes[1]]);
+        assert_eq!(model.locate(boxes[0]), None);
+        // Put back as it was: at its place when it is gone, in place of what it is now when it is there.
+        assert_eq!(model.insert_module_at(0, last), 0);
+        assert_eq!(model.modules.iter().map(|module| module.node).collect::<Vec<_>>(), [boxes[0], boxes[1]]);
+        assert_eq!(model.insert_module_at(7, room.clone()), 0, "one that is there is replaced where it is, whatever place is asked for");
+        assert_eq!(model.modules[0], room);
+        let echo = model.modules.pop().unwrap();
+        assert_eq!(model.insert_module_at(99, echo), 1, "a place past the end is the end");
+        // A module that is not the first one says the place it had when its last member goes, and is put back there.
+        let (mut model, lanes, _, boxes) = the_modules();
+        let (at, echo) = model.leave_module(lanes[2]).expect("it was in a module");
+        assert_eq!(at, 1, "the place of the module that is gone, and not the first");
+        assert_eq!(model.modules.iter().map(|module| module.node).collect::<Vec<_>>(), [boxes[0]]);
+        assert_eq!(model.insert_module_at(at, echo), 1);
+        assert_eq!(model.modules.iter().map(|module| module.node).collect::<Vec<_>>(), [boxes[0], boxes[1]]);
+        model.check_ids().unwrap();
+    }
+
+    #[test]
+    fn check_ids_notices_a_module_that_has_no_member_one_whose_member_is_no_lane_or_modulator_and_a_node_that_is_in_two() {
+        let (mut model, ..) = the_modules();
+        model.modules[1].members.clear();
+        assert!(model.check_ids().unwrap_err().contains("a module that has no member"));
+        let (mut model, lanes, ..) = the_modules();
+        model.modules[1].members = vec![lanes[2], NodeId(900)];
+        assert!(model.check_ids().unwrap_err().contains("neither a lane nor a modulator that is there"));
+        let (mut model, _, _, boxes) = the_modules();
+        model.modules[1].members = vec![boxes[0]];
+        assert!(model.check_ids().unwrap_err().contains("neither a lane nor a modulator that is there"), "a module is no member of another");
+        let (mut model, lanes, ..) = the_modules();
+        model.modules[1].members.push(lanes[1]);
+        assert!(model.check_ids().unwrap_err().contains("is in two modules"));
+        let (mut model, _, _, boxes) = the_modules();
+        model.modules[1].node = boxes[0];
+        assert!(model.check_ids().unwrap_err().contains("another node has too"));
+        let (mut model, ..) = the_modules();
+        model.modules[1].node = NodeId(9_000);
+        assert!(model.check_ids().unwrap_err().contains("never allocated"));
     }
 
     // -- sources of notes and the cables from them (P4b of docs/patch-graph.md §11.6) --

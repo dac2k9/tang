@@ -283,7 +283,7 @@ describe("the field for the name of a module", () => {
 describe("the modules that were saved, in the bar's + Effect", () => {
   const space = { lanes: [{ instrument: null, effects: [{ plugin: "builtin:filter", preset: null, params: { cutoff: 0.25 }, mix: 0.8, pinned: ["cutoff"], fed: true }, { plugin: "builtin:reverb", preset: null, params: {}, mix: 0.4, pinned: [], fed: true }] }], cables: [], modulators: [] };
 
-  test("are listed first, each under the heading Module, and add the chain in a lane of its own: the effects it was saved with, in order, as modules on the canvas", async () => {
+  test("are listed first, each under the heading Module, and add the chain in a lane of its own, drawn as one box: the effects it was saved with are in it, in order, and are modules on the canvas once it is open", async () => {
     const { server, requests } = await rig(
       <>
         <PatchView />
@@ -298,12 +298,19 @@ describe("the modules that were saved, in the bar's + Effect", () => {
     if (!first) throw new Error("the menu has an item");
     expect(first.textContent).toBe("Space");
     fireEvent.click(first);
+    const names = (): (string | null)[] => Array.from(document.querySelectorAll(".tang-node__name")).map((name) => name.textContent);
+    // (One box: the effects that are in it are not on the canvas.)
     await waitFor(() => {
-      expect(Array.from(document.querySelectorAll(".tang-node__name")).map((name) => name.textContent)).toEqual(["Oscillator", "Filter 1", "Filter 2", "Reverb", "LFO", "Master"]);
+      expect(names()).toEqual(["Oscillator", "Filter 1", "LFO", "Space", "Master"]);
     });
     expect(asked(requests)).toEqual([{ type: "addFreeEffect", plugin: "module:Space" }]);
     expect(server.history.undo).toBe("add Space");
-    // (The first effect of the holder has the lane's cell, and its button saves the chain that is there now: the module that was added can be saved again as it is, whole.)
+    expect(screen.queryByRole("button", { name: "Save the chain of Filter 2 as a module" })).toBeNull();
+    // Open, the module is its effects: the first of them has the lane's cell, and its button saves the chain that is there now (the module that was added can be saved again as it is, whole).
+    fireEvent.click(screen.getByRole("button", { name: "Open Space" }));
+    await waitFor(() => {
+      expect(names()).toEqual(["Oscillator", "Filter 1", "Filter 2", "Reverb", "LFO", "Master"]);
+    });
     expect(screen.getByRole("button", { name: "Save the chain of Filter 2 as a module" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Save the chain of Reverb as a module" })).toBeNull();
     expect(noticeTexts()).toEqual([]);

@@ -8,7 +8,7 @@
 use crate::app::model::{EdgeId, InstrumentNode, ModSourceSlot, ModulatorSlot, NodeId, ParamSlot, PluginSlot, SessionModel, SourceKind, sync_name};
 use crate::plugin::chain::{CableFrom, CableTo, MidiBindSource, ModTargetKind, ModulatorLocation};
 use crate::session::{
-    CablePlace, Feed, NodeUi, SaveCable, SaveDevice, SaveEffect, SaveGroup, SaveInstrument, SaveInstrumentSlot, SaveKeys, SaveModSource, SaveModTarget, SaveModulator,
+    CablePlace, Feed, MemberPlace, NodeUi, SaveCable, SaveDevice, SaveEffect, SaveGroup, SaveInstrument, SaveInstrumentSlot, SaveKeys, SaveModSource, SaveModTarget, SaveModule, SaveModulator,
     SavePattern, SaveSources,
 };
 use std::collections::{BTreeMap, HashMap};
@@ -80,8 +80,34 @@ fn sources_to_save(model: &SessionModel) -> SaveSources {
             })
             .collect(),
         modulators: modulators_to_save(model, ModulatorLocation::Free),
+        modules: modules_to_save(model),
         master: model.master_to_save(),
     }
+}
+
+/// The modules that were added as one thing (step 108), each naming the lanes and the modulators that came with it by their places among the `[[instrument]]` and the `[[modulator]]` tables, which is how the
+/// loader finds them again. A member that is not a lane or a modulator that is there (the model keeps none) is left out.
+fn modules_to_save(model: &SessionModel) -> Vec<SaveModule> {
+    model
+        .modules
+        .iter()
+        .map(|module| SaveModule {
+            name: module.name.clone(),
+            members: module
+                .members
+                .iter()
+                .filter_map(|node| {
+                    model
+                        .instruments
+                        .iter()
+                        .position(|lane| lane.node == *node)
+                        .map(MemberPlace::Lane)
+                        .or_else(|| model.free_modulators.iter().position(|modulator| modulator.node == *node).map(MemberPlace::Modulator))
+                })
+                .collect(),
+            ui: model.ui.get(&module.node).copied(),
+        })
+        .collect()
 }
 
 /// Where the effect in `node` is, as the file names a place: an effect of a lane's chain or of a group's bus.

@@ -25,7 +25,10 @@ import type { CanvasActions, MenuDeps } from "./contextMenus";
 import { AudioEdge, HearsEdge, ModulationEdge, NotesEdge, SendEdge } from "./edges";
 import { InspectorContext, paramsButtonId } from "./inspector";
 import type { Inspector } from "./inspector";
+import { ModuleNode } from "./ModuleBox";
 import { GroupNode, MasterNode, ModulatorNode, PluginNode, SourceNode } from "./nodes";
+import { OpenModulesContext } from "./openModules";
+import type { OpenModules } from "./openModules";
 import { ParamPanel } from "./ParamPanel";
 import { dialogPlace, ModuleNameDialog, SaveSelectionButton } from "./SaveModule";
 import type { DialogPlace } from "./SaveModule";
@@ -51,6 +54,7 @@ const NODE_TYPES: NodeTypes = {
   group: GroupNode,
   master: MasterNode,
   source: SourceNode,
+  module: ModuleNode,
 };
 
 /** The keys that add a node to the ones that are chosen when it is clicked (step 105): Shift, which a person who has a box to draw round nodes expects it of, and the keys that React Flow has for it, Control and Command. A node is chosen by a click only while one is held (or choosing is on). */
@@ -171,8 +175,38 @@ function PatchCanvas() {
     }),
     [shown],
   );
-  const { flow, arranging, optimized, arrangeAgain } = useLayout(graph, shown);
+  // The modules that are open, which are their nodes on the canvas (a module that is not is one box): the viewer's own, like the scopes, and what the layout is made for.
+  const [openModules, setOpenModules] = useState<ReadonlySet<NodeId>>(() => new Set());
+  // What the canvas moves to once the layout has what a module was opened or closed to: the first of its lanes that is on the canvas, or the box.
+  const toShow = useRef<{ opened: NodeId } | { closed: NodeId } | null>(null);
+  const modules = useMemo<OpenModules>(
+    () => ({
+      open: openModules,
+      toggle: (node) => {
+        toShow.current = openModules.has(node) ? { closed: node } : { opened: node };
+        setOpenModules((now) => {
+          const next = new Set(now);
+          if (!next.delete(node)) next.add(node);
+          return next;
+        });
+      },
+    }),
+    [openModules],
+  );
+  const { flow, arranging, optimized, arrangeAgain } = useLayout(graph, shown, openModules);
   const reveals = useReveals();
+  // (After the commit that has the nodes of the module, or its box, on the canvas: the canvas moves to show them.)
+  useEffect(() => {
+    const want = toShow.current;
+    if (want === null) return;
+    toShow.current = null;
+    if ("closed" in want) {
+      reveals.show(want.closed);
+      return;
+    }
+    const first = flow.nodes.find((node) => node.data.module?.node === want.opened);
+    if (first) reveals.show(first.data.node);
+  }, [flow, reveals]);
   // (After the commit that has the node as tall as it is with its scope: the canvas's own effects, which keep the layout it moves by, run before this one, which is the parent's.)
   useEffect(() => {
     const node = opened.current;
@@ -300,8 +334,9 @@ function PatchCanvas() {
       fit: () => {
         void canvasRef.current?.fitView({ padding: FIT_PADDING, maxZoom: 1, duration: MOVE_MS });
       },
+      toggleModule: modules.toggle,
     }),
-    [inspected, inspector, shown, scopes, choosing, toggleChoosing, chosen, held, chooseAll, forgetChosen, arrange, flow.arranged, optimized],
+    [inspected, inspector, shown, scopes, choosing, toggleChoosing, chosen, held, chooseAll, forgetChosen, arrange, flow.arranged, optimized, modules],
   );
   /** What a menu opened by `event` is made from: the session as it is now, and the place on the canvas that the pointer was at. */
   const depsAt = useCallback(
@@ -356,86 +391,88 @@ function PatchCanvas() {
     <div className="tang-patch" data-testid="patch" data-connecting={connecting?.kind}>
       <InspectorContext.Provider value={inspector}>
         <ScopesContext.Provider value={scopes}>
-          <div className="tang-patch__canvas">
-            <StructureContext.Provider value={graph}>
-              <ConnectingContext.Provider value={connecting?.takers ?? null}>
-                <ReactFlow
-                  nodes={nodes}
-                  edges={edges}
-                  onInit={(instance) => {
-                    canvasRef.current = instance;
-                  }}
-                  onNodesChange={onNodesChange}
-                  onSelectionStart={() => {
-                    setBoxing(true);
-                  }}
-                  onPaneClick={forgetChosen}
-                  onPaneContextMenu={onPaneContextMenu}
-                  onNodeContextMenu={onNodeContextMenu}
-                  onEdgeContextMenu={onEdgeContextMenu}
-                  onNodeDragStart={onNodeDragStart}
-                  onNodeDragStop={onNodeDragStop}
-                  nodeDragThreshold={DRAG_THRESHOLD}
-                  nodeTypes={NODE_TYPES}
-                  edgeTypes={EDGE_TYPES}
-                  colorMode="dark"
-                  fitView
-                  fitViewOptions={{ padding: FIT_PADDING, maxZoom: 1 }}
-                  minZoom={0.2}
-                  maxZoom={1.5}
-                  connectionRadius={40}
-                  isValidConnection={isValidConnection}
-                  onConnectStart={onConnectStart}
-                  onConnectEnd={onConnectEnd}
-                  onConnect={onConnect}
-                  edgesFocusable={false}
-                  elementsSelectable={choosing || adding || boxing}
-                  selectionOnDrag={choosing}
-                  selectNodesOnDrag={false}
-                  multiSelectionKeyCode={MULTI_SELECTION_KEYS}
-                  panOnDrag={choosing ? [1] : true}
-                  deleteKeyCode={null}
-                >
-                  <Background gap={24} />
-                  <Controls showInteractive={false} />
-                  <Panel position="top-right" className="tang-patch__tools">
-                    {choosing || anyChosen ? (
-                      <>
-                        <span className="tang-patch__chosen" role="status">
-                          {chosen.length === 0
-                            ? "Drag a box round the nodes to keep"
-                            : `${String(held.nodes.length)} chosen${held.left > 0 ? `, ${String(held.left)} that a module cannot hold left out` : ""}${held.nodes.length > 0 && held.plugins === 0 ? ", and a module needs an effect or an instrument" : ""}`}
-                        </span>
-                        <SaveSelectionButton nodes={held.nodes} plugins={held.plugins} />
-                      </>
-                    ) : null}
-                    <button
-                      type="button"
-                      className="tang-patch__arrange"
-                      title="Choose nodes, with a box drawn round them or a click, to save them as a module with the cables that are between them (a box drawn with Shift held chooses at any time, and a click with Shift held adds a node)"
-                      aria-label="Choose nodes to save as a module"
-                      aria-pressed={choosing}
-                      onClick={toggleChoosing}
-                    >
-                      Select
-                    </button>
-                    <button
-                      type="button"
-                      className="tang-patch__arrange"
-                      title="Put every node where the cables between them are short, and give back the places that were moved"
-                      aria-label="Arrange the nodes again"
-                      disabled={flow.arranged && optimized}
-                      onClick={arrange}
-                    >
-                      Arrange
-                    </button>
-                  </Panel>
-                  <ShowWhatWasAdded graph={graph} flow={flow} />
-                  <FitWhenArranged requests={arrangements} arranging={arranging} />
-                </ReactFlow>
-              </ConnectingContext.Provider>
-            </StructureContext.Provider>
-          </div>
+          <OpenModulesContext.Provider value={modules}>
+            <div className="tang-patch__canvas">
+              <StructureContext.Provider value={graph}>
+                <ConnectingContext.Provider value={connecting?.takers ?? null}>
+                  <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onInit={(instance) => {
+                      canvasRef.current = instance;
+                    }}
+                    onNodesChange={onNodesChange}
+                    onSelectionStart={() => {
+                      setBoxing(true);
+                    }}
+                    onPaneClick={forgetChosen}
+                    onPaneContextMenu={onPaneContextMenu}
+                    onNodeContextMenu={onNodeContextMenu}
+                    onEdgeContextMenu={onEdgeContextMenu}
+                    onNodeDragStart={onNodeDragStart}
+                    onNodeDragStop={onNodeDragStop}
+                    nodeDragThreshold={DRAG_THRESHOLD}
+                    nodeTypes={NODE_TYPES}
+                    edgeTypes={EDGE_TYPES}
+                    colorMode="dark"
+                    fitView
+                    fitViewOptions={{ padding: FIT_PADDING, maxZoom: 1 }}
+                    minZoom={0.2}
+                    maxZoom={1.5}
+                    connectionRadius={40}
+                    isValidConnection={isValidConnection}
+                    onConnectStart={onConnectStart}
+                    onConnectEnd={onConnectEnd}
+                    onConnect={onConnect}
+                    edgesFocusable={false}
+                    elementsSelectable={choosing || adding || boxing}
+                    selectionOnDrag={choosing}
+                    selectNodesOnDrag={false}
+                    multiSelectionKeyCode={MULTI_SELECTION_KEYS}
+                    panOnDrag={choosing ? [1] : true}
+                    deleteKeyCode={null}
+                  >
+                    <Background gap={24} />
+                    <Controls showInteractive={false} />
+                    <Panel position="top-right" className="tang-patch__tools">
+                      {choosing || anyChosen ? (
+                        <>
+                          <span className="tang-patch__chosen" role="status">
+                            {chosen.length === 0
+                              ? "Drag a box round the nodes to keep"
+                              : `${String(held.nodes.length)} chosen${held.left > 0 ? `, ${String(held.left)} that a module cannot hold left out` : ""}${held.nodes.length > 0 && held.plugins === 0 ? ", and a module needs an effect or an instrument" : ""}`}
+                          </span>
+                          <SaveSelectionButton nodes={held.nodes} plugins={held.plugins} />
+                        </>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="tang-patch__arrange"
+                        title="Choose nodes, with a box drawn round them or a click, to save them as a module with the cables that are between them (a box drawn with Shift held chooses at any time, and a click with Shift held adds a node)"
+                        aria-label="Choose nodes to save as a module"
+                        aria-pressed={choosing}
+                        onClick={toggleChoosing}
+                      >
+                        Select
+                      </button>
+                      <button
+                        type="button"
+                        className="tang-patch__arrange"
+                        title="Put every node where the cables between them are short, and give back the places that were moved"
+                        aria-label="Arrange the nodes again"
+                        disabled={flow.arranged && optimized}
+                        onClick={arrange}
+                      >
+                        Arrange
+                      </button>
+                    </Panel>
+                    <ShowWhatWasAdded graph={graph} flow={flow} />
+                    <FitWhenArranged requests={arrangements} arranging={arranging} />
+                  </ReactFlow>
+                </ConnectingContext.Provider>
+              </StructureContext.Provider>
+            </div>
+          </OpenModulesContext.Provider>
         </ScopesContext.Provider>
         {inspected !== null ? <ParamPanel key={inspected} node={inspected} onClose={closePanel} /> : null}
         {naming ? <ModuleNameDialog label={naming.label} at={naming.at} save={naming.save} onClose={closeNaming} /> : null}

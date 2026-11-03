@@ -591,6 +591,8 @@ impl Controller {
                 Some(NodePath::Source(index)) => {
                     Plan::Removed { label: format!("remove {}", self.model.sources[index].kind.display_name()), intent: intent.clone(), at: now }
                 }
+                // A module goes with its modulators and its lanes, whole, and comes back with them as one (step 108; a step of the words of the button that adds one: its name).
+                Some(NodePath::Module(index)) => Plan::Removed { label: format!("remove {}", self.model.modules[index].name), intent: intent.clone(), at: now },
                 // (A node that is not there is refused, and the plan is not looked at.)
                 None => Plan::Nothing,
             },
@@ -714,7 +716,7 @@ impl Controller {
             NodePath::Instrument(inst) => self.model.instruments[inst].instrument.as_ref(),
             NodePath::Effect { inst, index } => self.model.instruments[inst].effects.get(index),
             NodePath::GroupEffect { group, index } => self.model.groups[group].effects.get(index),
-            NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) => None,
+            NodePath::Group(_) | NodePath::Modulator { .. } | NodePath::Source(_) | NodePath::Module(_) => None,
         }
     }
 

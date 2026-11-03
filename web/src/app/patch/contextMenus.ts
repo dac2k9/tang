@@ -2,7 +2,7 @@
 // (`ContextItem.run`), made from the session as it is when the menu is opened (the menus are looked up when a person asks for them, not each time anything changes), by what the buttons of the page already say: the menus of
 // a node's header, the bar's "+" menus, the keys that Undo and Redo. A choice asks the editor, which says among the notices why if the server refuses it, and the things that are the canvas's own (the panel of the parameters, a
 // node's scope, what is chosen, the arrangement) are asked of `CanvasActions`. So there is one place that says what a node can be asked to do, and the menu and the buttons agree.
-import { effectItems, freeEffectItems, instrumentItems, MODULE_FORMAT } from "../../client/catalog";
+import { effectItems, freeEffectItems, instrumentItems } from "../../client/catalog";
 import type { ClientState } from "../../client/connection";
 import type { Editor } from "../../client/editor";
 import { EVERY_NOTE, earItems } from "../../client/hears";
@@ -14,6 +14,7 @@ import type { NodeId, NodeUi } from "../../protocol";
 import type { ContextItem } from "../../ui/ContextMenu";
 import type { MenuItem } from "../../ui/MenuButton";
 import { MODULATOR_KINDS } from "./nodes";
+import { boxDetail } from "./boxes";
 import type { MenuSpec } from "./contextMenu";
 import type { Held } from "./selection";
 import type { PatchEdge, PatchNode, PatchNodeData } from "./toFlow";
@@ -71,6 +72,8 @@ export interface CanvasActions {
   canArrange: boolean;
   /** Moves the canvas to show every node. */
   fit: () => void;
+  /** Opens the module that is a box, or closes the module that is open (step 108). */
+  toggleModule: (module: NodeId) => void;
 }
 
 /** What a menu is made from. */
@@ -352,6 +355,23 @@ function groupMenu(deps: MenuDeps, node: NodeId): ContextItem[] {
   ];
 }
 
+/** The menu of a box, a module that is closed: opening it, which puts what is in it on the canvas, and taking it out with all of it. */
+function moduleMenu(deps: MenuDeps, node: NodeId, data: PatchNodeData): ContextItem[] {
+  const { editor, canvas } = deps;
+  return [
+    {
+      id: "open-module",
+      label: `Open ${data.name}`,
+      run: () => {
+        canvas.toggleModule(node);
+      },
+    },
+    removing("remove", `Remove ${data.name} for good${data.box ? `: the ${boxDetail(data.box)} in it go with it` : ""}`, () => {
+      void editor.removeNode(node);
+    }),
+  ];
+}
+
 /** The menu of a source of notes: sending its notes to a lane, and taking it out. */
 function sourceMenu(deps: MenuDeps, node: NodeId, data: PatchNodeData): ContextItem[] {
   const graph = deps.state.snapshot?.graph;
@@ -402,7 +422,6 @@ export function paneMenu(deps: MenuDeps): ContextItem[] {
   const { state, editor, canvas, at } = deps;
   const entries = state.catalog?.entries ?? [];
   const graph = state.snapshot?.graph;
-  const modules = new Set(entries.filter((entry) => entry.format === MODULE_FORMAT).map((entry) => entry.id));
   const sources = graph ? sourceItems(graph, state.inputs) : [];
   const { undo, redo } = state.history;
   return [
@@ -417,9 +436,9 @@ export function paneMenu(deps: MenuDeps): ContextItem[] {
     submenu(
       "add-effect",
       "Add an effect",
-      // (A module is more than one node: it goes where the layout puts it.)
+      // (A module is one box on the canvas, and goes where the pointer was as an effect does.)
       choosing(freeEffectItems(entries), (plugin) => {
-        void editor.addFreeEffect(plugin, modules.has(plugin) ? undefined : at);
+        void editor.addFreeEffect(plugin, at);
       }),
       "No effect is installed",
     ),
@@ -500,6 +519,23 @@ export function paneMenu(deps: MenuDeps): ContextItem[] {
 
 /** The menu of the node `node` (`data` is what the canvas knows of it): what its header's buttons offer and what it is not room for there. Nothing for a node that is not there. */
 export function nodeMenu(deps: MenuDeps, node: NodeId, data: PatchNodeData): ContextItem[] {
+  const items = ownMenu(deps, node, data);
+  const tag = data.module;
+  if (tag === null) return items;
+  // (A lane of a module that is open can close it, first of all, with a rule after.)
+  return [
+    {
+      id: "close-module",
+      label: `Close ${tag.name}`,
+      run: () => {
+        deps.canvas.toggleModule(tag.node);
+      },
+    },
+    ...items.map((item, index) => (index === 0 ? { ...item, rule: true } : item)),
+  ];
+}
+
+function ownMenu(deps: MenuDeps, node: NodeId, data: PatchNodeData): ContextItem[] {
   const found = deps.state.snapshot?.graph.nodes.find((candidate) => candidate.id === node);
   switch (found?.kind) {
     case "instrument":
@@ -512,6 +548,8 @@ export function nodeMenu(deps: MenuDeps, node: NodeId, data: PatchNodeData): Con
       return groupMenu(deps, node);
     case "source":
       return sourceMenu(deps, node, data);
+    case "module":
+      return moduleMenu(deps, node, data);
     case "master": {
       const { editor } = deps;
       const on = limiterOf(deps.state) === true;

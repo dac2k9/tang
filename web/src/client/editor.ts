@@ -139,13 +139,14 @@ export class Editor {
   /**
    * Add the plugin `plugin` (the `id` of an entry of the catalog the server told) as an effect that stands by itself: a lane of its own at the end of the session that holds it and has no instrument, so that
    * what the effect is fed is what cables bring. Resolves with the id of the effect it made (the lane is the effect's holder, and the canvas draws no card for it), which the canvas is asked to show, or with null
-   * if it was refused (the page says why). As for `addFreeModulator`: the node is the last effect the session did not have before.
+   * if it was refused (the page says why). As for `addFreeModulator`: the node is the last effect the session did not have before. A module (an entry of the library) is added with everything that is in it, and the
+   * canvas draws it as one box (step 108): the node that is shown, and put where `place` says, is the module's.
    */
   async addFreeEffect(plugin: string, place?: NodeUi): Promise<NodeId | null> {
     const before = new Set(this.#graph?.nodes.map((node) => node.id));
     if (!(await this.#attempt(`add ${this.#pluginName(plugin)} as an effect of its own`, { type: "addFreeEffect", plugin }))) return null;
-    const added = this.#graph?.nodes.filter((node) => node.kind === "effect" && !before.has(node.id));
-    return this.#placed(added?.at(-1)?.id, place);
+    const added = this.#graph?.nodes.filter((node) => (node.kind === "effect" || node.kind === "module") && !before.has(node.id));
+    return this.#placed((added?.findLast((node) => node.kind === "module") ?? added?.at(-1))?.id, place);
   }
 
   /**

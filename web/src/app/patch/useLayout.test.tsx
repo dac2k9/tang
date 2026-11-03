@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 
 import { nodeNamed, tracerSnapshot } from "../../client/fixtures";
 import type { Graph, NodeId } from "../../protocol";
+import { effect, lane as laneNode, link, master, moduleNode } from "./boxesKit";
 import { toFlow } from "./toFlow";
 import type { Flow } from "./toFlow";
 import { useLayout } from "./useLayout";
@@ -80,5 +81,30 @@ describe("the layout of the canvas", () => {
       result.current.arrangeAgain();
     });
     expect(result.current.optimized).toBe(false);
+  });
+});
+
+describe("the layout of a session that has a module (step 108)", () => {
+  const withModule: Graph = { nodes: [laneNode(10, "Oscillator"), laneNode(2, "Chain", null), effect(3, 2, "Filter"), moduleNode(1, "Room", [2]), master], edges: [link(2, 3)] };
+  const sets = (...ids: NodeId[]): ReadonlySet<NodeId> => new Set(ids);
+  const layoutOf = (open: ReadonlySet<NodeId>) => renderHook(({ opened }: { opened: ReadonlySet<NodeId> }) => useLayout(withModule, scopes, opened), { initialProps: { opened: open } });
+  const kinds = (flow: Flow): string[] => flow.nodes.map((node) => `${node.id}:${node.type}`);
+
+  test("draws a module that is closed as its box, and as its nodes when it is open, from the render that says so", () => {
+    const { result, rerender } = layoutOf(sets());
+    expect(kinds(result.current.flow)).toEqual(["10:instrument", "1:module", `${String(master.id)}:master`]);
+    rerender({ opened: sets(1) });
+    expect(kinds(result.current.flow)).toEqual(["10:instrument", "3:effect", `${String(master.id)}:master`]);
+    rerender({ opened: sets() });
+    expect(kinds(result.current.flow)).toEqual(["10:instrument", "1:module", `${String(master.id)}:master`]);
+  });
+
+  test("keeps a module open when the nodes are arranged again, and arranges the nodes that are on the canvas", () => {
+    const { result } = layoutOf(sets(1));
+    act(() => {
+      result.current.arrangeAgain();
+    });
+    expect(kinds(result.current.flow)).toEqual(["10:instrument", "3:effect", `${String(master.id)}:master`]);
+    expect(placesOf(result.current.flow)).toEqual(placesOf(toFlow(withModule, undefined, undefined, { arrange: true, open: sets(1) })));
   });
 });

@@ -44,7 +44,7 @@ fn target_of(model: &SessionModel, node: NodeId) -> Option<ProbeTarget> {
         NodePath::Effect { inst, index } => Some(ProbeTarget::Effect { inst, index }),
         NodePath::Group(group) => Some(ProbeTarget::Group(group)),
         NodePath::GroupEffect { group, index } => Some(ProbeTarget::GroupEffect { group, index }),
-        NodePath::Modulator { .. } | NodePath::Source(_) => None,
+        NodePath::Modulator { .. } | NodePath::Source(_) | NodePath::Module(_) => None,
     }
 }
 
