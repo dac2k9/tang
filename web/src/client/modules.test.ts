@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { CatalogEntry, Intent, MidiControl, ModulatorSource, Node, ServerMessage, Snapshot, TelemetryLayout } from "../protocol";
-import { builtinCatalog, MASTER, moduleBoxesFixture, moduleGraphsFixture, modulesFixture, tracerSnapshot } from "./fixtures";
+import { builtinCatalog, MASTER, moduleBoxesFixture, moduleCollapseFixture, moduleGraphsFixture, modulesFixture, tracerSnapshot } from "./fixtures";
 import { MockServer } from "./mock";
 import { chainOf, cleanModuleName, moduleEntry, moduleId, moduleNameOf, moduleOf, moduleOfNodes, pluginCount, withModules } from "./modules";
 import type { Module, ModuleDrives, ModuleEffect, ModuleLane, ModuleModulator } from "./modules";
@@ -825,5 +825,61 @@ describe("the mock engine's module boxes (step 108)", () => {
     const before = server.snapshot;
     expect(refusedWith(server, { type: "removeNode", node: box?.id ?? -1 })).toBe("a session keeps its last lane");
     expect(server.snapshot).toBe(before);
+  });
+});
+
+describe("the mock engine's collapse of nodes into a module and its ungrouping (step 109)", () => {
+  const fixture = moduleCollapseFixture;
+
+  test("are what the controller makes of nodes that are collapsed where they are, undone, redone, ungrouped and taken out whole, step by step: the events, the nodes and their records, the cables, the layout of the telemetry, and what Undo and Redo would do", () => {
+    const server = new MockServer({ snapshot: fixture.snapshot });
+    expect(fixture.steps.length).toBeGreaterThanOrEqual(13);
+    for (const [i, step] of fixture.steps.entries()) {
+      const told = server.apply(step.intent);
+      const what = `step ${String(i + 1)}: ${JSON.stringify(step.intent)}`;
+      expect(told.events, what).toEqual(step.events);
+      expect(told.restructured, what).toBe(step.restructured);
+      expect(server.history, what).toEqual(step.history);
+      expect(server.snapshot.graph, what).toEqual(step.graph);
+      expect(layoutOf(server.snapshot.telemetry), what).toEqual(layoutOf(step.telemetry));
+    }
+  });
+
+  test("refuse what the controller refuses, in its words, with nothing changed, at the place of the script where it was tried", () => {
+    expect(fixture.refusals.length).toBeGreaterThanOrEqual(19);
+    for (const [i, refusal] of fixture.refusals.entries()) {
+      const server = new MockServer({ snapshot: fixture.snapshot });
+      for (const step of fixture.steps.slice(0, refusal.after)) server.apply(step.intent);
+      const [before, history] = [server.snapshot, server.history];
+      const what = `refusal ${String(i + 1)}: ${JSON.stringify(refusal.intent)}`;
+      expect(refusedWith(server, refusal.intent), what).toBe(refusal.error);
+      expect(server.snapshot, what).toBe(before);
+      expect(server.history, what).toEqual(history);
+    }
+  });
+
+  test("refuse a place that is not a place, in the controller's words (the infinity of a 32-bit number is `inf`), and keep one to a tenth of a pixel and within the limit as any node's is", () => {
+    const server = new MockServer({ snapshot: fixture.snapshot });
+    const lane = fixture.snapshot.graph.nodes.find((node) => node.kind === "instrument")?.id ?? -1;
+    const collapse = (ui: { x: number; y: number }): Intent => ({ type: "collapseIntoModule", nodes: [lane], name: "X", ui });
+    expect(refusedWith(server, collapse({ x: Number.NaN, y: 1 }))).toBe("(NaN, 1) is not a place");
+    expect(refusedWith(server, collapse({ x: 1, y: Number.POSITIVE_INFINITY }))).toBe("(1, inf) is not a place");
+    expect(refusedWith(server, collapse({ x: 1e39, y: 0 }))).toBe("(inf, 0) is not a place");
+    expect(refusedWith(server, collapse({ x: -1e39, y: 0 }))).toBe("(-inf, 0) is not a place");
+    server.apply(collapse({ x: 12.34, y: 1e9 }));
+    expect(server.snapshot.graph.nodes.find((node) => node.kind === "module")?.ui).toEqual({ x: 12.3, y: 100_000 });
+  });
+
+  test("call the box by the name without the spaces round it and `Module` for a name of nothing, and leave it no place when none is said", () => {
+    const server = new MockServer({ snapshot: fixture.snapshot });
+    const [first, second, third] = fixture.snapshot.graph.nodes.filter((node) => node.kind === "modulator" || node.kind === "instrument").map((node) => node.id);
+    server.apply({ type: "collapseIntoModule", nodes: [first ?? -1], name: "  \u00a0Room\u2003 ", ui: null });
+    server.apply({ type: "collapseIntoModule", nodes: [second ?? -1], name: " \t ", ui: null });
+    const boxes = server.snapshot.graph.nodes.filter((node) => node.kind === "module");
+    expect(boxes.map((node) => node.name)).toEqual(["Room", "Module"]);
+    expect(boxes.map((node) => node.ui)).toEqual([undefined, undefined]);
+    expect(server.history.undo).toBe("collapse into Module");
+    server.apply({ type: "collapseIntoModule", nodes: [third ?? -1], name: "x".repeat(64), ui: null });
+    expect(server.snapshot.graph.nodes.filter((node) => node.kind === "module").at(-1)?.name).toBe("x".repeat(64));
   });
 });

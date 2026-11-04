@@ -71,6 +71,8 @@ const DOING: Record<Intent["type"], string> = {
   setLaneGroup: "put a lane in a group",
   renameGroup: "name a group",
   removeNode: "remove a node",
+  collapseIntoModule: "collapse the chosen nodes into a module",
+  ungroupModule: "ungroup a module",
   moveEffect: "move an effect along its chain",
   save: "save the session",
   saveAs: "save the session under another name",
@@ -429,6 +431,24 @@ export class Editor {
   /** Take the modulator or effect `node` out, with the cables that drive it (and, for a modulator, those it drives). True if it went. */
   removeNode(node: NodeId): Promise<boolean> {
     return this.#attempt(`remove ${this.#name(node)}`, { type: "removeNode", node });
+  }
+
+  /**
+   * Collapse the nodes `nodes` (what is chosen on the canvas: a lane's instrument, an effect, a modulator) into one module where they are (step 109): the lane is the unit, so that a lane that has any of its plugins chosen is in the
+   * module whole, with the lanes in the order of the session and then the modulators. The canvas draws it as one box that opens (`collapse` in `boxes.ts`), the sound is what it was, and it is one step of the history that Undo takes away
+   * (the nodes stay). `name` is what the box is called (a name of nothing is `Module`), and `place`, if there is one, where it is drawn: in the same step. Resolves with the id of the box, or with null if it was refused
+   * (the page says why: a node that a module does not hold, one that is in a module already, nothing chosen, a name that is not one). The canvas is not moved to show it: it is where what was chosen was.
+   */
+  async collapseIntoModule(nodes: readonly NodeId[], name: string, place?: NodeUi): Promise<NodeId | null> {
+    const before = new Set(this.#graph?.nodes.map((node) => node.id));
+    const what = `collapse ${nodes.map((node) => this.#name(node)).join(", ")} into a module`;
+    if (!(await this.#attempt(what, { type: "collapseIntoModule", nodes: [...nodes], name, ui: place ?? null }))) return null;
+    return this.#graph?.nodes.findLast((node) => node.kind === "module" && !before.has(node.id))?.id ?? null;
+  }
+
+  /** Take the box of the module `node` away and keep what is in it (step 109): the lanes and the modulators stay in the session as they are. One step of the history, which Undo puts back. True if it was done (the page says why if it was not). */
+  ungroupModule(node: NodeId): Promise<boolean> {
+    return this.#attempt(`ungroup ${this.#name(node)}`, { type: "ungroupModule", node });
   }
 
   /**

@@ -863,6 +863,13 @@ export function toFlow(graph: Graph, remembered: Places = NOTHING_REMEMBERED, sc
   const places = new Map<NodeId, Remembered>(
     shown.nodes.flatMap((node) => (node.ui ? [] : [[node.id, { ...(positions.get(node.id) ?? ORIGIN), slot: slots.get(node.id) ?? node.kind }] as const])),
   );
+  // (A node that is in a module that is closed is not on the canvas, and goes back to where it was when the module is opened, or ungrouped: its place is kept while it is hidden, as it was remembered, and is laid out
+  // again if it is not in the slot that it was in.)
+  const drawn = new Set(shown.nodes.map((node) => node.id));
+  for (const node of graph.nodes) {
+    const before = remembered.get(node.id);
+    if (before !== undefined && node.ui === undefined && !drawn.has(node.id) && !holders.has(node.id)) places.set(node.id, before);
+  }
   /** What the module of an effect has of the lane that holds it, if the canvas draws no card for that lane. */
   const lanes = graph.nodes.filter((node) => node.kind === "instrument").length;
   const heldIn = (node: Node): HeldIn | null => {

@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import { moduleGraphsFixture } from "../../client/fixtures";
 import type { Graph, Node } from "../../protocol";
 import { effect, lane, master as theMaster, modulator as lfo, moduleNode } from "./boxesKit";
-import { modulePluginsOf } from "./selection";
+import { collapsePlace, collapseTitle, collapseWhyNot, collapseWords, collapsibleOf, modulePluginsOf } from "./selection";
 
 // What a module can hold of the nodes that are chosen on the canvas (steps 105 and 106): the plugins (the instrument of a lane that has one, an effect that is in a lane) and the modulators that go with them, and nothing else,
 // which is left out and counted.
@@ -75,5 +75,120 @@ describe("what a module holds of a box that is chosen (step 108)", () => {
   test("is nothing for a box that has nothing in it that a module holds, and the box is not counted as left out", () => {
     const hollow: Graph = { nodes: [lane(2, "Chain", null), moduleNode(1, "Empty", [2]), theMaster], edges: [] };
     expect(modulePluginsOf(hollow, [1])).toEqual({ nodes: [], plugins: 0, left: 0 });
+  });
+});
+
+describe("what collapsing the nodes that are chosen into one module takes (step 109)", () => {
+  const effectsOf = (lane: Node): Node[] => graph.nodes.filter((node) => node.kind === "effect" && node.parent === lane.id);
+  const [, delay, reverb] = effectsOf(oscillator);
+  const [, drive] = effectsOf(holder);
+  const modulators = graph.nodes.filter((node) => node.kind === "modulator");
+  const [first, second] = modulators;
+  if (!delay || !reverb || !drive || !first || !second) throw new Error("the fixture has the nodes that these tests choose");
+
+  test("an effect is its lane, whole: the instrument and every effect of the lane come with it, and the ones that were not chosen are counted as brought along", () => {
+    const taken = collapsibleOf(graph, [filter.id]);
+    expect(taken).toMatchObject({ nodes: [filter.id], lanes: 1, modulators: 0, brought: 3, left: 0 });
+    expect(taken.hides).toEqual(new Set([oscillator.id, filter.id, delay.id, reverb.id]));
+    // (Every plugin of it chosen: nothing is brought along.)
+    expect(collapsibleOf(graph, [oscillator.id, filter.id, delay.id, reverb.id])).toMatchObject({ nodes: [oscillator.id, filter.id, delay.id, reverb.id], lanes: 1, brought: 0 });
+    // (The instrument alone brings the three effects.)
+    expect(collapsibleOf(graph, [oscillator.id])).toMatchObject({ lanes: 1, brought: 3 });
+  });
+
+  test("a lane that only holds effects is taken by its effects, and brings no instrument; an empty lane is a lane that hides itself alone", () => {
+    expect(collapsibleOf(graph, [math.id])).toMatchObject({ nodes: [math.id], lanes: 1, brought: 1 });
+    expect(collapsibleOf(graph, [math.id, drive.id])).toMatchObject({ lanes: 1, brought: 0 });
+    expect(collapsibleOf(graph, [math.id]).hides).toEqual(new Set([holder.id, math.id, drive.id]));
+    const taken = collapsibleOf(graph, [empty.id]);
+    expect(taken).toMatchObject({ nodes: [empty.id], lanes: 1, modulators: 0, brought: 0, left: 0 });
+    expect(taken.hides).toEqual(new Set([empty.id]));
+  });
+
+  test("a modulator is itself, whatever it hears; the lanes and the modulators are counted apart, each node once, in the order that they were chosen in", () => {
+    const taken = collapsibleOf(graph, [second.id, filter.id, first.id, second.id, math.id, filter.id]);
+    expect(taken).toMatchObject({ nodes: [second.id, filter.id, first.id, math.id], lanes: 2, modulators: 2, brought: 4, left: 0 });
+    expect(taken.hides.has(first.id) && taken.hides.has(second.id)).toBe(true);
+    expect(collapsibleOf(graph, [first.id])).toMatchObject({ lanes: 0, modulators: 1, brought: 0 });
+  });
+
+  test("leaves out and counts what a module cannot take: a group, the bus effect in it, a source of notes, the master, a box and a node that the session does not have", () => {
+    const box = moduleNode(77_777, "Voice", [empty.id]);
+    const withBox: Graph = { ...graph, nodes: [...graph.nodes, box] };
+    for (const other of [group, bus, source, master, box]) {
+      expect(collapsibleOf(withBox, [other.id]), `${other.kind} ${other.name}`).toMatchObject({ nodes: [], lanes: 0, modulators: 0, brought: 0, left: 1 });
+    }
+    expect(collapsibleOf(graph, [99_999])).toMatchObject({ nodes: [], left: 1 });
+    expect(collapsibleOf(graph, [filter.id, bus.id, first.id, master.id, source.id])).toMatchObject({ nodes: [filter.id, first.id], lanes: 1, modulators: 1, left: 3 });
+  });
+
+  test("leaves out a node that is in a module already, whether it is the lane, an effect of its chain or a modulator, and takes the others", () => {
+    const boxed: Graph = { ...graph, nodes: [...graph.nodes, moduleNode(77_777, "Voice", [oscillator.id, first.id])] };
+    expect(collapsibleOf(boxed, [oscillator.id, filter.id, first.id])).toMatchObject({ nodes: [], lanes: 0, modulators: 0, left: 3 });
+    expect(collapsibleOf(boxed, [filter.id, math.id, first.id, second.id])).toMatchObject({ nodes: [math.id, second.id], lanes: 1, modulators: 1, left: 2 });
+    // (A lane whose own node is in no module is taken, though a module has another lane.)
+    expect(collapsibleOf(boxed, [empty.id])).toMatchObject({ nodes: [empty.id], lanes: 1, left: 0 });
+  });
+
+  test("takes nothing of a session that is not there, and nothing chosen takes nothing", () => {
+    expect(collapsibleOf(null, [filter.id])).toMatchObject({ nodes: [], lanes: 0, modulators: 0, brought: 0, left: 0 });
+    expect(collapsibleOf(graph, [])).toMatchObject({ nodes: [], lanes: 0, modulators: 0, brought: 0, left: 0 });
+  });
+});
+
+describe("what collapsing is said to take, and why it cannot (step 109)", () => {
+  test("words: lanes and modulators, in the singular for one", () => {
+    expect(collapseWords({ lanes: 1, modulators: 0 })).toBe("1 lane");
+    expect(collapseWords({ lanes: 2, modulators: 0 })).toBe("2 lanes");
+    expect(collapseWords({ lanes: 0, modulators: 1 })).toBe("1 modulator");
+    expect(collapseWords({ lanes: 0, modulators: 3 })).toBe("3 modulators");
+    expect(collapseWords({ lanes: 1, modulators: 1 })).toBe("1 lane and 1 modulator");
+    expect(collapseWords({ lanes: 2, modulators: 3 })).toBe("2 lanes and 3 modulators");
+  });
+
+  test("it cannot with nothing to take: nothing chosen is told apart from what is chosen and cannot be taken", () => {
+    expect(collapseWhyNot({ lanes: 1, modulators: 0 }, 1)).toBeNull();
+    expect(collapseWhyNot({ lanes: 0, modulators: 2 }, 2)).toBeNull();
+    expect(collapseWhyNot({ lanes: 0, modulators: 0 }, 0)).toBe("Choose the nodes to collapse into a module");
+    expect(collapseWhyNot({ lanes: 0, modulators: 0 }, 2)).toBe("None of what is chosen can be collapsed: a module holds lanes and modulators that are in no module");
+  });
+
+  test("the title says what it takes, with the plugins that come along counted in the singular for one and only when some do, and else why it cannot", () => {
+    expect(collapseTitle({ lanes: 1, modulators: 0, brought: 0 }, 2)).toBe("Collapse 1 lane into one box where they are: open it to see them again, or ungroup it");
+    expect(collapseTitle({ lanes: 1, modulators: 0, brought: 1 }, 1)).toBe("Collapse 1 lane into one box where they are, with 1 more plugin from their lanes: open it to see them again, or ungroup it");
+    expect(collapseTitle({ lanes: 2, modulators: 1, brought: 3 }, 2)).toBe("Collapse 2 lanes and 1 modulator into one box where they are, with 3 more plugins from their lanes: open it to see them again, or ungroup it");
+    expect(collapseTitle({ lanes: 0, modulators: 2, brought: 0 }, 2)).toBe("Collapse 2 modulators into one box where they are: open it to see them again, or ungroup it");
+    // (The reason it cannot is the title of a button that cannot be pressed, whatever number of plugins is said to come along.)
+    expect(collapseTitle({ lanes: 0, modulators: 0, brought: 4 }, 0)).toBe("Choose the nodes to collapse into a module");
+    expect(collapseTitle({ lanes: 0, modulators: 0, brought: 0 }, 3)).toBe("None of what is chosen can be collapsed: a module holds lanes and modulators that are in no module");
+  });
+});
+
+describe("where the box of what is collapsed is drawn (step 109)", () => {
+  const at = (entries: [number, number, number][]): Map<number, { x: number; y: number }> => new Map(entries.map(([node, x, y]) => [node, { x, y }]));
+
+  test("is the top left of the nodes that it hides, whichever of them is nearest to each edge, and not of the nodes that stay", () => {
+    const positions = at([
+      [1, 10, 50],
+      [2, 30, 20],
+      [3, 5, 70],
+      [4, 0, 0],
+    ]);
+    expect(collapsePlace(new Set([1, 2, 3]), positions)).toEqual({ x: 5, y: 20 });
+    expect(collapsePlace(new Set([1]), positions)).toEqual({ x: 10, y: 50 });
+    expect(collapsePlace(new Set([2, 3]), positions)).toEqual({ x: 5, y: 20 });
+  });
+
+  test("is left to the layout when none of what it hides is on the canvas, and works over places that are below nothing", () => {
+    expect(collapsePlace(new Set([9]), at([[1, 10, 50]]))).toBeUndefined();
+    expect(collapsePlace(new Set(), at([[1, 10, 50]]))).toBeUndefined();
+    expect(collapsePlace(new Set([1, 2]), at([[1, -40, 8], [2, -10, -60]]))).toEqual({ x: -40, y: -60 });
+  });
+
+  test("is a place of its own, and not the one of the node that it is taken from", () => {
+    const positions = at([[1, 10, 50]]);
+    const place = collapsePlace(new Set([1]), positions);
+    expect(place).toEqual({ x: 10, y: 50 });
+    expect(place).not.toBe(positions.get(1));
   });
 });

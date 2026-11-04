@@ -407,6 +407,37 @@ describe("choosing nodes with the keys", () => {
     expect(chosenNodes()).toBe(2);
   });
 
+  test("collapses what is chosen from the menu of the canvas, in the field that opens where the pointer was, with the button and the name that the bar's field has (step 109)", async () => {
+    const { requests } = await rigged();
+    shiftClick(await nodeOnCanvas("Oscillator"));
+    fireEvent.keyDown(document.body, { key: "Shift", code: "ShiftLeft" });
+    fireEvent.click(await nodeOnCanvas("Filter"), { shiftKey: true });
+    fireEvent.keyUp(document.body, { key: "Shift", code: "ShiftLeft" });
+    await waitFor(() => {
+      expect(chosenNodes()).toBe(2);
+    });
+    fireEvent.contextMenu(await pane(), { clientX: 250, clientY: 150 });
+    fireEvent.click(item("Collapse the 1 lane into a module…"));
+    const dialog = await screen.findByRole("dialog", { name: "Collapse the chosen nodes into a module" });
+    expect(dialog.style.left).toBe("250px");
+    expect(dialog.style.top).toBe("150px");
+    const field = within(dialog).getByRole<HTMLInputElement>("textbox", { name: "Module name" });
+    expect(document.activeElement).toBe(field);
+    // (The field of the save is the same field: what is different is what the button says, what the field starts as and what it says it is for.)
+    expect(field.value).toBe("Module");
+    expect(field.title).toBe("What the box is called: it is the module's own name, and not a file");
+    expect(within(dialog).getByRole("button", { name: "Collapse" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Save" })).toBeNull();
+    fireEvent.change(field, { target: { value: "Voice" } });
+    fireEvent.submit(dialog);
+    await waitFor(() => {
+      expect(asked(requests)).toMatchObject([{ type: "collapseIntoModule", nodes: [oscillator.id, filter.id], name: "Voice", ui: { x: expect.any(Number) as number, y: expect.any(Number) as number } }]);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+  });
+
   test("saves what is chosen from the menu of a node that is one of them", async () => {
     const { requests } = await rigged();
     shiftClick(await nodeOnCanvas("Oscillator"));

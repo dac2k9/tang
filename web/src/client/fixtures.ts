@@ -22,6 +22,7 @@ import sideCables from "./fixtures/sideCables.json";
 import uses from "./fixtures/uses.json";
 import builtinPresetValues from "./fixtures/builtins.presets.json";
 import moduleBoxes from "./fixtures/moduleBoxes.json";
+import moduleCollapse from "./fixtures/moduleCollapse.json";
 import moduleGraphs from "./fixtures/moduleGraphs.json";
 import modules from "./fixtures/modules.json";
 import moves from "./fixtures/moves.json";
@@ -145,6 +146,18 @@ export interface ModuleGraphsFixture extends ModulesFixture {
  * the first taken out and put back. Steps, as `modulesFixture` has them (with no list of what the catalog says of modules). Written by the controller (`the_web_clients_fixture_of_what_a_module_comes_to_as_one_box_is_current`).
  */
 export const moduleBoxesFixture = moduleBoxes as unknown as { snapshot: Snapshot; steps: Omit<ModulesFixture["steps"][number], "modules">[] };
+
+/**
+ * A small session (a group with a bus effect, the keys, a lane with an oscillator and two effects, a lane that has a reverb and no instrument, an empty lane, an LFO that hears the first lane and a macro) and what the controller
+ * makes of collapsing nodes into one module where they are, and of taking the box away (step 109): the filter and the LFO collapsed as `Room` with a place, undone and redone, ungrouped and undone, the lane of the reverb collapsed under a
+ * name of nothing, the empty lane and the macro collapsed as `Tail`, the first box ungrouped and undone, taken out whole and undone and redone and undone. `refusals` are what it refuses, each tried after the first `after` steps
+ * of the script (a name and a place are looked at last, so those are tried before any box is made). Written by the controller (`the_web_clients_fixture_of_what_collapsing_into_a_module_comes_to_is_current`).
+ */
+export const moduleCollapseFixture = moduleCollapse as unknown as {
+  snapshot: Snapshot;
+  steps: Omit<ModulesFixture["steps"][number], "modules">[];
+  refusals: { after: number; intent: Intent; error: string }[];
+};
 
 /**
  * A session with a group (a bus effect and an LFO in it), a member of it with a reverb and an LFO of its own, a lane with a pattern that was recorded at 90 beats a minute and a

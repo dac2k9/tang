@@ -30,9 +30,10 @@ import { GroupNode, MasterNode, ModulatorNode, PluginNode, SourceNode } from "./
 import { OpenModulesContext } from "./openModules";
 import type { OpenModules } from "./openModules";
 import { ParamPanel } from "./ParamPanel";
-import { dialogPlace, ModuleNameDialog, SaveSelectionButton } from "./SaveModule";
+import { CollapseSelectionButton, dialogPlace, ModuleNameDialog, SaveSelectionButton } from "./SaveModule";
+import type { NameOptions } from "./SaveModule";
 import type { DialogPlace } from "./SaveModule";
-import { modulePluginsOf } from "./selection";
+import { collapsePlace, collapsibleOf, modulePluginsOf } from "./selection";
 import { ScopesContext } from "./scopes";
 import type { Scopes } from "./scopes";
 import { StructureContext } from "./structure";
@@ -238,6 +239,9 @@ function PatchCanvas() {
   const [boxing, setBoxing] = useState(false);
   const chosen = useMemo(() => nodes.filter((node) => node.selected === true).map((node) => node.data.node), [nodes]);
   const held = useMemo(() => modulePluginsOf(graph, chosen), [graph, chosen]);
+  // What collapsing them into one box takes (step 109), and where that box is drawn: the top left of what it hides, where it is on the canvas now.
+  const collapsible = useMemo(() => collapsibleOf(graph, chosen), [graph, chosen]);
+  const collapseAt = useMemo(() => collapsePlace(collapsible.hides, new Map(nodes.map((node) => [node.data.node, node.position]))), [collapsible, nodes]);
   const forgetChosen = useCallback(() => {
     const changes = nodes.filter((node) => node.selected === true).map((node): NodeChange<PatchNode> => ({ id: node.id, type: "select", selected: false }));
     if (changes.length > 0) onNodesChange(changes);
@@ -306,7 +310,7 @@ function PatchCanvas() {
   // The menus (step 107). The canvas that React Flow made, to turn a place on the screen into a place on the canvas and to show every node; where the pointer was when the menu opened, for the field that a menu opens to be there.
   const canvasRef = useRef<Pick<ReactFlowInstance<PatchNode>, "screenToFlowPosition" | "fitView"> | null>(null);
   const menuAt = useRef({ x: 0, y: 0 });
-  const [naming, setNaming] = useState<{ label: string; at: DialogPlace; save: (name: string) => Promise<boolean> } | null>(null);
+  const [naming, setNaming] = useState<{ label: string; at: DialogPlace; save: (name: string) => Promise<boolean>; options: NameOptions } | null>(null);
   const closeNaming = useCallback(() => {
     setNaming(null);
   }, []);
@@ -326,8 +330,10 @@ function PatchCanvas() {
       held,
       chooseAll,
       chooseNone: forgetChosen,
-      nameModule: (label, save) => {
-        setNaming({ label, at: dialogPlace(menuAt.current.x, menuAt.current.y), save });
+      collapsible,
+      collapseAt,
+      nameModule: (label, save, options = {}) => {
+        setNaming({ label, at: dialogPlace(menuAt.current.x, menuAt.current.y), save, options });
       },
       arrange,
       canArrange: !(flow.arranged && optimized),
@@ -336,7 +342,7 @@ function PatchCanvas() {
       },
       toggleModule: modules.toggle,
     }),
-    [inspected, inspector, shown, scopes, choosing, toggleChoosing, chosen, held, chooseAll, forgetChosen, arrange, flow.arranged, optimized, modules],
+    [inspected, inspector, shown, scopes, choosing, toggleChoosing, chosen, held, collapsible, collapseAt, chooseAll, forgetChosen, arrange, flow.arranged, optimized, modules],
   );
   /** What a menu opened by `event` is made from: the session as it is now, and the place on the canvas that the pointer was at. */
   const depsAt = useCallback(
@@ -443,6 +449,7 @@ function PatchCanvas() {
                               : `${String(held.nodes.length)} chosen${held.left > 0 ? `, ${String(held.left)} that a module cannot hold left out` : ""}${held.nodes.length > 0 && held.plugins === 0 ? ", and a module needs an effect or an instrument" : ""}`}
                           </span>
                           <SaveSelectionButton nodes={held.nodes} plugins={held.plugins} />
+                          <CollapseSelectionButton collapsible={collapsible} chosen={chosen.length} place={collapseAt} />
                         </>
                       ) : null}
                       <button
@@ -475,7 +482,7 @@ function PatchCanvas() {
           </OpenModulesContext.Provider>
         </ScopesContext.Provider>
         {inspected !== null ? <ParamPanel key={inspected} node={inspected} onClose={closePanel} /> : null}
-        {naming ? <ModuleNameDialog label={naming.label} at={naming.at} save={naming.save} onClose={closeNaming} /> : null}
+        {naming ? <ModuleNameDialog label={naming.label} at={naming.at} save={naming.save} onClose={closeNaming} {...naming.options} /> : null}
       </InspectorContext.Provider>
     </div>
   );

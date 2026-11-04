@@ -170,7 +170,7 @@ describe("a module that is added", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove Voice" }));
     const menu = await screen.findByRole("menu", { name: "Remove Voice" });
     const choices = within(menu).getAllByRole("menuitem").map((entry) => entry.textContent);
-    expect(choices).toEqual(["Keep Voice", "Remove Voice for good: the 2 plugins · 1 modulator in it go with it"]);
+    expect(choices).toEqual(["Keep Voice", "Ungroup Voice: keep the 2 plugins · 1 modulator, take the box away", "Remove Voice for good: the 2 plugins · 1 modulator in it go with it"]);
     // (Keeping it asks nothing, and the box is there still: what a click asks of the server goes out a frame later, so the page is given its frames first.)
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Keep Voice" }));
     await settled();
@@ -194,6 +194,64 @@ describe("a module that is added", () => {
     await screen.findByRole("button", { name: "Open Voice" });
     expect(r.client.state.snapshot?.graph.nodes.length).toBe(before);
     expect(names()).toEqual(["Oscillator 1", "Filter 1", "LFO 1", "Voice", "Master"]);
+  });
+});
+
+describe("a module that is ungrouped (step 109)", () => {
+  test("by the menu of its ×: the box goes and what was in it is on the canvas, in one step that undo takes back, and the focus goes to the bar", async () => {
+    const r = await rigged();
+    await addModule(r, "Voice");
+    const [module] = moduleNodes(r);
+    if (!module) throw new Error("the session has the module");
+    const nodes = r.client.state.snapshot?.graph.nodes.length ?? 0;
+    fireEvent.click(screen.getByRole("button", { name: "Remove Voice" }));
+    const menu = await screen.findByRole("menu", { name: "Remove Voice" });
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /^Ungroup Voice/ }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Open Voice" })).toBeNull();
+    });
+    expect(asked(r.requests).filter((intent) => intent.type !== "undo")).toContainEqual({ type: "ungroupModule", node: module.id });
+    expect(asked(r.requests).filter((intent) => intent.type === "removeNode")).toEqual([]);
+    // (Nothing was taken out: the module's oscillator, filter and LFO are on the canvas as any are, beside the tracer's, and the session has all its nodes but the record.)
+    expect(moduleNodes(r)).toEqual([]);
+    expect(r.client.state.snapshot?.graph.nodes.length).toBe(nodes - 1);
+    expect(names()).toEqual(expect.arrayContaining(["Oscillator 2", "Filter 2", "LFO 2"]));
+    expect(names()).not.toContain("Voice");
+    await waitFor(() => {
+      expect(document.activeElement?.id).toBe(ADD_FREE_EFFECT_ID);
+    });
+    expect(r.server.history.undo).toBe("ungroup Voice");
+    // One step puts the box back, and what is in it is hidden again.
+    r.server.apply({ type: "undo" });
+    await screen.findByRole("button", { name: "Open Voice" });
+    expect(names()).toEqual(["Oscillator 1", "Filter 1", "LFO 1", "Voice", "Master"]);
+  });
+
+  test("by the right click on the box and on a lane of the module when it is open", async () => {
+    const r = await rigged();
+    const box = await addModule(r, "Voice");
+    const [module] = moduleNodes(r);
+    if (!module) throw new Error("the session has the module");
+    fireEvent.contextMenu(box);
+    fireEvent.click(within(screen.getByRole("menu", { name: "Voice" })).getByRole("menuitem", { name: /^Ungroup Voice/ }));
+    await waitFor(() => {
+      expect(moduleNodes(r)).toEqual([]);
+    });
+    r.server.apply({ type: "undo" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open Voice" }));
+    const tag = await screen.findByRole("button", { name: "Close Voice" });
+    const lane = tag.closest<HTMLElement>(".react-flow__node");
+    if (!lane) throw new Error("the tag is on a node");
+    fireEvent.contextMenu(lane);
+    fireEvent.click(within(screen.getByRole("menu", { name: /^Oscillator/ })).getByRole("menuitem", { name: "Ungroup Voice" }));
+    await waitFor(() => {
+      expect(moduleNodes(r)).toEqual([]);
+    });
+    expect(screen.queryByRole("button", { name: "Close Voice" })).toBeNull();
+    expect(asked(r.requests).filter((intent) => intent.type === "ungroupModule")).toEqual([
+      { type: "ungroupModule", node: module.id },
+      { type: "ungroupModule", node: module.id },
+    ]);
   });
 });
 
@@ -262,7 +320,11 @@ describe("the menus of a module", () => {
     const box = await addModule(r, "Voice");
     fireEvent.contextMenu(box);
     const menu = screen.getByRole("menu", { name: "Voice" });
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent)).toEqual(["Open Voice", "Remove Voice for good: the 2 plugins · 1 modulator in it go with it"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent)).toEqual([
+      "Open Voice",
+      "Ungroup Voice: keep the 2 plugins · 1 modulator, take the box away",
+      "Remove Voice for good: the 2 plugins · 1 modulator in it go with it",
+    ]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Open Voice" }));
     await screen.findByRole("button", { name: "Close Voice" });
     expect(screen.queryByRole("button", { name: "Open Voice" })).toBeNull();
@@ -279,7 +341,7 @@ describe("the menus of a module", () => {
     fireEvent.contextMenu(lane);
     const menu = screen.getByRole("menu", { name: /^Oscillator/ });
     const items = within(menu).getAllByRole("menuitem").map((entry) => entry.textContent);
-    expect(items[0]).toBe("Close Voice");
+    expect(items.slice(0, 2)).toEqual(["Close Voice", "Ungroup Voice"]);
     expect(items.length).toBeGreaterThan(3);
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Close Voice" }));
     await screen.findByRole("button", { name: "Open Voice" });

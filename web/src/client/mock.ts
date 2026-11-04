@@ -5,7 +5,7 @@
 // clamp, round an enum, one revision per change), tells every subscribed connection what
 // changed, and, for the connections that ask, makes telemetry up: the LFOs run, the
 // parameters they drive follow them, and the master's meter rises while a note is held.
-import { BPM_RANGE, CABLE_GAIN_RANGE, DEPTH_RANGE, GAIN_RANGES, KEY_CENTRE, KEY_SPAN, MAX_STEPS, MODULATOR_FIELD_RANGES, MODULATOR_FIELD_SCALES, MODULATOR_WHOLE_FIELDS, NAME_LIMIT, NEW_CABLE_GAIN, NEW_STEPS, NODE_UI_LIMIT, NODE_UI_PARTS, PATTERN_COUNT_IN_BEATS, PATTERN_DEFAULT_LENGTH, PATTERN_FIELD_RANGES, PINNED_LIMIT, PROTOCOL, SCOPE_FRAME_LENGTH, STEP_RANGE } from "../protocol";
+import { BPM_RANGE, CABLE_GAIN_RANGE, DEPTH_RANGE, GAIN_RANGES, KEY_CENTRE, KEY_SPAN, MAX_STEPS, MODULATOR_FIELD_RANGES, MODULATOR_FIELD_SCALES, MODULATOR_WHOLE_FIELDS, NEW_CABLE_GAIN, NEW_STEPS, NODE_UI_LIMIT, NODE_UI_PARTS, PATTERN_COUNT_IN_BEATS, PATTERN_DEFAULT_LENGTH, PATTERN_FIELD_RANGES, PINNED_LIMIT, PROTOCOL, SCOPE_FRAME_LENGTH, STEP_RANGE } from "../protocol";
 import type {
   ClientMessage,
   CatalogEntry,
@@ -44,11 +44,12 @@ import { sessionFileName } from "./filenames";
 import { audibleOf, fedOf, heardOf } from "./audible";
 import { cablesThatGo, isAudioCable, isLink, isModulation, isNotesCable } from "./cables";
 import { Counters } from "./counters";
-import { History, addedStep, planOf, removedStep, takesOut } from "./history";
+import { History, addedStep, laneOrGroupWords, planOf, removedStep, takesOut } from "./history";
 import type { HistoryState, Made, Plan } from "./history";
 import { noise } from "./noise";
 import { deviceName, eventCableEnds, withHears } from "./noteWiring";
-import { cleanModuleName, moduleNameOf, moduleOf, moduleOfNodes, pluginCount, withModules } from "./modules";
+import { MODULATOR_LABELS, kindOf } from "./modulatorKinds";
+import { DEFAULT_MODULE_NAME, cleanModuleName, moduleNameOf, moduleOf, moduleOfNodes, pluginCount, tidyName, withModules } from "./modules";
 import type { Module, ModuleEffect, ModuleInstrument, ModuleOutput, ModuleTarget } from "./modules";
 import { noteName } from "./notes";
 import { fieldsOf, gainPorts, isGainPort, samePort } from "./reach";
@@ -630,6 +631,58 @@ function removeModuleOutcome(snapshot: Snapshot, module: Extract<Node, { kind: "
   return { restructured: session };
 }
 
+/** What the controller calls a lane or a modulator when it says that it is in a module already (`member_words`): "the lane of Oscillator", "an LFO". */
+function memberWords(snapshot: Snapshot, node: Node): string {
+  if (node.kind === "instrument") return laneOrGroupWords(snapshot.graph.nodes, node);
+  if (node.kind === "modulator") return MODULATOR_LABELS[kindOf(node.source)];
+  return `node ${String(node.id)}`;
+}
+
+/**
+ * The nodes in `nodes` collapsed into one module where they are (`collapse_into_module_intent`, step 109), in the controller's order: every node is looked for first (the first that is not there is not found: the master is no node of the
+ * model, as far as this goes), then what each is (a lane, an effect of one and a modulator are what a module holds, and an effect is its lane, which is in the module whole), then that something is chosen, that none of what it comes to is in
+ * a module already, the name and the place. The record is made last, under a node of its own, so that a refusal uses no id; the lanes are in it in the order of the session and then the modulators in the order of their rack.
+ */
+function collapseIntoModuleOutcome(snapshot: Snapshot, nodes: readonly NodeId[], name: string, ui: NodeUi | null, counters: Counters): Outcome {
+  const { graph } = snapshot;
+  const chosen: Node[] = [];
+  for (const id of nodes) {
+    const found = graph.nodes.find((n) => n.id === id && n.kind !== "master");
+    if (!found) return noNode(id);
+    chosen.push(found);
+  }
+  const lanes = new Set<NodeId>();
+  const modulators = new Set<NodeId>();
+  for (const node of chosen) {
+    if (node.kind === "instrument") lanes.add(node.id);
+    else if (node.kind === "effect" && node.parent !== null && graph.nodes.some((n) => n.id === node.parent && n.kind === "instrument")) lanes.add(node.parent);
+    else if (node.kind === "modulator") modulators.add(node.id);
+    // (An effect that is not in a lane's chain is on a group's bus.)
+    else if (node.kind === "group" || node.kind === "effect") return invalid("a group is not collapsed into a module: a module holds lanes and modulators");
+    else if (node.kind === "source") return invalid("a source of notes is not collapsed into a module: a module holds lanes and modulators");
+    else return invalid("a module cannot hold another module yet: ungroup it first");
+  }
+  if (nodes.length === 0) return invalid("nothing is chosen: choose the lanes, plugins and modulators to collapse into a module");
+  const members = [...graph.nodes.filter((n) => n.kind === "instrument" && lanes.has(n.id)), ...graph.nodes.filter((n) => n.kind === "modulator" && modulators.has(n.id))];
+  for (const member of members) {
+    const module = graph.nodes.find((n) => n.kind === "module" && n.members.includes(member.id));
+    if (module) return invalid(`${memberWords(snapshot, member)} is in the module ${module.name} already: ungroup it first`);
+  }
+  const tidied = tidyName(name);
+  if ("error" in tidied) return invalid(tidied.error);
+  if (ui !== null && (!holds(ui.x) || !holds(ui.y))) return invalid(`(${shown(ui.x)}, ${shown(ui.y)}) is not a place`);
+  const place = ui === null ? undefined : { x: tidyCoordinate(ui.x), y: tidyCoordinate(ui.y) };
+  return { restructured: withModuleRecord(snapshot, tidied.name === "" ? DEFAULT_MODULE_NAME : tidied.name, members.map((n) => n.id), counters, place) };
+}
+
+/** The box of the module `node` taken away, and what is in it kept (`ungroup_module_intent`, step 109): the record is gone, and the lanes and the modulators are not touched. */
+function ungroupModuleOutcome(snapshot: Snapshot, node: NodeId): Outcome {
+  const found = snapshot.graph.nodes.find((n) => n.id === node && n.kind !== "master");
+  if (!found) return noNode(node);
+  if (found.kind !== "module") return invalid("only a module can be ungrouped");
+  return { restructured: { ...snapshot, graph: { ...snapshot.graph, nodes: snapshot.graph.nodes.filter((n) => n.id !== node) } } };
+}
+
 /** What a node of each kind of modulator is called (`ModSourceSlot::node_name`), and what it is to begin with. */
 const NEW_MODULATORS: Record<ModulatorKind, { name: string; source: ModulatorSource }> = {
   lfo: { name: "LFO", source: { type: "lfo", waveform: "sine", rate: 1, retrigger: false, fade: 0, sync: 0 } },
@@ -903,11 +956,11 @@ function addModuleOutcome(snapshot: Snapshot, name: string, counters: Counters, 
  * The session with the record of a module that was added as one thing (`make_module`, step 108): a node of its own, made last, so that what is made before it has the ids it had, which the graph lists after the modulators and before the master
  * (`SessionModel::graph`). `members` are the lanes of the module and then its modulators, in the order they were made.
  */
-function withModuleRecord(snapshot: Snapshot, name: string, members: readonly NodeId[], counters: Counters): Snapshot {
+function withModuleRecord(snapshot: Snapshot, name: string, members: readonly NodeId[], counters: Counters, ui?: NodeUi): Snapshot {
   const { nodes } = snapshot.graph;
   const master = nodes.findIndex((n) => n.kind === "master");
   const at = master >= 0 ? master : nodes.length;
-  const record: Node = { id: counters.node(), parent: null, name, kind: "module", members: [...members] };
+  const record: Node = { id: counters.node(), parent: null, name, kind: "module", members: [...members], ...(ui ? { ui } : {}) };
   return { ...snapshot, graph: { ...snapshot.graph, nodes: [...nodes.slice(0, at), record, ...nodes.slice(at)] } };
 }
 
@@ -1272,11 +1325,10 @@ function renameGroupOutcome(snapshot: Snapshot, node: NodeId, name: string): Out
   const found = snapshot.graph.nodes.find((n) => n.id === node);
   if (!found || node === MASTER) return noNode(node);
   if (found.kind !== "group") return invalid("only a group has a name to change");
-  const trimmed = name.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
-  if (Array.from(trimmed).length > NAME_LIMIT) return invalid(`a name is at most ${NAME_LIMIT} characters`);
-  if (/\p{Cc}/u.test(trimmed)) return invalid("a name has no control characters");
+  const tidied = tidyName(name);
+  if ("error" in tidied) return invalid(tidied.error);
   const place = snapshot.graph.nodes.filter((n) => n.kind === "group").findIndex((n) => n.id === node);
-  return { event: { type: "groupRenamed", node, name: trimmed === "" ? `Group ${place + 1}` : trimmed } };
+  return { event: { type: "groupRenamed", node, name: tidied.name === "" ? `Group ${place + 1}` : tidied.name } };
 }
 
 /** The lane `lane` put in the group `group` (or in none), the snapshot as it is: see `setLaneGroupOutcome`. Both are known to be what they should be. */
@@ -1531,6 +1583,8 @@ function intentOutcome(snapshot: Snapshot, intent: Intent, counters: Counters, c
   if (intent.type === "addFreeModulator") return addFreeModulatorOutcome(snapshot, intent.kind, intent.hears, counters);
   if (intent.type === "modulate") return modulateOutcome(snapshot, intent.to, intent.kind, intent.depth, counters);
   if (intent.type === "removeNode") return removeNodeOutcome(snapshot, intent.node);
+  if (intent.type === "collapseIntoModule") return collapseIntoModuleOutcome(snapshot, intent.nodes, intent.name, intent.ui, counters);
+  if (intent.type === "ungroupModule") return ungroupModuleOutcome(snapshot, intent.node);
   if (intent.type === "moveEffect") return moveEffectOutcome(snapshot, intent.node, intent.index);
   if (intent.type === "addModEdge") return addModEdgeOutcome(snapshot, intent.modulator, intent.to, counters);
   if (intent.type === "addSource") return addSourceOutcome(snapshot, intent.source, counters);

@@ -16,7 +16,10 @@ import type { MenuItem } from "../../ui/MenuButton";
 import { MODULATOR_KINDS } from "./nodes";
 import { boxDetail } from "./boxes";
 import type { MenuSpec } from "./contextMenu";
-import type { Held } from "./selection";
+import { COLLAPSE_NAME } from "./SaveModule";
+import type { NameOptions } from "./SaveModule";
+import { collapseWhyNot, collapseWords } from "./selection";
+import type { Collapsible, Held } from "./selection";
 import type { PatchEdge, PatchNode, PatchNodeData } from "./toFlow";
 
 /** What the menus ask of the session: the methods of the editor that they use. */
@@ -38,6 +41,8 @@ export type MenuEditor = Pick<
   | "setLimiter"
   | "moveEffect"
   | "removeNode"
+  | "collapseIntoModule"
+  | "ungroupModule"
   | "removeCable"
   | "setRoute"
   | "setFeed"
@@ -63,10 +68,13 @@ export interface CanvasActions {
   /** The nodes that are chosen, and what a module can hold of them. */
   chosen: readonly NodeId[];
   held: Held;
+  /** What collapsing the chosen nodes into one module takes (step 109), and where the box is drawn. */
+  collapsible: Collapsible;
+  collapseAt?: NodeUi | undefined;
   chooseAll: () => void;
   chooseNone: () => void;
-  /** Opens the field for the name of a module, which asks `save` for the name that was typed. */
-  nameModule: (label: string, save: (name: string) => Promise<boolean>) => void;
+  /** Opens the field for the name of a module, which asks `save` for the name that was typed (the field starts with `options`'s name and calls its button by its action). */
+  nameModule: (label: string, save: (name: string) => Promise<boolean>, options?: NameOptions) => void;
   /** Arranges the nodes again; false when they are arranged already. */
   arrange: () => void;
   canArrange: boolean;
@@ -88,6 +96,9 @@ export interface MenuDeps {
 
 /** The label of the field for the name that what is chosen is saved under: the button of the canvas's bar has it too (the browser specs and the screen readers find the field by it). */
 export const SAVE_CHOSEN = "Save the chosen nodes as a module";
+
+/** The label of the field for the name that what is chosen is collapsed under (step 109): as `SAVE_CHOSEN` is, the bar's button has it too. */
+export const COLLAPSE_CHOSEN = "Collapse the chosen nodes into a module";
 
 /** A menu of `items`, or an item that is shut, saying why, when there are none to choose from. */
 const submenu = (id: string, label: string, items: readonly ContextItem[], none: string): ContextItem => (items.length === 0 ? { id, label, items, disabled: true, title: none } : { id, label, items });
@@ -366,6 +377,13 @@ function moduleMenu(deps: MenuDeps, node: NodeId, data: PatchNodeData): ContextI
         canvas.toggleModule(node);
       },
     },
+    {
+      id: "ungroup-module",
+      label: `Ungroup ${data.name}${data.box ? `: keep the ${boxDetail(data.box)}, take the box away` : ""}`,
+      run: () => {
+        void editor.ungroupModule(node);
+      },
+    },
     removing("remove", `Remove ${data.name} for good${data.box ? `: the ${boxDetail(data.box)} in it go with it` : ""}`, () => {
       void editor.removeNode(node);
     }),
@@ -396,7 +414,8 @@ function sourceMenu(deps: MenuDeps, node: NodeId, data: PatchNodeData): ContextI
 /** The menu of what is chosen: a module of it, and none of it chosen. */
 export function selectionMenu(deps: MenuDeps): ContextItem[] {
   const { canvas, editor } = deps;
-  const { held } = canvas;
+  const { held, collapsible } = canvas;
+  const nothingToCollapse = collapseWhyNot(collapsible, canvas.chosen.length);
   return [
     {
       id: "save-chosen",
@@ -405,6 +424,15 @@ export function selectionMenu(deps: MenuDeps): ContextItem[] {
       title: held.plugins === 0 ? "A module needs an effect or an instrument" : undefined,
       run: () => {
         canvas.nameModule(SAVE_CHOSEN, (name) => editor.saveSelectionAsModule(held.nodes, name));
+      },
+    },
+    {
+      id: "collapse-chosen",
+      label: `Collapse the ${nothingToCollapse === null ? collapseWords(collapsible) : "chosen nodes"} into a module…`,
+      disabled: nothingToCollapse !== null,
+      title: nothingToCollapse ?? undefined,
+      run: () => {
+        canvas.nameModule(COLLAPSE_CHOSEN, (name) => editor.collapseIntoModule(collapsible.nodes, name, canvas.collapseAt).then((box) => box !== null), COLLAPSE_NAME);
       },
     },
     {
@@ -529,6 +557,13 @@ export function nodeMenu(deps: MenuDeps, node: NodeId, data: PatchNodeData): Con
       label: `Close ${tag.name}`,
       run: () => {
         deps.canvas.toggleModule(tag.node);
+      },
+    },
+    {
+      id: "ungroup-module",
+      label: `Ungroup ${tag.name}`,
+      run: () => {
+        void deps.editor.ungroupModule(tag.node);
       },
     },
     ...items.map((item, index) => (index === 0 ? { ...item, rule: true } : item)),

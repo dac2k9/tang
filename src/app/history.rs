@@ -596,6 +596,15 @@ impl Controller {
                 // (A node that is not there is refused, and the plan is not looked at.)
                 None => Plan::Nothing,
             },
+            // A module that is collapsed is an add, in the words of what was done by the name the box has: the record is the one node it makes, and undo takes the record away and leaves what was in it (step 109).
+            Intent::CollapseIntoModule { name, .. } => {
+                added(format!("collapse into {}", super::apply::module_title(name).unwrap_or_else(|_| crate::session::DEFAULT_MODULE_NAME.to_string())))
+            }
+            // The box is taken away and what is in it stays: the record alone goes, and comes back as it was (`Inverse::Module`), in the words of what was done by the box's name (a node that is no module is refused).
+            Intent::UngroupModule { node } => match self.model.locate(*node) {
+                Some(NodePath::Module(index)) => Plan::Removed { label: format!("ungroup {}", self.model.modules[index].name), intent: intent.clone(), at: now },
+                _ => Plan::Nothing,
+            },
             // The instrument of a lane goes with the cables that drove it, and comes back with them: the very plugin if the audio thread handed it back, and the lane's note remap (a
             // step of the words of the button that puts one in, by the name the catalog has for the new one; an empty lane is filled, and emptied again).
             Intent::ReplaceInstrument { node, plugin } => match (self.model.locate(*node), self.catalog_name(plugin)) {
@@ -661,6 +670,13 @@ impl Controller {
 
     /// The intents that take out what `added`, an add that is carried out, made: the one node, or the one cable (a free effect: its lane), or the lanes and the modulators of a module, the last that was made first.
     fn takes_out(&self, added: &Intent, made: &Made) -> Option<Vec<Intent>> {
+        // (A module that was collapsed made its record and nothing else: undo takes the record away, and the lanes and the modulators in it stay.)
+        if let Intent::CollapseIntoModule { .. } = added {
+            return match made.nodes.as_slice() {
+                [node] if matches!(self.model.locate(*node), Some(NodePath::Module(_))) => Some(vec![Intent::UngroupModule { node: *node }]),
+                _ => None,
+            };
+        }
         // (A module made a lane for each of its own, and the plugins in them, and the cables between the plugins, and then its modulators, which have their cables: each modulator and each lane is taken out, with all that is in
         // it and the cables at it, the modulators first, which were made last.)
         if let Intent::AddFreeEffect { plugin } = added {

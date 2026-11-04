@@ -3,6 +3,7 @@
 // lane has an instrument or none and its effects in order, each plugin as a session file says one (the plugin, the preset by its name, the values that are not the plugin's own, the mix of an effect and the volume of an
 // instrument, the knobs pinned to its node, and whether the stage before an effect feeds it); each modulator has what it is and how it is set, the lane of the module whose notes it hears (or every note) and its cables to the
 // module's plugins and to the settings of its other modulators. `fixtures/modules.json` and `fixtures/moduleGraphs.json`, which the controller writes, pin what is made of one to the controller's.
+import { NAME_LIMIT } from "../protocol";
 import type { CatalogEntry, ModulatorSource, Node, NodeId, Plugin, Snapshot } from "../protocol";
 import { isModulation } from "./cables";
 import { sessionFileName } from "./filenames";
@@ -112,6 +113,26 @@ export function cleanModuleName(given: string): { name: string } | { error: stri
   const stem = made.file.endsWith(".toml") ? made.file.slice(0, -".toml".length) : made.file;
   if (stem.endsWith(".toml")) return { error: "the name of a module does not end in .toml: that is the extension of its file" };
   return { name: stem };
+}
+
+/** What the box of a module that is collapsed is called when it is given a name of nothing (`DEFAULT_MODULE_NAME` of `session.rs`). */
+export const DEFAULT_MODULE_NAME = "Module";
+
+/**
+ * A name as the controller tidies the name of a group and of a box (step 109): the spaces round it go, as Rust's `trim` takes them (the Unicode white space), and it is at most `NAME_LIMIT` characters and has no control
+ * character; or the words for what is wrong with it. A name of nothing is the empty name, which a group is given its own for and a box is called `Module`.
+ */
+export function tidyName(given: string): { name: string } | { error: string } {
+  const name = given.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+  if (Array.from(name).length > NAME_LIMIT) return { error: `a name is at most ${String(NAME_LIMIT)} characters` };
+  if (/\p{Cc}/u.test(name)) return { error: "a name has no control characters" };
+  return { name };
+}
+
+/** What a box is called that is given `given` for a name: the name tidied, or `Module` for one that is nothing; a name that is refused is called so too, for the words of a step that is not kept. */
+export function boxTitle(given: string): string {
+  const tidied = tidyName(given);
+  return "name" in tidied && tidied.name !== "" ? tidied.name : DEFAULT_MODULE_NAME;
 }
 
 /** The entry that the catalog has for the module called `name` (`Catalog::entries`): no instrument, as many plugins as parameters, and no presets. */

@@ -134,6 +134,8 @@ impl Controller {
             Intent::AddCable { from, to, gain } => self.add_cable_intent(from, to, gain)?,
             Intent::AddSource { source } => self.add_source_intent(source)?,
             Intent::RemoveNode { node } => self.remove_node_intent(node)?,
+            Intent::CollapseIntoModule { nodes, name, ui } => self.collapse_into_module_intent(&nodes, &name, ui)?,
+            Intent::UngroupModule { node } => self.ungroup_module_intent(node)?,
             Intent::MoveEffect { node, index } => self.move_effect_intent(node, index)?,
             Intent::AddEffect { parent, plugin } => self.add_effect_intent(parent, &plugin)?,
             Intent::AddFreeEffect { plugin } => self.add_free_effect_intent(&plugin)?,
@@ -1289,6 +1291,72 @@ impl Controller {
         Ok(Done::Restructured)
     }
 
+    /// Collapse the lanes and the modulators that `nodes` come to into one module, where they are (`Intent::CollapseIntoModule`, step 109). Every node is looked for first (the first that is not there is not found), then
+    /// what each is (a lane, an effect of one and a modulator are what a module holds, and an effect is its lane, which is in the module whole), then that something is chosen, that none of it is in a module already, the
+    /// name and the place. The record is made last, under a node of its own, so that a refusal uses no id and no other id is another: it is a record of what came together, and nothing of the sound (the engine is told nothing).
+    fn collapse_into_module_intent(&mut self, nodes: &[NodeId], name: &str, ui: Option<NodeUi>) -> Result<Done, IntentError> {
+        let mut places = Vec::with_capacity(nodes.len());
+        for &node in nodes {
+            places.push(self.model.locate(node).ok_or(IntentError::NotFound(node))?);
+        }
+        // (The places among the lanes and among the modulators, each once: the module has the lanes in the order of the session and then the modulators in the order of their rack, as one that was added has them.)
+        let mut lanes = std::collections::BTreeSet::new();
+        let mut modulators = std::collections::BTreeSet::new();
+        for place in places {
+            match place {
+                NodePath::Instrument(inst) | NodePath::Effect { inst, .. } => {
+                    lanes.insert(inst);
+                }
+                NodePath::Modulator { index, .. } => {
+                    modulators.insert(index);
+                }
+                NodePath::Group(_) | NodePath::GroupEffect { .. } => return Err(invalid("a group is not collapsed into a module: a module holds lanes and modulators")),
+                NodePath::Source(_) => return Err(invalid("a source of notes is not collapsed into a module: a module holds lanes and modulators")),
+                NodePath::Module(_) => return Err(invalid("a module cannot hold another module yet: ungroup it first")),
+            }
+        }
+        if nodes.is_empty() {
+            return Err(invalid("nothing is chosen: choose the lanes, plugins and modulators to collapse into a module"));
+        }
+        let members: Vec<NodeId> =
+            lanes.into_iter().map(|inst| self.model.instruments[inst].node).chain(modulators.into_iter().map(|index| self.model.free_modulators[index].node)).collect();
+        for &member in &members {
+            if let Some(at) = self.model.module_of(member) {
+                return Err(invalid(format!("{} is in the module {} already: ungroup it first", self.member_words(member), self.model.modules[at].name)));
+            }
+        }
+        let name = module_title(name)?;
+        let ui = match ui {
+            None => None,
+            Some(place) => Some(place.tidy().ok_or_else(|| invalid(format!("({}, {}) is not a place", place.x, place.y)))?),
+        };
+        let node = self.model.alloc_node();
+        if let Some(ui) = ui {
+            self.model.ui.insert(node, ui);
+        }
+        self.model.modules.push(ModuleInstance { node, name, members });
+        Ok(Done::Restructured)
+    }
+
+    /// Take the box of the module `node` away and keep what is in it (`Intent::UngroupModule`, step 109): the record is gone, written down as it was for undo to put back, and its lanes and modulators are not touched.
+    fn ungroup_module_intent(&mut self, node: NodeId) -> Result<Done, IntentError> {
+        let NodePath::Module(index) = self.model.locate(node).ok_or(IntentError::NotFound(node))? else {
+            return Err(invalid("only a module can be ungrouped"));
+        };
+        let module = self.model.modules.remove(index);
+        self.took_out(Inverse::Module { index, module });
+        Ok(Done::Restructured)
+    }
+
+    /// What the lane or the modulator `node` is called in the words of a refusal: "the lane of Oscillator", "an LFO".
+    fn member_words(&self, node: NodeId) -> String {
+        match self.model.locate(node) {
+            Some(NodePath::Instrument(inst)) => crate::app::journal::lane_words(&self.model.instruments[inst]),
+            Some(NodePath::Modulator { index, .. }) => ModulatorKind::of(&self.model.free_modulators[index].source).label().to_string(),
+            _ => format!("node {}", node.0),
+        }
+    }
+
     fn move_effect_intent(&mut self, node: NodeId, index: u32) -> Result<Done, IntentError> {
         match self.model.locate(node).ok_or(IntentError::NotFound(node))? {
             NodePath::Effect { inst, index: from } => {
@@ -1424,6 +1492,19 @@ fn place_to_move_to(from: usize, places: usize, index: u32) -> Result<usize, Int
 
 fn invalid(why: impl Into<String>) -> IntentError {
     IntentError::Invalid(why.into())
+}
+
+/// What the box of a module that is collapsed is called (`Intent::CollapseIntoModule`, step 109): the name without the spaces round it, as a group's is (at most `MAX_NAME` characters, no control character), and
+/// `Module` for a name of nothing.
+pub(super) fn module_title(name: &str) -> Result<String, IntentError> {
+    let name = name.trim();
+    if name.chars().count() > MAX_NAME {
+        return Err(invalid(format!("a name is at most {MAX_NAME} characters")));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(invalid("a name has no control characters"));
+    }
+    Ok(if name.is_empty() { session::DEFAULT_MODULE_NAME.to_string() } else { name.to_string() })
 }
 
 /// Refused, in words, if `reason` says that the audio would go round with the cables there are when `what` is done (`SessionModel::loop_if_lane_goes_to`,
@@ -8988,6 +9069,440 @@ depth = 0.25
         assert!(
             committed == fresh,
             "{} is not what a module comes to as one box now: run `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture` and commit the result",
+            path.display()
+        );
+    }
+
+    // -- collapsing what is chosen into one module where it is, and taking the box away again (step 109) --
+
+    /// The nodes of `A_GRAPH_TO_KEEP` that the tests of step 109 choose from: its three lanes (an oscillator with a filter, a delay and a reverb; a lane with no instrument that has a math and a drive; an empty one) and the
+    /// modulators that are an LFO that hears the first lane, an envelope, a step sequencer that hears the second lane and a macro.
+    struct Choice {
+        lane: [NodeId; 3],
+        filter: NodeId,
+        delay: NodeId,
+        reverb: NodeId,
+        math: NodeId,
+        drive: NodeId,
+        lfo: NodeId,
+        envelope: NodeId,
+        steps: NodeId,
+        knob: NodeId,
+    }
+
+    fn choice_of(ctl: &Controller) -> Choice {
+        let (lanes, rack) = (&ctl.model.instruments, &ctl.model.free_modulators);
+        Choice {
+            lane: [lanes[0].node, lanes[1].node, lanes[2].node],
+            filter: lanes[0].effects[0].node,
+            delay: lanes[0].effects[1].node,
+            reverb: lanes[0].effects[2].node,
+            math: lanes[1].effects[0].node,
+            drive: lanes[1].effects[1].node,
+            lfo: rack[1].node,
+            envelope: rack[2].node,
+            steps: rack[3].node,
+            knob: rack[4].node,
+        }
+    }
+
+    fn collapse(nodes: &[NodeId], name: &str, ui: Option<NodeUi>) -> Intent {
+        Intent::CollapseIntoModule { nodes: nodes.to_vec(), name: name.to_string(), ui }
+    }
+
+    /// What a session is saved as: its file's text.
+    fn saved_text(model: &crate::app::model::SessionModel) -> String {
+        let (instruments, groups, cables, sources) = crate::app::save::to_save(model);
+        session::to_toml(&instruments, &groups, &cables, &sources, None, model.master_ui(), model.bpm_to_save()).unwrap()
+    }
+
+    #[test]
+    fn nodes_that_are_chosen_are_collapsed_into_one_module_in_one_step_that_undo_takes_away_and_redo_makes_again_under_the_same_node_and_the_engine_is_told_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl) = a_graph(dir.path());
+        let n = choice_of(&ctl);
+        let before = seen(&ctl);
+        let counts = (ctl.model.instruments.len(), ctl.model.free_modulators.len(), ctl.model.cables.len());
+        ctl.dirty = false;
+        sent(&engine);
+        let rev = ctl.rev;
+        // (The filter is an effect: its lane is what is in the module, whole. The math is the other lane's, and the LFO is a modulator.)
+        let applied = ctl.apply(collapse(&[n.math, n.lfo, n.filter], "  Room  ", Some(NodeUi { x: 40.0, y: 120.5 }))).unwrap();
+        assert_eq!(applied, Applied::restructured(rev + 1));
+        assert!(applied.events.is_empty(), "nothing a client could apply: it is told by a snapshot");
+        let made = ctl.last_made().nodes.clone();
+        assert_eq!(made.len(), 1, "the record is the one node that it made: {made:?}");
+        let module = made[0];
+        let members = vec![n.lane[0], n.lane[1], n.lfo];
+        let record = ModuleInstance { node: module, name: "Room".to_string(), members: members.clone() };
+        assert_eq!(ctl.model.modules, std::slice::from_ref(&record), "the lanes in the order of the session and then the modulators, as a module that was added has them, under the name without the spaces round it");
+        assert_eq!(ctl.model.locate(module), Some(NodePath::Module(0)));
+        assert_eq!(ctl.model.ui.get(&module), Some(&NodeUi { x: 40.0, y: 120.5 }), "the box is where it was said to be");
+        let others = ctl.model.nodes().filter(|(node, _)| *node != module).map(|(node, _)| node.0).max().unwrap();
+        assert!(module.0 > others, "made last, so that no other id is another: {module:?} after {others}");
+        assert_eq!((ctl.model.instruments.len(), ctl.model.free_modulators.len(), ctl.model.cables.len()), counts, "nothing was added, and nothing taken out");
+        assert!(sent(&engine).is_empty(), "the engine runs the plugins as it ran them: it is told nothing");
+        assert!(ctl.dirty, "the session has a change that is not saved");
+        ctl.model.check_ids().unwrap();
+        assert_eq!(ctl.history_state().undo.as_deref(), Some("collapse into Room"), "one step, in the words of what was done");
+        // The box is a node of the graph that a client gets, called for the module, with the nodes that are in it, and at its place.
+        let graph = ctl.snapshot().graph;
+        let node = graph.nodes.iter().find(|node| node.id == module).expect("the box is in the graph");
+        assert_eq!((node.name.as_str(), node.parent, node.ui), ("Room", None, Some(NodeUi { x: 40.0, y: 120.5 })));
+        assert_eq!(node.kind, NodeKind::Module { members });
+
+        // Undo takes the record away and leaves everything that was in it; redo makes it again, under the same node and at the same place.
+        for round in 0..2 {
+            ctl.apply(Intent::Undo).unwrap();
+            assert!(ctl.model.modules.is_empty(), "round {round}");
+            assert_eq!(seen(&ctl), before, "round {round}: the session as it was");
+            assert_eq!(ctl.history_state().redo.as_deref(), Some("collapse into Room"));
+            assert!(sent(&engine).is_empty(), "round {round}");
+            ctl.apply(Intent::Redo).unwrap();
+            assert_eq!(ctl.model.modules, std::slice::from_ref(&record), "round {round}: the same record, under the same node");
+            assert_eq!(ctl.model.ui.get(&module), Some(&NodeUi { x: 40.0, y: 120.5 }), "round {round}");
+            assert!(sent(&engine).is_empty(), "round {round}");
+            ctl.model.check_ids().unwrap();
+        }
+    }
+
+    /// What is chosen, and the nodes that are in the module that comes of it, for a session of `A_GRAPH_TO_KEEP`.
+    type Pick = fn(&Choice) -> (Vec<NodeId>, Vec<NodeId>);
+
+    #[test]
+    fn a_lane_is_in_the_module_whole_whatever_of_it_is_chosen_and_the_members_are_the_lanes_of_the_session_and_then_the_modulators_of_the_rack_whatever_the_order_they_are_chosen_in() {
+        let cases: [(&str, Pick); 6] = [
+            ("one effect is its lane, with the instrument and every other effect", |n| (vec![n.delay], vec![n.lane[0]])),
+            ("a node that is chosen more than once is one member", |n| (vec![n.reverb, n.lane[0], n.filter, n.reverb], vec![n.lane[0]])),
+            ("an effect of a lane that has no instrument is its lane", |n| (vec![n.drive], vec![n.lane[1]])),
+            ("an empty lane is a lane", |n| (vec![n.lane[2]], vec![n.lane[2]])),
+            ("modulators alone are a module, in the order of their rack", |n| (vec![n.knob, n.lfo, n.steps], vec![n.lfo, n.steps, n.knob])),
+            ("the lanes first, in the order of the session, and then the modulators in the order of the rack", |n| {
+                (vec![n.knob, n.math, n.lfo, n.lane[0], n.envelope], vec![n.lane[0], n.lane[1], n.lfo, n.envelope, n.knob])
+            }),
+        ];
+        for (what, case) in cases {
+            // (Each on a session of its own: a node is in at most one module.)
+            let dir = tempfile::tempdir().unwrap();
+            let (_engine, mut ctl) = a_graph(dir.path());
+            let (chosen, members) = case(&choice_of(&ctl));
+            ctl.apply(collapse(&chosen, "Things", None)).unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(ctl.model.modules.len(), 1, "{what}");
+            assert_eq!(ctl.model.modules[0].members, members, "{what}");
+            ctl.model.check_ids().unwrap();
+        }
+    }
+
+    #[test]
+    fn what_cannot_be_collapsed_is_refused_in_words_with_nothing_changed_no_id_used_and_no_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl) = a_graph(dir.path());
+        let twin_dir = tempfile::tempdir().unwrap();
+        let (_twin_engine, mut twin) = a_graph(twin_dir.path());
+        let n = choice_of(&ctl);
+        for session in [&mut ctl, &mut twin] {
+            session.apply(collapse(&[n.filter, n.lfo], "Room", None)).unwrap();
+        }
+        let (room, group, bus_effect, keys) = (ctl.model.modules[0].node, ctl.model.groups[0].node, ctl.model.groups[0].effects[0].node, ctl.model.sources[0].node);
+        let (rev, history) = (ctl.rev, ctl.history_state());
+        sent(&engine);
+        let refused = |ctl: &mut Controller, intent: Intent| ctl.apply(intent).expect_err("refused");
+        let words = |ctl: &mut Controller, nodes: &[NodeId], name: &str, ui: Option<NodeUi>| refused(ctl, collapse(nodes, name, ui)).to_string();
+        // A node that is not there is found first, before what the others are is looked at, and the master is no node of the model, as far as this goes.
+        assert!(matches!(refused(&mut ctl, collapse(&[n.math, NodeId(9_999)], "X", None)), IntentError::NotFound(NodeId(9_999))));
+        assert!(matches!(refused(&mut ctl, collapse(&[group, NodeId(9_999)], "X", None)), IntentError::NotFound(NodeId(9_999))), "a node that is not there is looked for before what a node is");
+        assert!(matches!(refused(&mut ctl, collapse(&[NodeId::MASTER], "X", None)), IntentError::NotFound(node) if node == NodeId::MASTER));
+        let group_words = "a group is not collapsed into a module: a module holds lanes and modulators";
+        assert_eq!(words(&mut ctl, &[n.math, group], "X", None), group_words);
+        assert_eq!(words(&mut ctl, &[bus_effect], "X", None), group_words, "the effect of a group's bus is the group's");
+        assert_eq!(words(&mut ctl, &[keys], "X", None), "a source of notes is not collapsed into a module: a module holds lanes and modulators");
+        assert_eq!(words(&mut ctl, &[n.math, room], "X", None), "a module cannot hold another module yet: ungroup it first");
+        assert_eq!(words(&mut ctl, &[], "X", None), "nothing is chosen: choose the lanes, plugins and modulators to collapse into a module");
+        // What is in a module is in no other: the lane of the filter and the LFO are in Room.
+        assert_eq!(words(&mut ctl, &[n.math, n.reverb], "X", None), "the lane of Oscillator is in the module Room already: ungroup it first");
+        assert_eq!(words(&mut ctl, &[n.lfo], "X", None), "an LFO is in the module Room already: ungroup it first");
+        // The name and the place are looked at last.
+        assert_eq!(words(&mut ctl, &[n.math], &"x".repeat(65), None), "a name is at most 64 characters");
+        assert_eq!(words(&mut ctl, &[n.math], "Ro\u{7}om", None), "a name has no control characters");
+        assert_eq!(words(&mut ctl, &[n.math], "X", Some(NodeUi { x: f32::NAN, y: 1.0 })), "(NaN, 1) is not a place");
+        assert_eq!(words(&mut ctl, &[n.math], "X", Some(NodeUi { x: 1.0, y: f32::INFINITY })), "(1, inf) is not a place");
+        // Every refusal left it all as it was: the model, with its ids, the revision, the history, and the audio thread was told nothing.
+        assert_eq!((ctl.rev, ctl.history_state()), (rev, history));
+        assert!(sent(&engine).is_empty());
+        testutil::assert_same_model("after the refusals", &ctl.model, &twin.model);
+    }
+
+    #[test]
+    fn a_name_of_nothing_is_module_and_a_box_that_is_given_no_place_has_none_and_a_place_is_kept_as_any_node_s_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_engine, mut ctl) = a_graph(dir.path());
+        let n = choice_of(&ctl);
+        for (blank, node) in [("", n.lfo), ("   ", n.envelope), (" \t ", n.knob)] {
+            ctl.apply(collapse(&[node], blank, None)).unwrap();
+            let module = ctl.model.modules.last().unwrap();
+            assert_eq!(module.name, "Module", "{blank:?}");
+            assert_eq!(ctl.model.ui.get(&module.node), None, "no place was said");
+            assert_eq!(ctl.history_state().undo.as_deref(), Some("collapse into Module"), "{blank:?}");
+        }
+        // A name is tidied as a group's is, and one that is as long as a name may be is kept; a place is kept to a tenth of a pixel and within the limit.
+        ctl.apply(collapse(&[n.steps], &format!("  {}  ", "x".repeat(64)), Some(NodeUi { x: 12.34, y: 1.0e9 }))).unwrap();
+        let module = ctl.model.modules.last().unwrap();
+        assert_eq!(module.name, "x".repeat(64));
+        assert_eq!(ctl.model.ui.get(&module.node), Some(&NodeUi { x: 12.3, y: 100_000.0 }));
+    }
+
+    #[test]
+    fn ungrouping_takes_the_box_away_and_keeps_every_node_and_undo_puts_it_back_at_its_place_among_the_modules_and_redo_takes_it_away_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl) = a_graph(dir.path());
+        let n = choice_of(&ctl);
+        ctl.apply(collapse(&[n.filter, n.lfo], "Room", None)).unwrap();
+        ctl.apply(collapse(&[n.math], "Echo", Some(NodeUi { x: 8.0, y: 16.0 }))).unwrap();
+        let (room, echo) = (ctl.model.modules[0].node, ctl.model.modules[1].node);
+        let (modules, both) = (ctl.model.modules.clone(), seen(&ctl));
+        let counts = (ctl.model.instruments.len(), ctl.model.free_modulators.len(), ctl.model.cables.len());
+        sent(&engine);
+        let rev = ctl.rev;
+        let applied = ctl.apply(Intent::UngroupModule { node: room }).unwrap();
+        assert_eq!(applied, Applied::restructured(rev + 1));
+        assert_eq!(ctl.model.modules.iter().map(|module| (module.node, module.name.as_str())).collect::<Vec<_>>(), [(echo, "Echo")]);
+        assert_eq!((ctl.model.instruments.len(), ctl.model.free_modulators.len(), ctl.model.cables.len()), counts, "every lane, modulator and cable is still there");
+        assert!(sent(&engine).is_empty(), "the engine is told nothing");
+        assert_eq!(ctl.history_state().undo.as_deref(), Some("ungroup Room"), "one step, in the words of what was done");
+        ctl.model.check_ids().unwrap();
+        assert!(ctl.snapshot().graph.nodes.iter().all(|node| node.id != room), "the box is not in the graph any more");
+        // What was in it is in no module now: it can be collapsed again, as a module of its own.
+        ctl.apply(collapse(&[n.filter], "Again", None)).unwrap();
+        ctl.apply(Intent::Undo).unwrap();
+        let after = seen(&ctl);
+
+        for round in 0..2 {
+            ctl.apply(Intent::Undo).unwrap();
+            assert_eq!(ctl.model.modules, modules, "round {round}: the record is back, first of the two, as it was");
+            assert_eq!(seen(&ctl), both, "round {round}");
+            ctl.apply(Intent::Redo).unwrap();
+            assert_eq!(seen(&ctl), after, "round {round}");
+            assert_eq!(ctl.model.modules.len(), 1, "round {round}");
+        }
+        // The second box goes the same way and comes back second, with its place.
+        ctl.apply(Intent::Undo).unwrap();
+        ctl.apply(Intent::UngroupModule { node: echo }).unwrap();
+        assert_eq!(ctl.model.modules.iter().map(|module| module.node).collect::<Vec<_>>(), [room]);
+        assert_eq!(ctl.history_state().undo.as_deref(), Some("ungroup Echo"));
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(ctl.model.modules, modules);
+        assert_eq!(ctl.model.ui.get(&echo), Some(&NodeUi { x: 8.0, y: 16.0 }), "the place of the box is kept with its node");
+        ctl.model.check_ids().unwrap();
+    }
+
+    #[test]
+    fn only_a_module_can_be_ungrouped_and_a_node_that_is_not_one_is_refused_with_nothing_changed_and_no_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl) = a_graph(dir.path());
+        let twin_dir = tempfile::tempdir().unwrap();
+        let (_twin_engine, mut twin) = a_graph(twin_dir.path());
+        let n = choice_of(&ctl);
+        for session in [&mut ctl, &mut twin] {
+            session.apply(collapse(&[n.filter, n.lfo], "Room", None)).unwrap();
+        }
+        let (group, keys) = (ctl.model.groups[0].node, ctl.model.sources[0].node);
+        let (rev, history) = (ctl.rev, ctl.history_state());
+        sent(&engine);
+        for node in [n.filter, n.lane[0], n.lfo, group, keys] {
+            let error = ctl.apply(Intent::UngroupModule { node }).expect_err("only a module").to_string();
+            assert_eq!(error, "only a module can be ungrouped", "{node:?}");
+        }
+        for node in [NodeId(9_999), NodeId::MASTER] {
+            assert!(matches!(ctl.apply(Intent::UngroupModule { node }), Err(IntentError::NotFound(found)) if found == node));
+        }
+        assert_eq!((ctl.rev, ctl.history_state()), (rev, history));
+        assert!(sent(&engine).is_empty());
+        testutil::assert_same_model("after the refusals", &ctl.model, &twin.model);
+    }
+
+    #[test]
+    fn a_module_that_was_collapsed_is_taken_out_whole_by_removing_its_node_in_one_step_and_a_member_that_goes_leaves_it_as_it_does_for_one_that_was_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut ctl) = a_graph(dir.path());
+        let n = choice_of(&ctl);
+        ctl.apply(collapse(&[n.filter, n.math, n.lfo], "Pair", None)).unwrap();
+        let (pair, before) = (ctl.model.modules[0].node, seen(&ctl));
+        sent(&engine);
+        ctl.apply(Intent::RemoveNode { node: pair }).unwrap();
+        assert!(ctl.model.modules.is_empty());
+        assert_eq!(ctl.model.instruments.len(), 1, "both of its lanes went with it, and the empty lane that was not in it stays");
+        assert_eq!(ctl.history_state().undo.as_deref(), Some("remove Pair"));
+        // (The audio thread hands the lanes back, which is what undo puts back: the stub does it as the commands are read.)
+        sent(&engine);
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(seen(&ctl), before, "the record and everything that was in it, as it was");
+        // A node of it that is taken out alone leaves it; undo gives it back to it.
+        sent(&engine);
+        ctl.apply(Intent::RemoveNode { node: n.lfo }).unwrap();
+        assert_eq!(ctl.model.modules[0].members, [n.lane[0], n.lane[1]]);
+        sent(&engine);
+        ctl.apply(Intent::Undo).unwrap();
+        assert_eq!(seen(&ctl), before);
+        ctl.model.check_ids().unwrap();
+    }
+
+    #[test]
+    fn a_module_that_was_collapsed_is_saved_with_its_members_by_their_places_and_its_own_and_is_loaded_as_it_was_and_one_that_was_ungrouped_is_not_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_engine, mut ctl) = a_graph(dir.path());
+        let n = choice_of(&ctl);
+        ctl.apply(collapse(&[n.math, n.lfo, n.knob], "Room", Some(NodeUi { x: 40.0, y: 120.5 }))).unwrap();
+        let text = saved_text(&ctl.model);
+        assert!(text.contains("[[module]]\nname = \"Room\"\nmembers = [\"instrument[1]\", \"modulator[1]\", \"modulator[4]\"]\nui = { x = 40, y = 120.5 }\n"), "{text}");
+        let again = load(&text).model;
+        assert_eq!((again.modules.len(), again.modules[0].name.as_str(), again.modules[0].members.len()), (1, "Room", 3));
+        assert_eq!(again.ui.get(&again.modules[0].node), Some(&NodeUi { x: 40.0, y: 120.5 }));
+        again.check_ids().unwrap();
+        assert_eq!(saved_text(&again), text, "and the file is the same");
+        let room = ctl.model.modules[0].node;
+        ctl.apply(Intent::UngroupModule { node: room }).unwrap();
+        assert!(!saved_text(&ctl.model).contains("[[module]]"), "a session that has no module has no table for one");
+    }
+
+    /// A small session for the fixture of step 109: a group with a bus effect, the keys, a lane with an oscillator and two effects, a lane that has a reverb and no instrument, an empty lane, an LFO that hears the first lane and
+    /// drives the filter's cutoff, and a macro.
+    const A_SESSION_TO_COLLAPSE: &str = r#"
+[keys]
+
+[[group]]
+[[group.effect]]
+plugin = "builtin:filter"
+
+[[instrument]]
+plugin = "builtin:osc"
+
+[[instrument.effect]]
+plugin = "builtin:filter"
+
+[[instrument.effect]]
+plugin = "builtin:delay"
+
+[[instrument]]
+route = "none"
+
+[[instrument.effect]]
+plugin = "builtin:reverb"
+
+[[instrument]]
+
+[[modulator]]
+type = "lfo"
+hears = "instrument[0]"
+
+[[modulator.target]]
+to = "instrument[0].effect[0]"
+param = "cutoff"
+depth = 0.25
+
+[[modulator]]
+type = "macro"
+"#;
+
+    /// What the controller makes of collapsing nodes into a module where they are, and of taking the box away (step 109), as the web client's tests read it (`web/src/client/fixtures/moduleCollapse.json`): on `A_SESSION_TO_COLLAPSE`,
+    /// the filter and the LFO collapsed as `Room` with a place, undone and redone, ungrouped and undone, the lane of the reverb collapsed under a name of nothing, the empty lane and the macro collapsed as `Tail`, the first
+    /// box ungrouped and undone, taken out whole and undone and redone and undone, and then what is refused (the same session, with three boxes in it). Each step is answered by the events it made (stamped), whether it
+    /// changed the structure, what Undo and Redo would do after it, and the nodes, the cables and the layout of the telemetry that the session has then. `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture` rewrites it.
+    #[test]
+    fn the_web_clients_fixture_of_what_collapsing_into_a_module_comes_to_is_current() {
+        let (handles, engine) = testutil::stub_engine_of(4_096);
+        let mut ctl = Controller::new(load(A_SESSION_TO_COLLAPSE).model, handles, None);
+        ctl.catalog.add(plugin::builtin::enumerate_plugins());
+        ctl.subscribe(Box::new(|_: &Applied| {}));
+        let normalized = |mut layout: serde_json::Value| {
+            layout["rev"] = serde_json::json!(1);
+            layout
+        };
+        let mut snapshot = testutil::wire(&ctl.snapshot());
+        snapshot["telemetry"]["rev"] = serde_json::json!(1);
+        let (filter, delay, reverb, lfo, knob) =
+            (ctl.model.instruments[0].effects[0].node, ctl.model.instruments[0].effects[1].node, ctl.model.instruments[1].effects[0].node, ctl.model.free_modulators[0].node, ctl.model.free_modulators[1].node);
+        let (empty, group, bus_effect, keys) = (ctl.model.instruments[2].node, ctl.model.groups[0].node, ctl.model.groups[0].effects[0].node, ctl.model.sources[0].node);
+        let mut steps = Vec::new();
+        let mut refusals: Vec<serde_json::Value> = Vec::new();
+        // (What is refused is tried at the place of the script that it says: nothing changes, and no id is used.)
+        let nodes_of = |ctl: &Controller| ctl.model.nodes().map(|(node, _)| node.0).max();
+        let mut refuse = |ctl: &mut Controller, after: usize, intents: Vec<Intent>| {
+            let (rev, ids) = (ctl.rev, nodes_of(ctl));
+            for intent in intents {
+                let error = ctl.apply(intent.clone()).expect_err("refused").to_string();
+                refusals.push(serde_json::json!({ "after": after, "intent": testutil::wire(&intent), "error": error }));
+            }
+            assert_eq!((ctl.rev, nodes_of(ctl)), (rev, ids), "a refusal changes nothing and uses no id");
+        };
+        // (A name and a place are looked at last, so they are refused while a node is in no module.)
+        refuse(&mut ctl, 0, vec![collapse(&[delay], &"x".repeat(65), None), collapse(&[delay], "Ro\u{7}om", None)]);
+        let mut take = |ctl: &mut Controller, intent: Intent| {
+            let applied = ctl.apply(intent.clone()).unwrap_or_else(|error| panic!("{intent:?}: {error}"));
+            engine.drain();
+            let state = ctl.snapshot();
+            let history = ctl.history_state();
+            steps.push(serde_json::json!({
+                "intent": testutil::wire(&intent),
+                "events": testutil::wire(&applied.stamped()),
+                "restructured": applied.restructured,
+                "history": { "undo": history.undo, "redo": history.redo },
+                "graph": testutil::wire(&state.graph),
+                "telemetry": normalized(testutil::wire(&state.telemetry)),
+            }));
+        };
+        take(&mut ctl, collapse(&[filter, lfo], "  Room  ", Some(NodeUi { x: 40.0, y: 120.5 })));
+        let room = ctl.model.modules[0].node;
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::Redo);
+        take(&mut ctl, Intent::UngroupModule { node: room });
+        take(&mut ctl, Intent::Undo);
+        // (An effect is its lane, whole, and a name of nothing is `Module`; the lanes of a module are in the order of the session and then the modulators.)
+        take(&mut ctl, collapse(&[reverb], "", None));
+        take(&mut ctl, collapse(&[knob, empty], "Tail", Some(NodeUi { x: -8.5, y: 0.0 })));
+        take(&mut ctl, Intent::UngroupModule { node: room });
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::RemoveNode { node: room });
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::Redo);
+        take(&mut ctl, Intent::Undo);
+        // What is refused on the session as it is now, with three boxes in it.
+        let lane_of_the_reverb = ctl.model.instruments[1].node;
+        let after = steps.len();
+        refuse(
+            &mut ctl,
+            after,
+            vec![
+                collapse(&[delay, NodeId(9_999)], "X", None),
+                collapse(&[NodeId::MASTER], "X", None),
+                collapse(&[], "X", None),
+                collapse(&[group], "X", None),
+                collapse(&[bus_effect], "X", None),
+                collapse(&[keys], "X", None),
+                collapse(&[room], "X", None),
+                collapse(&[delay], "X", None),
+                collapse(&[lfo], "X", None),
+                collapse(&[knob], "X", None),
+                collapse(&[empty], "X", None),
+                collapse(&[reverb], "X", None),
+                Intent::UngroupModule { node: delay },
+                Intent::UngroupModule { node: lane_of_the_reverb },
+                Intent::UngroupModule { node: group },
+                Intent::UngroupModule { node: NodeId(9_999) },
+                Intent::UngroupModule { node: NodeId::MASTER },
+            ],
+        );
+        let fixture = serde_json::json!({ "snapshot": snapshot, "steps": steps, "refusals": refusals });
+        let fresh = serde_json::to_string_pretty(&fixture).unwrap() + "\n";
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/src/client/fixtures/moduleCollapse.json");
+        if std::env::var_os("TANG_UPDATE_TYPES").is_some() {
+            std::fs::write(&path, &fresh).unwrap();
+            return;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            committed == fresh,
+            "{} is not what collapsing into a module comes to now: run `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture` and commit the result",
             path.display()
         );
     }

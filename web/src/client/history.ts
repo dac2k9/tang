@@ -11,7 +11,7 @@ import type { CatalogEntry, EdgeId, Endpoint, Gain, Graph, Intent, ModulatorFiel
 import { cablesThatGo, drivesRoundToItself, isAudioCable, isModulation, isNotesCable } from "./cables";
 import { trimmed } from "./inputs";
 import { MODULATOR_LABELS, kindOf } from "./modulatorKinds";
-import { moduleNameOf } from "./modules";
+import { boxTitle, moduleNameOf } from "./modules";
 
 /** What a change is of, for a change that goes on to be told from the rest: a string that says which parameter, gain, setting or cable. */
 export type Key = string;
@@ -168,6 +168,11 @@ export type Plan = { step: Step } | { added: Added } | { removed: Removed } | "b
  * `snapshot`; or null if it made something that cannot be named, or what it made is not there. As `takes_out` of the controller.
  */
 export function takesOut(snapshot: Snapshot, added: Intent, made: Made): Intent[] | null {
+  // A module that was collapsed made its record and nothing else: undo takes the record away, and the lanes and the modulators in it stay.
+  if (added.type === "collapseIntoModule") {
+    const [node, ...more] = made.nodes;
+    return node !== undefined && more.length === 0 && snapshot.graph.nodes.some((n) => n.id === node && n.kind === "module") ? [{ type: "ungroupModule", node }] : null;
+  }
   // A module made a lane for each of its own, and the plugins in them, and the cables between the plugins, and then its modulators with their cables: each lane and each modulator is taken out, with all that is in it and the cables
   // at it, the last made first (the modulators, which come last, go first).
   if (added.type === "addFreeEffect" && moduleNameOf(added.plugin) !== null) {
@@ -284,7 +289,7 @@ function fieldOf(node: Node, field: ModulatorField): number | undefined {
  * What a lane or a group is called in the words of a step: "the lane of Oscillator", the group's name, or, for a lane that has no instrument, what it holds: the name of its one effect, "a chain of effects" for more
  * and "an empty lane" for none. As `lane_words` of the controller.
  */
-function laneOrGroupWords(nodes: readonly Node[], node: Extract<Node, { kind: "instrument" | "group" }>): string {
+export function laneOrGroupWords(nodes: readonly Node[], node: Extract<Node, { kind: "instrument" | "group" }>): string {
   if (node.kind === "group") return node.name;
   if (node.plugin) return `the lane of ${node.name}`;
   const [only, ...more] = nodes.filter((n) => n.kind === "effect" && n.parent === node.id);
@@ -438,6 +443,14 @@ export function planOf(snapshot: Snapshot, intent: Intent, now: number, catalog:
     case "addInstrument": {
       const name = catalogName(intent.plugin);
       return name === undefined ? "nothing" : added(`add ${name} as an instrument`);
+    }
+    // A module that is collapsed is an add, in the words of what was done by the name the box has: undo takes the record away and leaves what was in it (step 109).
+    case "collapseIntoModule":
+      return added(`collapse into ${boxTitle(intent.name)}`);
+    // The box is taken away and what is in it stays: the record alone goes, and comes back as it was; a node that is no module is refused.
+    case "ungroupModule": {
+      const node = nodeOf(intent.node);
+      return node?.kind === "module" ? { removed: { label: `ungroup ${node.name}`, intent, at: now } } : "nothing";
     }
     // (As an effect that goes in a chain: the words of the button that adds one. Undo takes the lane that holds it out with it.)
     case "addFreeEffect": {

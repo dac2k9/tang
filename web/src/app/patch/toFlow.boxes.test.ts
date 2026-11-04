@@ -255,6 +255,82 @@ describe("a module that is open", () => {
   });
 });
 
+describe("the places of what a closed module hides (step 109)", () => {
+  /** The session of `room` before its module was made: the lane, its filter and its delay are on the canvas as any are. */
+  const flat: Graph = { nodes: room.nodes.filter((node) => node.kind !== "module"), edges: room.edges };
+  const at = (nodes: readonly PatchNode[], ...ids: NodeId[]) => ids.map((id) => byId(nodes, id).position);
+
+  /** The session drawn with the filter and the delay somewhere that the layout would not put them. */
+  const drawn = (): ReturnType<typeof toFlow> => {
+    const rows = toFlow(flat);
+    const moved = new Map(rows.places);
+    for (const id of [3, 4]) {
+      const place = moved.get(id);
+      if (!place) throw new Error(`node ${String(id)} is remembered`);
+      moved.set(id, { ...place, x: place.x + 500, y: place.y + 120 });
+    }
+    return toFlow(flat, moved);
+  };
+
+  test("are remembered while the nodes are hidden, and are where they were when the module is opened", () => {
+    const before = drawn();
+    expect(at(before.nodes, 3)[0]).not.toEqual(at(toFlow(flat).nodes, 3)[0]);
+    const closed = toFlow(room, before.places);
+    expect(closed.nodes.map((node) => node.id)).not.toContain("3");
+    expect(closed.places.get(3)).toEqual(before.places.get(3));
+    expect(closed.places.get(4)).toEqual(before.places.get(4));
+    const opened = toFlow(room, closed.places, undefined, { open: open(1) });
+    expect(at(opened.nodes, 3, 4)).toEqual(at(before.nodes, 3, 4));
+  });
+
+  test("are where they were when the module is taken apart, and the nodes that stayed are where they were all the time", () => {
+    const before = drawn();
+    const closed = toFlow(room, before.places);
+    const apart = toFlow(flat, closed.places);
+    expect(at(apart.nodes, 3, 4)).toEqual(at(before.nodes, 3, 4));
+    for (const id of [10, 11, MASTER]) expect(at(closed.nodes, id), String(id)).toEqual(at(before.nodes, id));
+  });
+
+  test("are none that was never drawn: a module that is closed from the first has no place for what it hides", () => {
+    expect(toFlow(room).places.has(3)).toBe(false);
+    expect(toFlow(room).places.has(4)).toBe(false);
+    expect(toFlow(room, drawn().places).places.has(3)).toBe(true);
+  });
+
+  test("are not kept for a node that a person placed: the place is its own, in the session", () => {
+    const before = drawn();
+    const placed: Graph = { ...room, nodes: room.nodes.map((node): Node => (node.id === 3 ? { ...node, ui: { x: 40, y: 40 } } : node)) };
+    const closed = toFlow(placed, before.places);
+    expect(closed.places.has(3)).toBe(false);
+    expect(closed.places.has(4)).toBe(true);
+  });
+
+  test("are not kept for a node that is drawn: what is remembered of it, in a slot that it is not in now, is not where it is, and the next layout is told where it is", () => {
+    const rows = toFlow(flat);
+    const stale = new Map(rows.places);
+    const was = stale.get(3);
+    if (!was) throw new Error("node 3 is remembered");
+    stale.set(3, { x: was.x + 700, y: was.y + 300, slot: "a slot that it is not in" });
+    const again = toFlow(flat, stale);
+    expect(at(again.nodes, 3)).toEqual(at(rows.nodes, 3));
+    expect(again.places.get(3)).toEqual(rows.places.get(3));
+  });
+
+  test("are not kept for a lane that has no card either: it is not drawn, and a module did not hide it", () => {
+    // (The lane of the filter and the delay has no instrument and nothing else of its own, so the canvas draws the two effects and not the lane.)
+    const rows = toFlow(flat);
+    expect(rows.nodes.map((node) => node.id)).not.toContain("2");
+    expect(rows.places.has(2)).toBe(false);
+    const remembered = new Map(rows.places);
+    remembered.set(2, { x: 12, y: 34, slot: "instrument" });
+    expect(toFlow(flat, remembered).places.has(2)).toBe(false);
+    // (The same in the session that has the module: the lane is in it, and has no place to go back to when it is opened, since it is not drawn then either; the filter and the delay in it have.)
+    const closed = toFlow(room, remembered);
+    expect(closed.places.has(2)).toBe(false);
+    expect(closed.places.has(3)).toBe(true);
+  });
+});
+
 describe("the structure of a session that has a module", () => {
   test("is the same while the module has the same nodes, and not when it has others", () => {
     const more: Graph = { ...room, nodes: room.nodes.map((node): Node => (node.kind === "module" ? { ...node, members: [2, 77] } : node)) };

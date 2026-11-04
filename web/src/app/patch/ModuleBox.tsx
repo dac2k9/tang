@@ -76,13 +76,14 @@ function BoxModulationHandle({ port, direction, place, count }: { port: BoxPort;
 const removeModuleId = (node: number): string => `remove-module-${String(node)}`;
 
 /**
- * The button of a box that takes the module out of the session, with everything that is in it (its lanes, their plugins and the modulators, and the cables at them): a menu that asks first, in words that say what goes
- * (undo puts it all back, in one step). A session keeps its last lane, so that a module that has them all cannot be taken out.
+ * The button of a box that takes it away: a menu that asks first, in words that say what goes. It can take the module out of the session, with everything that is in it (its lanes, their plugins and the modulators, and the cables
+ * at them: undo puts it all back, in one step; a session keeps its last lane, so that a module that has them all cannot be taken out), or ungroup it (step 109), which takes the box away and keeps what is in it on the canvas.
  */
 function RemoveModuleMenu({ node, name, box }: { node: number; name: string; box: Box }) {
   const editor = useEditor();
-  const items: MenuItem<"keep" | "remove">[] = [
+  const items: MenuItem<"keep" | "ungroup" | "remove">[] = [
     { id: "keep", label: `Keep ${name}` },
+    { id: "ungroup", label: `Ungroup ${name}: keep the ${boxDetail(box)}, take the box away` },
     { id: "remove", label: `Remove ${name} for good: the ${boxDetail(box)} in it go with it` },
   ];
   return (
@@ -93,9 +94,10 @@ function RemoveModuleMenu({ node, name, box }: { node: number; name: string; box
       items={items}
       onChoose={(choice) => {
         if (choice === "keep") return;
-        // (If it is refused the page says so: `Editor` puts the reason among the notices.)
-        void editor.removeNode(node).then((removed) => {
-          if (removed) focusWhenPossible(ADD_FREE_EFFECT_ID);
+        // (If it is refused the page says so: `Editor` puts the reason among the notices. The box is gone either way, and the focus goes to the bar.)
+        const done = choice === "ungroup" ? editor.ungroupModule(node) : editor.removeNode(node);
+        void done.then((gone) => {
+          if (gone) focusWhenPossible(ADD_FREE_EFFECT_ID);
         });
       }}
     >

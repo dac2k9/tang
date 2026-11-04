@@ -8,6 +8,7 @@ import { NoticeBoard } from "../../ui/NoticeBoard";
 import { useNotices } from "../ClientProvider";
 import { rig } from "../testing";
 import { PatchView } from "./PatchView";
+import { toFlow } from "./toFlow";
 
 afterEach(cleanup);
 
@@ -235,5 +236,141 @@ describe("choosing nodes on the canvas", () => {
     expect(document.querySelectorAll(".react-flow__edge.selected")).toHaveLength(0);
     expect(document.querySelectorAll(".react-flow__edge.selectable")).toHaveLength(0);
     expect(screen.getByRole("status").textContent).toBe("Drag a box round the nodes to keep");
+  });
+});
+
+describe("collapsing what is chosen into one box where it is (step 109)", () => {
+  const collapseButton = (): HTMLButtonElement => screen.getByRole<HTMLButtonElement>("button", { name: "Collapse the chosen nodes into a module" });
+
+  /** The nodes called these, added one after the other to what is chosen (see `choose` above). */
+  async function choose(...names: string[]): Promise<void> {
+    fireEvent.click(await nodeOnCanvas(names[0] ?? ""));
+    for (const key of ["Control", "Meta"]) fireEvent.keyDown(document.body, { key, code: `${key}Left` });
+    for (const name of names.slice(1)) fireEvent.click(await nodeOnCanvas(name), { ctrlKey: true, metaKey: true });
+    for (const key of ["Control", "Meta"]) fireEvent.keyUp(document.body, { key, code: `${key}Left` });
+  }
+
+  test("asks for the name of the box, which starts as Module and is selected, and then asks the server for the nodes that were chosen and the place that the box is to have: the top left of what it hides", async () => {
+    const { requests, server, client } = await rigged();
+    fireEvent.click(await chooseButton());
+    await choose("Oscillator");
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toBe("1 chosen");
+    });
+    expect(collapseButton().disabled).toBe(false);
+    // (What it takes is said before it is asked: the oscillator is its lane, which comes whole, with the effect that was not chosen.)
+    expect(collapseButton().title).toBe("Collapse 1 lane into one box where they are, with 1 more plugin from their lanes: open it to see them again, or ungroup it");
+    fireEvent.click(collapseButton());
+    const dialog = await screen.findByRole("dialog", { name: "Collapse the chosen nodes into a module" });
+    const field = within(dialog).getByRole<HTMLInputElement>("textbox", { name: "Module name" });
+    expect(field.value).toBe("Module");
+    expect(field.title).toBe("What the box is called: it is the module's own name, and not a file");
+    expect([field.selectionStart, field.selectionEnd]).toEqual([0, 6]);
+    expect(document.activeElement).toBe(field);
+    expect(within(dialog).getByRole("button", { name: "Collapse" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Save" })).toBeNull();
+    fireEvent.change(field, { target: { value: " Voice " } });
+    fireEvent.submit(formOf(field));
+    // The top left of the oscillator and of every plugin of its lane, as the layout put them (the tracer's lane is a row: the instrument and its effects).
+    const graph = client.state.snapshot?.graph;
+    if (!graph) throw new Error("the session is there");
+    const hidden = new Set([oscillator.id, ...graph.nodes.filter((node) => node.kind === "effect" && node.parent === oscillator.id).map((node) => node.id)]);
+    const flow = toFlow(tracerSnapshot.graph).nodes.filter((node) => hidden.has(node.data.node));
+    const ui = { x: Math.min(...flow.map((node) => node.position.x)), y: Math.min(...flow.map((node) => node.position.y)) };
+    await waitFor(() => {
+      expect(asked(requests)).toEqual([{ type: "collapseIntoModule", nodes: [oscillator.id], name: " Voice ", ui }]);
+    });
+    // The box is there where it was said to be, called by the name without the spaces, and what it hides is not on the canvas.
+    const box = (await screen.findByRole("button", { name: "Open Voice" })).closest<HTMLElement>(".react-flow__node");
+    expect(box?.style.transform.replaceAll(" ", "")).toContain(`translate(${String(ui.x)}px,${String(ui.y)}px)`);
+    expect(Array.from(document.querySelectorAll(".tang-node__name")).map((name) => name.textContent)).not.toContain("Oscillator");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    // One step, which undo takes away and leaves the nodes: they are on the canvas again.
+    expect(server.history.undo).toBe("collapse into Voice");
+    server.apply({ type: "undo" });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Open Voice" })).toBeNull();
+    });
+    expect(await nodeOnCanvas("Oscillator")).toBeTruthy();
+  });
+
+  test("says in its title what it takes, and the plugins of the lanes that come along only when some do", async () => {
+    await rigged();
+    fireEvent.click(await chooseButton());
+    await choose("Oscillator", "Filter");
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toBe("2 chosen");
+    });
+    // (The lane is chosen whole: the oscillator and the filter are every plugin it has, so that none comes along.)
+    expect(collapseButton().title).toBe("Collapse 1 lane into one box where they are: open it to see them again, or ungroup it");
+  });
+
+  test("goes back to where it was drawn when the box is opened: the nodes that it hid are remembered", async () => {
+    const { server } = await rigged();
+    const before = new Map(Array.from(document.querySelectorAll<HTMLElement>(".react-flow__node")).map((node) => [node.querySelector(".tang-node__name")?.textContent ?? "", node.style.transform]));
+    expect(before.get("Oscillator")).toBeTruthy();
+    server.apply({ type: "collapseIntoModule", nodes: [oscillator.id], name: "Voice", ui: null });
+    const open = await screen.findByRole("button", { name: "Open Voice" });
+    // (The nodes that are left are where they were: the box took the place of nothing that moved them.)
+    expect(document.querySelector(".react-flow__node")).toBeTruthy();
+    fireEvent.click(open);
+    await screen.findByRole("button", { name: "Close Voice" });
+    const after = new Map(Array.from(document.querySelectorAll<HTMLElement>(".react-flow__node")).map((node) => [node.querySelector(".tang-node__name")?.textContent ?? "", node.style.transform]));
+    for (const name of ["Oscillator", "Filter"]) expect(after.get(name), name).toBe(before.get(name));
+  });
+
+  test("cannot be pressed with nothing that a module can take, and says why: the master alone, or nothing chosen", async () => {
+    const { requests } = await rigged();
+    fireEvent.click(await chooseButton());
+    expect(collapseButton().disabled).toBe(true);
+    expect(collapseButton().title).toBe("Choose the nodes to collapse into a module");
+    fireEvent.click(await nodeOnCanvas("Master"));
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toBe("0 chosen, 1 that a module cannot hold left out");
+    });
+    expect(collapseButton().disabled).toBe(true);
+    expect(collapseButton().title).toBe("None of what is chosen can be collapsed: a module holds lanes and modulators that are in no module");
+    fireEvent.click(collapseButton());
+    expect(screen.queryByRole("textbox", { name: "Module name" })).toBeNull();
+    expect(asked(requests)).toEqual([]);
+  });
+
+  test("leaves out of what it asks the nodes that a module cannot take: the master is none of them", async () => {
+    const { requests } = await rigged();
+    fireEvent.click(await chooseButton());
+    await choose("Oscillator", "Master");
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toBe("1 chosen, 1 that a module cannot hold left out");
+    });
+    fireEvent.click(collapseButton());
+    const field = await screen.findByRole("textbox", { name: "Module name" });
+    fireEvent.submit(formOf(field));
+    await waitFor(() => {
+      expect(asked(requests).map((intent) => (intent.type === "collapseIntoModule" ? intent.nodes : null))).toEqual([[oscillator.id]]);
+    });
+  });
+
+  test("says what the server refuses, and keeps the field with the name selected to be tried again", async () => {
+    const { requests } = await rigged();
+    fireEvent.click(await chooseButton());
+    await choose("Oscillator");
+    fireEvent.click(collapseButton());
+    const field = await screen.findByRole<HTMLInputElement>("textbox", { name: "Module name" });
+    fireEvent.change(field, { target: { value: "x".repeat(65) } });
+    fireEvent.submit(formOf(field));
+    await waitFor(() => {
+      expect(noticeTexts()).toHaveLength(1);
+    });
+    expect(noticeTexts()[0]).toMatch(/^Could not collapse .* into a module: a name is at most 64 characters$/);
+    expect(asked(requests)).toHaveLength(1);
+    expect(screen.getByRole("textbox", { name: "Module name" })).toBe(field);
+    expect(document.activeElement).toBe(field);
+    expect(field.value).toBe("x".repeat(65));
+    // The name that was wrong is corrected, and the box is made.
+    fireEvent.change(field, { target: { value: "Voice" } });
+    fireEvent.submit(formOf(field));
+    await screen.findByRole("button", { name: "Open Voice" });
   });
 });

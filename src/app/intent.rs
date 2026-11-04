@@ -247,6 +247,17 @@ pub enum Intent {
     /// what its cables were driving in them has the value that was set. A source of notes goes with the cables of notes that start at it: the lanes that heard it
     /// hear what their other cables bring, and every source if it was their last. Any other node (the master) is refused.
     RemoveNode { node: NodeId },
+    /// Collapse nodes that are in the session into one module, where they are (step 109: the user's "compact/collapse them into a module in place ... to clean up the ui a bit"): `nodes` are what is chosen on a canvas, the
+    /// instrument of a lane (the lane's node), an effect or a modulator, and the lane is the unit, so that a lane that has any of its plugins chosen is in the module whole, with every plugin it has. The module is the record that a
+    /// module that is added is (`ModuleInstance`: the lanes in the order of the session and then the modulators in the order of their rack, under a node of its own that is made last, so that no other id changes), which a front-end
+    /// draws as one box and opens again; nothing about the sound changes and nothing is told to the audio thread. `name` is what the box is called (the spaces round it go; at most `MAX_NAME` characters and no control character;
+    /// a name of nothing is `Module`), and `ui` where it is drawn, if a front-end says (it is the box's place, as `SetNodeUi` would say it, in the same step). A step of the history ("collapse into Room"), which undo takes the
+    /// record out of (`UngroupModule`; the nodes stay) and redo makes again under the node it had. Refused, with nothing changed and no id used, for a node that is not there (the first, if more than one: `NotFound`), a node that is a group, a bus effect, a source of
+    /// notes or a module (a module cannot hold a module yet), none at all, a lane or a modulator that is in a module already, a name that is not one and a place that is not a place.
+    CollapseIntoModule { nodes: Vec<NodeId>, name: String, ui: Option<NodeUi> },
+    /// Take the box away and keep what is in it (step 109): the module `node`, a record that a module that was added or collapsed is, is gone, and its lanes and modulators stay in the session as they are, each in none. A step of the
+    /// history ("ungroup Room"), which undo puts back as the record was. It is not `RemoveNode`, which takes the module out with all that is in it. Refused, with nothing changed, for a node that is not a module.
+    UngroupModule { node: NodeId },
     /// Move an effect to another place in its chain: `node` is the node of an effect in a lane's chain or on a group's bus, and `index`
     /// the place it is to have among the effects of that chain, from 0 (the first, the nearest the instrument or the group) to one less
     /// than the chain has. The effects between its old place and its new one move one place the other way, and the audio path goes
@@ -825,6 +836,15 @@ mod tests {
             (Intent::AddFreeModulator { kind: ModulatorKind::Steps, hears: None }, json!({"type": "addFreeModulator", "kind": "steps", "hears": null})),
             (Intent::AddFreeModulator { kind: ModulatorKind::Envelope, hears: Some(NodeId(3)) }, json!({"type": "addFreeModulator", "kind": "envelope", "hears": 3})),
             (Intent::RemoveNode { node: NodeId(8) }, json!({"type": "removeNode", "node": 8})),
+            (
+                Intent::CollapseIntoModule { nodes: vec![NodeId(2), NodeId(5)], name: "Room".to_string(), ui: Some(NodeUi { x: 40.0, y: 120.5 }) },
+                json!({"type": "collapseIntoModule", "nodes": [2, 5], "name": "Room", "ui": {"x": 40.0, "y": 120.5}}),
+            ),
+            (
+                Intent::CollapseIntoModule { nodes: vec![NodeId(7)], name: String::new(), ui: None },
+                json!({"type": "collapseIntoModule", "nodes": [7], "name": "", "ui": null}),
+            ),
+            (Intent::UngroupModule { node: NodeId(9) }, json!({"type": "ungroupModule", "node": 9})),
             (Intent::AddSource { source: SourceInfo::Keys }, json!({"type": "addSource", "source": {"type": "keys"}})),
             (
                 Intent::AddSource { source: SourceInfo::Device { name: "Seaboard".to_string() } },

@@ -6,9 +6,11 @@ import { builtinCatalog, moduleGraphsFixture, nodeNamed, tracerSnapshot } from "
 import type { CatalogEntry, Graph, Node, NodeId, Snapshot } from "../../protocol";
 import type { ContextItem } from "../../ui/ContextMenu";
 import { effect, lane, link, master as theMaster, moduleNode } from "./boxesKit";
-import { edgeMenu, edgeSpec, nodeMenu, nodeSpec, paneMenu, SAVE_CHOSEN, selectionMenu } from "./contextMenus";
+import { COLLAPSE_CHOSEN, edgeMenu, edgeSpec, nodeMenu, nodeSpec, paneMenu, SAVE_CHOSEN, selectionMenu } from "./contextMenus";
 import type { CanvasActions, MenuDeps, MenuEditor } from "./contextMenus";
-import { modulePluginsOf } from "./selection";
+import { COLLAPSE_NAME } from "./SaveModule";
+import type { NameOptions } from "./SaveModule";
+import { collapsibleOf, modulePluginsOf } from "./selection";
 import type { PatchEdge, PatchNode, PatchNodeData } from "./toFlow";
 
 /** What the editor was asked, in order: the name of the method and what it was given. */
@@ -46,6 +48,8 @@ function recorder(): { editor: MenuEditor; asked: Ask[] } {
     setLimiter: done("setLimiter"),
     moveEffect: done("moveEffect"),
     removeNode: done("removeNode"),
+    collapseIntoModule: added("collapseIntoModule"),
+    ungroupModule: done("ungroupModule"),
     removeCable: done("removeCable"),
     setRoute: done("setRoute"),
     setFeed: done("setFeed"),
@@ -76,7 +80,7 @@ interface Rig {
   /** What the canvas was asked, in order. */
   canvasAsked: string[];
   /** The names that were asked for a module, and what asking the server for it would be. */
-  naming: { label: string; save: (name: string) => Promise<boolean> }[];
+  naming: { label: string; save: (name: string) => Promise<boolean>; options: NameOptions | undefined }[];
 }
 
 /** The menus' dependencies over a session, with an editor and a canvas that remember what they are asked. */
@@ -96,9 +100,10 @@ function rig(snapshot: Snapshot | null, options: { state?: Partial<ClientState>;
     toggleChoosing: say("toggleChoosing"),
     chosen: [],
     held: { nodes: [], plugins: 0, left: 0 },
+    collapsible: { nodes: [], lanes: 0, modulators: 0, brought: 0, left: 0, hides: new Set() },
     chooseAll: say("chooseAll"),
     chooseNone: say("chooseNone"),
-    nameModule: (label, save) => naming.push({ label, save }),
+    nameModule: (label, save, options) => naming.push({ label, save, options }),
     arrange: say("arrange"),
     canArrange: true,
     fit: say("fit"),
@@ -279,7 +284,7 @@ describe("the menu of the canvas", () => {
     const held = modulePluginsOf(session.graph, [oscillator.id, node("Delay").id]);
     const { deps, naming, asked, canvasAsked } = rig(session, { canvas: { chosen: [oscillator.id, node("Delay").id], held } });
     const items = paneMenu(deps);
-    expect(idsOf(items).slice(4, 9)).toEqual(["undo", "redo", "save-chosen", "choose-none", "choose-all"]);
+    expect(idsOf(items).slice(4, 10)).toEqual(["undo", "redo", "save-chosen", "collapse-chosen", "choose-none", "choose-all"]);
     expect(find(items, "save-chosen")).toMatchObject({ label: "Save the 2 chosen as a module…", disabled: false, rule: true });
     choose(items, "save-chosen");
     expect(naming.map((name) => name.label)).toEqual([SAVE_CHOSEN]);
@@ -297,8 +302,8 @@ describe("the menu of what is chosen", () => {
     expect(held).toEqual({ nodes: [oscillator.id], plugins: 1, left: 1 });
     const { deps, naming, asked, canvasAsked } = rig(session, { canvas: { chosen, held } });
     const items = selectionMenu(deps);
-    expect(idsOf(items)).toEqual(["save-chosen", "choose-none"]);
-    expect(labelsOf(items)).toEqual(["Save the 1 chosen as a module…", "Choose none"]);
+    expect(idsOf(items)).toEqual(["save-chosen", "collapse-chosen", "choose-none"]);
+    expect(labelsOf(items)).toEqual(["Save the 1 chosen as a module…", "Collapse the chosen nodes into a module…", "Choose none"]);
     choose(items, "save-chosen");
     expect(naming).toHaveLength(1);
     void naming[0]?.save("Voice");
@@ -328,6 +333,44 @@ describe("the menu of what is chosen", () => {
     expect(save.title).toBe("A module needs an effect or an instrument");
     const held = modulePluginsOf(session.graph, [oscillator.id]);
     expect(find(selectionMenu(rig(session, { canvas: { chosen: [oscillator.id], held } }).deps), "save-chosen").title).toBeUndefined();
+  });
+});
+
+describe("the menu of what is chosen, for collapsing it into one module where it is (step 109)", () => {
+  const chosen = [oscillator.id, node("LFO").id];
+  const collapsible = collapsibleOf(session.graph, chosen);
+
+  test("says what it takes, and asks for the name of the box, which starts as Module, and then the server, for the nodes that a module can take and the place that the box has", () => {
+    expect(collapsible).toMatchObject({ lanes: 1, modulators: 1 });
+    const at = { x: 24, y: 48.5 };
+    const { deps, naming, asked } = rig(session, { canvas: { chosen, collapsible, collapseAt: at } });
+    const item = find(selectionMenu(deps), "collapse-chosen");
+    expect(item).toMatchObject({ label: "Collapse the 1 lane and 1 modulator into a module…", disabled: false });
+    expect(item.title).toBeUndefined();
+    choose(selectionMenu(deps), "collapse-chosen");
+    expect(naming.map((name) => name.label)).toEqual([COLLAPSE_CHOSEN]);
+    expect(naming[0]?.options).toEqual(COLLAPSE_NAME);
+    expect(asked).toEqual([]);
+    void naming[0]?.save("Voice");
+    expect(asked).toEqual([["collapseIntoModule", collapsible.nodes, "Voice", at]]);
+  });
+
+  test("resolves with whether the box was made: the field is done with it when it was, and stays when it was refused", async () => {
+    const { deps, naming } = rig(session, { canvas: { chosen, collapsible } });
+    choose(selectionMenu(deps), "collapse-chosen");
+    // (The recorder's editor answers with no node, as a refusal does.)
+    await expect(naming[0]?.save("Voice")).resolves.toBe(false);
+  });
+
+  test("cannot collapse what a module cannot take, or nothing, and says why", () => {
+    const sources = [keys.id];
+    const none = rig(session, { canvas: { chosen: sources, collapsible: collapsibleOf(session.graph, sources) } });
+    expect(find(selectionMenu(none.deps), "collapse-chosen")).toMatchObject({
+      label: "Collapse the chosen nodes into a module…",
+      disabled: true,
+      title: "None of what is chosen can be collapsed: a module holds lanes and modulators that are in no module",
+    });
+    expect(find(selectionMenu(rig(session).deps), "collapse-chosen").title).toBe("Choose the nodes to collapse into a module");
   });
 });
 
@@ -712,7 +755,7 @@ describe("the menu that a right click on a node opens", () => {
     const several = chooseNodes(oscillator, filterOnBus, keys);
     const spec = nodeSpec(several.deps, onCanvas(oscillator, true));
     expect(spec.label).toBe("the 3 chosen nodes");
-    expect(idsOf(spec.items)).toEqual(["save-chosen", "choose-none"]);
+    expect(idsOf(spec.items)).toEqual(["save-chosen", "collapse-chosen", "choose-none"]);
   });
 
   test("is the node's own for a node that is not one of those that are chosen, whatever is chosen", () => {
@@ -736,32 +779,41 @@ describe("the menus of a module that is a box, and of the lanes of one that is o
   test("a box opens, or is taken out with all that is in it, in the words that its × says", () => {
     const { deps, asked, canvasAsked } = rig(snapshot);
     const items = nodeMenu(deps, 1, dataOf(at(1), { box }));
-    expect(idsOf(items)).toEqual(["open-module", "remove"]);
-    expect(labelsOf(items)).toEqual(["Open Voice", "Remove Voice for good: the 2 plugins · 1 modulator in it go with it"]);
-    expect(items[1]?.danger).toBe(true);
+    expect(idsOf(items)).toEqual(["open-module", "ungroup-module", "remove"]);
+    expect(labelsOf(items)).toEqual(["Open Voice", "Ungroup Voice: keep the 2 plugins · 1 modulator, take the box away", "Remove Voice for good: the 2 plugins · 1 modulator in it go with it"]);
+    expect(items[1]?.danger).toBeUndefined();
+    expect(items[2]?.danger).toBe(true);
     choose(items, "open-module");
     expect(canvasAsked).toEqual(["toggleModule 1"]);
     expect(asked).toEqual([]);
+    choose(items, "ungroup-module");
+    expect(asked).toEqual([["ungroupModule", 1]]);
     choose(items, "remove");
-    expect(asked).toEqual([["removeNode", 1]]);
+    expect(asked).toEqual([["ungroupModule", 1], ["removeNode", 1]]);
   });
 
-  test("a box that does not say what is in it is taken out in words that do not either", () => {
+  test("a box that does not say what is in it is taken out, and ungrouped, in words that do not either", () => {
     const { deps } = rig(snapshot);
-    expect(labelsOf(nodeMenu(deps, 1, dataOf(at(1))))).toEqual(["Open Voice", "Remove Voice for good"]);
+    expect(labelsOf(nodeMenu(deps, 1, dataOf(at(1))))).toEqual(["Open Voice", "Ungroup Voice", "Remove Voice for good"]);
   });
 
   test("a lane of a module that is open has the item that closes it first, with a rule under it, and a node that is in no open module has none", () => {
-    const { deps, canvasAsked } = rig(snapshot);
+    const { deps, canvasAsked, asked } = rig(snapshot);
     const tagged = nodeMenu(deps, 2, dataOf(at(2), { module: { node: 1, name: "Voice" } }));
     expect(tagged[0]).toMatchObject({ id: "close-module", label: "Close Voice" });
-    expect(tagged[1]?.rule).toBe(true);
+    // (And the item that takes the module apart, which keeps its nodes: step 109.)
+    expect(tagged[1]).toMatchObject({ id: "ungroup-module", label: "Ungroup Voice" });
+    expect(tagged[2]?.rule).toBe(true);
     choose(tagged, "close-module");
     expect(canvasAsked).toEqual(["toggleModule 1"]);
+    expect(asked).toEqual([]);
+    choose(tagged, "ungroup-module");
+    expect(asked).toEqual([["ungroupModule", 1]]);
     // (The rest of the menu is the lane's own, as it is for a lane that is in none.)
     const plain = nodeMenu(deps, 2, dataOf(at(2)));
     expect(idsOf(plain)).not.toContain("close-module");
-    expect(idsOf(tagged).slice(1)).toEqual(idsOf(plain));
+    expect(idsOf(plain)).not.toContain("ungroup-module");
+    expect(idsOf(tagged).slice(2)).toEqual(idsOf(plain));
   });
 
   test("the effect that stands for a lane that has no card closes the module as well", () => {

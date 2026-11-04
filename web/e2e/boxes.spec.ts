@@ -133,7 +133,11 @@ mock("a box that is chosen is what is in it, a right click on it opens its own m
   // Its own menu: it opens it, or takes it out with all that is in it.
   await box.click({ button: "right" });
   const menu = page.getByRole("menu", { name: "Tracer voice" });
-  await expect(menu.getByRole("menuitem")).toHaveText(["Open Tracer voice", "Remove Tracer voice for good: the 2 plugins · 1 modulator in it go with it"]);
+  await expect(menu.getByRole("menuitem")).toHaveText([
+    "Open Tracer voice",
+    "Ungroup Tracer voice: keep the 2 plugins · 1 modulator, take the box away",
+    "Remove Tracer voice for good: the 2 plugins · 1 modulator in it go with it",
+  ]);
   await page.keyboard.press("Escape");
   await expect(menu).toHaveCount(0);
 
