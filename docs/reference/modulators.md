@@ -156,6 +156,8 @@ needs CoreMIDI on a Mac or ALSA's sequencer on Linux: `cargo test --features web
 [[instrument.modulator]]
 type = "macro"
 value = 0.5             # 0 … 1 (held to it when the session is loaded; default 0: at rest)
+name = "Brightness"     # what it is called (default none: the node is called `Macro`); the control characters and the spaces round it go, and it is cut at 64 characters, when the session is loaded
+expose = false          # whether the box of a module that holds it shows its knob (default true; written only when false): step 110
 
 [[instrument.modulator.target]]
 param = "cutoff"
@@ -168,7 +170,8 @@ range above the value the user set (a negative depth takes it below). A new one 
 each scaled by the depth of its own cable; a macro can drive the rate, a stage or the depth of a cable of another modulator too (cross-mod). The audio thread has
 nothing of a macro but its value, so a change of it is a macro of the new value given to the engine in place of the old one (`SetModulatorSource`, `controller::macro_command`; until step 96 `SetGroupModulatorSource` was a group's). It is made in the TUI from a parameter (`m`: `New macro → cutoff`; hearing the group for a bus effect's
 parameter), in the page from the menu of a knob (`~`: "New macro") or from the "+" of a lane or a group ("Macro"), by `Modulate` / `AddFreeModulator { kind: macro, hears }`, and
-is `~ Macro 0.50 → Filter: cutoff (50%)` in the tree and `Macro` (its value, the "Targets" separator and the depth of each cable) in the pane.
+is `~ Macro 0.50 → Filter: cutoff (50%)` in the tree (`Macro Brightness 0.50` for one that is called something) and `Macro` (its value, the "Targets" separator and the depth of each cable) in the pane.
+A macro can be called something and can be told not to show its knob on the box of a module that it is in (`RenameMacro`, `ExposeMacro`, step 110: see "A macro that has a name and a knob that a box shows" in `docs/reference/modules.md`); neither is the engine's, and both are in the file (written only when they are not what a macro starts as) and in the library of modules.
 TODO: no cable drives a macro's value (`ModulatorField::Value` has no port, and the pane's `m` on its row opens nothing): a MIDI control bound to a macro would turn it
 from a hardware knob, which is what a macro is for on a stage.
 
