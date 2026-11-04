@@ -41,7 +41,7 @@ cargo build --release
 
 ## Status
 
-Early but usable. The TUI's Session and Help tabs are functional — load plugins, build effect chains, tweak parameters, record patterns, save sessions. The Piano and Oscilloscope tabs are still placeholders. See [CLAUDE.md](CLAUDE.md) for the full design.
+Early but usable. The TUI's Session and Help tabs are functional — load plugins, build effect chains, tweak parameters, record patterns, save sessions. The Piano and Oscilloscope tabs are still placeholders. See [CLAUDE.md](CLAUDE.md) for the usage and the index of the design documents in [`docs/reference/`](docs/reference/), which have the full design.
 
 ## License
 
