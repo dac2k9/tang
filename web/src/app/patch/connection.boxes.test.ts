@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
 
 import type { Graph } from "../../protocol";
-import { audioCableOf, canConnect, cableOf, drawCable, keyOf, kindOfDrag, notesCableOf, takersOf } from "./connection";
-import { effect, keys, lane, link, MASTER, master, modulator, moduleNode, plugin } from "./boxesKit";
+import { audioCableOf, canConnect, cableOf, drawableFrom, drawCable, keyOf, kindOfDrag, notesCableOf, takersOf } from "./connection";
+import { drives, effect, keys, lane, link, macro, MASTER, master, modulator, moduleNode, plugin } from "./boxesKit";
 import { toFlow } from "./toFlow";
 
 // A cable that is dragged to or from a box, which is a module that is closed (step 108), is a cable to or from the node inside that the handle of the box stands for.
@@ -105,6 +105,71 @@ describe("a cable drawn to or from a box", () => {
       ["notes", 99, 5],
       ["modulation", 20, 3, { type: "param", index: 3 }],
       ["audio", 4, MASTER, null, false],
+    ]);
+  });
+});
+
+// A cable that is drawn from the knob of a macro on a box (step 111; the user's "attach cables to the macro on the box"): the macro is a node inside a module that is closed, so that it is no node of the canvas, and what it can be drawn to is the knob's.
+describe("a cable drawn from the knob of a macro on a box", () => {
+  /** Outside: an oscillator (10) with a reverb (11) and a modulator (30). The module "Room" (1): a lane (2) that holds a filter (3), and a macro (20) that shows its knob and one (21) that does not. */
+  const withMacros: Graph = {
+    nodes: [lane(10, "Oscillator"), effect(11, 10, "Reverb"), modulator(30, "LFO"), lane(2, "Chain", null), effect(3, 2, "Filter"), macro(20, "Brightness", { name: "Brightness" }), macro(21, "Hidden", { expose: false }), moduleNode(1, "Room", [2, 20, 21]), master],
+    edges: [link(10, 11), link(2, 3), drives(5, 20, 11, 1)],
+  };
+
+  test("is looked up in what the knob says the macro can be drawn to: the box has the macro's port, and the ports that take the cable are the ones that the macro can still drive", () => {
+    const { nodes } = toFlow(withMacros);
+    const takers = takersOf(withMacros, nodes, { nodeId: "1", handleType: "source", handleId: "modOut@20" });
+    expect(takers).not.toBeNull();
+    // (The reverb's second and third parameters take it: the first has a cable from the macro already. The filter in the module is a target that no canvas draws, and the LFO's rate is one.)
+    expect(takers?.has(keyOf(11, "param-3"))).toBe(true);
+    expect(takers?.has(keyOf(11, "param-5"))).toBe(true);
+    expect(takers?.has(keyOf(11, "param-1"))).toBe(false);
+    expect(takers?.has(keyOf(3, "param-1"))).toBe(true);
+    expect(takers?.has(keyOf(30, "rate"))).toBe(true);
+    // (A macro does not drive itself, or another macro: a macro has no setting that a cable ends at.)
+    expect([...(takers ?? [])].some((key) => key.startsWith("20:") || key.startsWith("21:"))).toBe(false);
+  });
+
+  test("is the same list as the macro's own would have been on the canvas, whether the node is looked for by the knob or by the macro", () => {
+    const { nodes } = toFlow(withMacros);
+    expect(drawableFrom(nodes, 20)).toEqual(takersOf(withMacros, nodes, { nodeId: "1", handleType: "source", handleId: "modOut@20" }));
+    const open = toFlow(withMacros, undefined, undefined, { open: new Set([1]) }).nodes;
+    // (The module is open: the macro is a node of the canvas, which has the list, and there is no box.)
+    expect(open.some((node) => node.data.box !== null)).toBe(false);
+    expect(drawableFrom(open, 20)).toEqual(drawableFrom(nodes, 20));
+  });
+
+  test("has nothing to be drawn to for a macro that is not on the canvas and has no knob, and for a node that is no modulator: the macro that is told not to show its knob has no port to start at", () => {
+    const { nodes } = toFlow(withMacros);
+    expect(drawableFrom(nodes, 21).size).toBe(0);
+    expect(drawableFrom(nodes, 3).size).toBe(0);
+    expect(drawableFrom(nodes, 999).size).toBe(0);
+    expect(takersOf(withMacros, nodes, { nodeId: "1", handleType: "source", handleId: "modOut@21" })?.size).toBe(0);
+  });
+
+  test("can be drawn to a parameter that is on the canvas, and to none that the macro drives already, and not from the knob of a macro that is not in the box", () => {
+    const { nodes } = toFlow(withMacros);
+    expect(canConnect(withMacros, nodes, connection("1", "modOut@20", "11", "param-3"))).toBe(true);
+    expect(canConnect(withMacros, nodes, connection("1", "modOut@20", "11", "param-1"))).toBe(false);
+    expect(canConnect(withMacros, nodes, connection("1", "modOut@21", "11", "param-3"))).toBe(false);
+    expect(canConnect(withMacros, nodes, connection("1", "modOut@20", "30", "rate"))).toBe(true);
+    // (To the reverb's volume-like gains: the mix of an effect is a place for a cable.)
+    expect(canConnect(withMacros, nodes, connection("1", "modOut@20", "11", "mix"))).toBe(true);
+  });
+
+  test("is asked of the editor as the cable from the macro inside, to the port that it ends at", () => {
+    const asked: unknown[][] = [];
+    const editor = {
+      addAudioCable: (...args: unknown[]) => asked.push(["audio", ...args]),
+      addNotesCable: (...args: unknown[]) => asked.push(["notes", ...args]),
+      addCable: (...args: unknown[]) => asked.push(["modulation", ...args]),
+    };
+    drawCable(editor as unknown as Parameters<typeof drawCable>[0], connection("1", "modOut@20", "11", "param-3"));
+    drawCable(editor as unknown as Parameters<typeof drawCable>[0], connection("1", "modOut@20", "30", "rate"));
+    expect(asked).toEqual([
+      ["modulation", 20, 11, { type: "param", index: 3 }],
+      ["modulation", 20, 30, { type: "rate" }],
     ]);
   });
 });

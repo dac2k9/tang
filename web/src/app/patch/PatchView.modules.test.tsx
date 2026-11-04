@@ -6,14 +6,15 @@ import { nodeNamed, reachFixture, tracerSnapshot } from "../../client/fixtures";
 import type { Intent } from "../../protocol";
 import { NoticeBoard } from "../../ui/NoticeBoard";
 import { AddFreeEffectMenu } from "../AddFreeEffect";
+import { AddModuleMenu } from "../AddModule";
 import { useNotices } from "../ClientProvider";
 import { rig } from "../testing";
 import { PatchView } from "./PatchView";
 
 afterEach(cleanup);
 
-// A chain of effects saved as a module (step 104): the button in the cell of a lane, beside its mute and its solo, and the field for the name that opens under it; and the bar's "+ Effect", which lists
-// what was saved and adds it, in a lane of its own, with the effects it was saved with. What the page shows, what it asks and when.
+// A chain of effects saved as a module (step 104): the button in the cell of a lane, beside its mute and its solo, and the field for the name that opens under it; and the bar's "+ Module" (step 111: until then "+ Effect"),
+// which lists what was saved and adds it, with the effects it was saved with. What the page shows, what it asks and when.
 
 const oscillator = nodeNamed(tracerSnapshot, "Oscillator");
 
@@ -27,6 +28,7 @@ async function rigged(snapshot = tracerSnapshot) {
     <>
       <PatchView />
       <AddFreeEffectMenu />
+      <AddModuleMenu />
       <Board />
     </>,
     { snapshot },
@@ -100,7 +102,7 @@ describe("the button that saves the chain of a lane as a module", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  test("asks the server to save the chain under the name as it was typed, says so when it is saved, closes the field and gives the focus back to the button; the module is then in the bar's + Effect", async () => {
+  test("asks the server to save the chain under the name as it was typed, says so when it is saved, closes the field and gives the focus back to the button; the module is then in the bar's + Module and not in + Effect", async () => {
     const { requests } = await rigged();
     const button = await saveButton("Oscillator");
     fireEvent.click(button);
@@ -108,20 +110,23 @@ describe("the button that saves the chain of a lane as a module", () => {
     fireEvent.change(field, { target: { value: "  Tracer chain " } });
     fireEvent.submit(formOf(field));
     await waitFor(() => {
-      expect(noticeTexts()).toEqual(['Saved the module "Tracer chain": + Effect adds it']);
+      expect(noticeTexts()).toEqual(['Saved the module "Tracer chain": + Module adds it']);
     });
     expect(asked(requests)).toEqual([{ type: "saveModule", node: oscillator.id, name: "  Tracer chain " }]);
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
     expect(document.activeElement).toBe(button);
-    // The catalog lists it from now on, and the bar's menu has it first, under a heading of its own.
-    fireEvent.click(screen.getByRole("button", { name: "Add an effect" }));
-    const menu = await screen.findByRole("menu", { name: "Add an effect" });
-    const items = within(menu).getAllByRole("menuitem").map((item) => item.textContent);
-    expect(items[0]).toBe("Tracer chain");
-    expect(within(menu).getByRole("group", { name: "Module" })).toBeTruthy();
+    // The catalog lists it from now on, in the bar's menu of modules (a category of its own) and not in the menu of effects.
+    fireEvent.click(screen.getByRole("button", { name: "Add a module" }));
+    const modules = await screen.findByRole("menu", { name: "Add a module" });
+    expect(within(modules).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Tracer chain"]);
+    fireEvent.keyDown(modules, { key: "Escape" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add an effect" }));
+    const effects = await screen.findByRole("menu", { name: "Add an effect" });
+    const items = within(effects).getAllByRole("menuitem").map((item) => item.textContent);
     expect(items).toContain("Reverb");
+    expect(items).not.toContain("Tracer chain");
   });
 
   test("is left with Escape or Cancel, asking nothing, and the focus goes back to the button; a press anywhere else closes it and the focus stays where the person put it", async () => {
@@ -280,23 +285,24 @@ describe("the field for the name of a module", () => {
   });
 });
 
-describe("the modules that were saved, in the bar's + Effect", () => {
+describe("the modules that were saved, in the bar's + Module", () => {
   const space = { lanes: [{ instrument: null, effects: [{ plugin: "builtin:filter", preset: null, params: { cutoff: 0.25 }, mix: 0.8, pinned: ["cutoff"], fed: true }, { plugin: "builtin:reverb", preset: null, params: {}, mix: 0.4, pinned: [], fed: true }] }], cables: [], modulators: [] };
 
-  test("are listed first, each under the heading Module, and add the chain in a lane of its own, drawn as one box: the effects it was saved with are in it, in order, and are modules on the canvas once it is open", async () => {
+  test("are listed under no heading, and add the chain in a lane of its own, drawn as one box: the effects it was saved with are in it, in order, and are modules on the canvas once it is open", async () => {
     const { server, requests } = await rig(
       <>
         <PatchView />
-        <AddFreeEffectMenu />
+        <AddModuleMenu />
         <Board />
       </>,
       { modules: { Space: space } },
     );
-    fireEvent.click(await screen.findByRole("button", { name: "Add an effect" }));
-    const menu = await screen.findByRole("menu", { name: "Add an effect" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add a module" }));
+    const menu = await screen.findByRole("menu", { name: "Add a module" });
     const [first] = within(menu).getAllByRole("menuitem");
     if (!first) throw new Error("the menu has an item");
     expect(first.textContent).toBe("Space");
+    expect(within(menu).queryByRole("group")).toBeNull();
     fireEvent.click(first);
     const names = (): (string | null)[] => Array.from(document.querySelectorAll(".tang-node__name")).map((name) => name.textContent);
     // (One box: the effects that are in it are not on the canvas.)
@@ -316,14 +322,20 @@ describe("the modules that were saved, in the bar's + Effect", () => {
     expect(noticeTexts()).toEqual([]);
   });
 
-  test("are not in the menu of a lane that adds an effect to its chain: a chain does not go in a chain", async () => {
+  test("are not in the bar's menu of effects, nor in the menu of a lane that adds an effect to its chain: a chain does not go in a chain, and a module is a category of its own", async () => {
     await rig(
       <>
         <PatchView />
+        <AddFreeEffectMenu />
         <Board />
       </>,
       { modules: { Space: space } },
     );
+    fireEvent.click(await screen.findByRole("button", { name: "Add an effect" }));
+    const bar = await screen.findByRole("menu", { name: "Add an effect" });
+    expect(within(bar).getAllByRole("menuitem").map((item) => item.textContent)).not.toContain("Space");
+    expect(within(bar).queryByRole("group", { name: "Module" })).toBeNull();
+    fireEvent.keyDown(bar, { key: "Escape" });
     fireEvent.click(await screen.findByRole("button", { name: "Add an effect to Oscillator" }));
     const menu = await screen.findByRole("menu", { name: "Add an effect to Oscillator" });
     const items = within(menu).getAllByRole("menuitem").map((item) => item.textContent);

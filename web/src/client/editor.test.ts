@@ -410,6 +410,68 @@ describe("adding an effect that stands by itself", () => {
   });
 });
 
+describe("adding a module (step 111)", () => {
+  const space: Module = {
+    lanes: [
+      {
+        instrument: null,
+        effects: [
+          { plugin: "builtin:filter", preset: null, params: {}, mix: 1, pinned: [], fed: true },
+          { plugin: "builtin:reverb", preset: null, params: {}, mix: 0.4, pinned: [], fed: true },
+        ],
+      },
+    ],
+    cables: [],
+    modulators: [],
+  };
+
+  test("resolves with the node of the module, which is one box and not the last effect that is in it, asks the canvas to show it, and says nothing", async () => {
+    const { client, notices, shown, editor, server } = await open({ modules: { Space: space } });
+    const id = await editor.addModule("module:Space");
+    expect(client.state.snapshot?.graph.nodes.find((node) => node.id === id)).toMatchObject({ kind: "module", name: "Space" });
+    expect(shown).toEqual([id]);
+    expect(said(notices)).toEqual([]);
+    // (It is the controller's own intent that adds it, one step: the module is what `Undo` takes out.)
+    expect(server.received.flatMap((message) => (message.type === "request" ? [message.intent] : []))).toEqual([{ type: "addFreeEffect", plugin: "module:Space" }]);
+    expect(server.history.undo).toBe("add Space");
+  });
+
+  test("puts the box where it is told, by a move of its own, and does not ask the canvas to show what it put where the person is looking", async () => {
+    const { client, shown, editor, server } = await open({ modules: { Space: space } });
+    const at = { x: 40.5, y: -12 };
+    const id = await editor.addModule("module:Space", at);
+    expect(client.state.snapshot?.graph.nodes.find((node) => node.id === id)).toMatchObject({ kind: "module", ui: at });
+    expect(server.received.flatMap((message) => (message.type === "request" ? [message.intent.type] : []))).toEqual(["addFreeEffect", "setNodeUi"]);
+    expect(shown).toEqual([]);
+  });
+
+  test("is refused for a module that the library has not (or that has a plugin that is not installed): it resolves with null, the page says what it could not do, in the words of a module, and why, and nothing is made", async () => {
+    const needs: Module = { ...space, lanes: [{ instrument: null, effects: [{ plugin: "clap:com.example.nothing", preset: null, params: {}, mix: 1, pinned: [], fed: true }] }] };
+    const { client, notices, editor } = await open({ modules: { Needs: needs } });
+    expect(await editor.addModule("module:Gone")).toBeNull();
+    expect(await editor.addModule("module:Needs")).toBeNull();
+    const [gone, plugin] = said(notices);
+    expect(gone).toBe("Could not add the module Gone: there is no module called Gone in the library");
+    expect(plugin).toBe("Could not add the module Needs: the module Needs cannot be added: clap:com.example.nothing is not a plugin that is installed");
+    expect(client.state.snapshot).toEqual(tracerSnapshot);
+  });
+
+  test("with no connection says so", async () => {
+    const { client, notices, editor } = await open({ modules: { Space: space } });
+    client.stop();
+    expect(await editor.addModule("module:Space")).toBeNull();
+    expect(said(notices)).toEqual(["Could not add the module Space: Not connected to the server."]);
+  });
+
+  test("is not what adds an effect: an effect that stands by itself is said in its own words, and a module that goes in by that way is a module all the same", async () => {
+    const { client, notices, editor } = await open({ modules: { Space: space } });
+    expect(await editor.addFreeEffect("builtin:osc")).toBeNull();
+    expect(said(notices)).toEqual(["Could not add Oscillator as an effect of its own: Oscillator is an instrument, not an effect"]);
+    const id = await editor.addFreeEffect("module:Space");
+    expect(client.state.snapshot?.graph.nodes.find((node) => node.id === id)?.kind).toBe("module");
+  });
+});
+
 describe("adding an instrument", () => {
   test("resolves with the node of the lane it made, which is in the session then, and says nothing", async () => {
     const { client, notices, editor } = await open();
@@ -1356,7 +1418,7 @@ describe("saving a chain of effects as a module", () => {
     const { server, client, notices, editor } = await open();
     expect(await editor.saveModule(oscillator.id, "  Tracer chain  ")).toBe(true);
     expect(server.received.at(-1)).toMatchObject({ type: "request", intent: { type: "saveModule", node: oscillator.id, name: "  Tracer chain  " } });
-    expect(said(notices)).toEqual(['Saved the module "Tracer chain": + Effect adds it']);
+    expect(said(notices)).toEqual(['Saved the module "Tracer chain": + Module adds it']);
     await until(() => client.state.catalog?.entries.some((entry) => entry.id === "module:Tracer chain") === true, "the catalog with the module");
     expect(client.state.catalog?.entries.find((entry) => entry.id === "module:Tracer chain")).toEqual({ id: "module:Tracer chain", name: "Tracer chain", format: "Module", isInstrument: false, params: 1, presets: 0 });
     expect(client.state.snapshot?.graph).toEqual(tracerSnapshot.graph);

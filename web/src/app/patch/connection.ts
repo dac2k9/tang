@@ -100,11 +100,15 @@ export function notesCableOf(connection: Connection): NotesEnds | null {
 /** The key of a port of a node, by the name of its handle, which is how the ends that take a cable are listed. */
 export const keyOf = (node: NodeId, handle: string): string => `${String(node)}:${handle}`;
 
-/** The ports that the modulator `modulator` can still be drawn to, as `keyOf` says: none if it is not a modulator of the canvas. */
+/**
+ * The ports that the modulator `modulator` can still be drawn to, as `keyOf` says: none if it is not a modulator of the canvas, or of a box that is closed (step 111: a macro that shows its knob on a box is no node of the canvas, and its knob has
+ * what it can be drawn to).
+ */
 export function drawableFrom(nodes: readonly PatchNode[], modulator: NodeId): Set<string> {
   const found = nodes.find((node) => node.data.node === modulator);
+  const targets = found ? found.data.targets : (nodes.flatMap((node) => node.data.box?.knobs ?? []).find((knob) => knob.member === modulator)?.targets ?? []);
   return new Set(
-    (found?.data.targets ?? []).flatMap((group) => [
+    targets.flatMap((group) => [
       ...group.params.map((param) => keyOf(group.node, paramHandle(param.index))),
       ...group.fields.map((field) => keyOf(group.node, handleOf(field.port))),
     ]),

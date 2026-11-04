@@ -8,6 +8,7 @@
 import type { Edge, Graph, Node, NodeId, Port } from "../protocol";
 import { isModulation } from "./cables";
 import { endLabel, gainName } from "./names";
+import type { Names } from "./names";
 
 /** Whether a node has a plugin, whose parameters a cable can end at. */
 const hasPlugin = (node: Node): boolean => (node.kind === "instrument" && node.plugin !== null) || node.kind === "effect";
@@ -108,7 +109,7 @@ export interface Drivable {
 }
 
 /** What a setting of a modulator, or the depth of one of its cables, is called in a list: the depth of a cable is told by where the cable goes. */
-function fieldName(graph: Graph, names: ReadonlyMap<NodeId, string>, port: Port): string {
+function fieldName(graph: Graph, names: Names, port: Port): string {
   if (port.type !== "depth") return port.type;
   const { edge } = port;
   const cable = graph.edges.find((found) => found.kind === "modulation" && found.id === edge);
@@ -125,7 +126,7 @@ const fieldKey = (node: NodeId, port: Port): string => (port.type === "depth" ? 
  * the depths of their cables, that it does not drive already. `names` is what each node is called (`displayNames`). A node
  * with nothing left is not listed.
  */
-export function drivablesOf(graph: Graph, modulator: NodeId, names: ReadonlyMap<NodeId, string>): Drivable[] {
+export function drivablesOf(graph: Graph, modulator: NodeId, names: Names): Drivable[] {
   const reached = reachFrom(graph, modulator);
   const isModulator = graph.nodes.some((node) => node.id === modulator && node.kind === "modulator");
   const driven = new Set(

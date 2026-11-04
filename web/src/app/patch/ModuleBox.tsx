@@ -1,7 +1,8 @@
 // A module that is closed, as the canvas draws it (docs/web-ui.md §9.3, step 108; the user's "the goal when we re-add a module is that it gets rendered like just a single box"): one node with the
 // module's name, a line that says what is in it, a port on its edge for each of the module's inputs and outputs (a cable that is dragged to one ends at the node inside that it stands for: `connection.ts`),
 // and the buttons that open it and take it out. Open, the module is its nodes, and the tag that is over each of its lanes closes it again. (Step 110: under its ports it has the knob of every macro that is in it and
-// has not been told to hide its own, which is the macro's value turned where it is: the user's "expose a macro-knob as well, maybe thats the most common usecase".)
+// has not been told to hide its own, which is the macro's value turned where it is: the user's "expose a macro-knob as well, maybe thats the most common usecase". Step 111: that knob is where the macro's cables are
+// started and drawn from: a port under it, and a menu in its corner for a keyboard, which is the user's "attach cables to the macro on the box".)
 import { Handle, Position } from "@xyflow/react";
 import type { NodeProps } from "@xyflow/react";
 import { useContext } from "react";
@@ -12,10 +13,10 @@ import type { MenuItem } from "../../ui/MenuButton";
 import { useEditor } from "../ClientProvider";
 import { focusWhenPossible } from "../focus";
 import { boxDetail, boxRows } from "./boxes";
-import type { Box, BoxPort } from "./boxes";
+import type { Box, BoxKnob, BoxPort } from "./boxes";
 import { ConnectingContext, keyOf } from "./connection";
 import { memberHandle } from "./handles";
-import { MacroValueControl } from "./controls";
+import { DrivePicker, MacroValueControl } from "./controls";
 import { ADD_FREE_EFFECT_ID, Header } from "./nodes";
 import { OpenModulesContext, openModuleId } from "./openModules";
 import { BOX_ROW_HEIGHT } from "./toFlow";
@@ -70,6 +71,24 @@ function BoxModulationHandle({ port, direction, place, count }: { port: BoxPort;
       className={classes.join(" ")}
       style={{ left: `${String(((place + 1) / (count + 1)) * 100)}%` }}
       title={port.label}
+    />
+  );
+}
+
+/**
+ * The port of the knob of a macro on a box (step 111): the macro's own output, `modOut`, at the foot of the knob's cell, where a cable is started (the macro is a node inside the module, which is not on the canvas, so that a cable is
+ * started from its knob). It is the port of the node inside, by the name of the handle that says which (`memberHandle`), as the box's other ports are, so that the cables that the macro has go from here, and a cable that is dragged from here is
+ * a cable from the macro (`takersOf`: what it can be drawn to is the knob's `targets`). A cable ends at none of a knob: nothing is drawn to a macro, whose value a person turns.
+ */
+function KnobPort({ knob }: { knob: BoxKnob }) {
+  return (
+    <Handle
+      isConnectableEnd={false}
+      type="source"
+      position={Position.Bottom}
+      id={memberHandle("modOut", knob.member)}
+      className="tang-port tang-port--mod"
+      title={`Draw a cable from ${knob.label}`}
     />
   );
 }
@@ -165,12 +184,14 @@ export function ModuleNode({ data }: NodeProps<PatchNode>) {
           );
         })}
       </ul>
-      {/* (The knobs of the macros that are in it and have not been told to hide theirs, in the grid that a plugin's controls are in: each is the macro's own, turned where it is, and called by the macro's name.) */}
+      {/* (The knobs of the macros that are in it and have not been told to hide theirs, in the grid that a plugin's controls are in: each is the macro's own, turned where it is, and called by the macro's name; its port is under it, and a menu in its corner draws a cable from it.) */}
       {box.knobs.length > 0 ? (
         <div className="tang-node__controls nodrag nopan nowheel" role="group" aria-label={`Knobs of ${data.name}`}>
           {box.knobs.map((knob) => (
             <div key={knob.member} className="tang-cell">
+              <KnobPort knob={knob} />
               <MacroValueControl node={knob.member} label={knob.label} />
+              <DrivePicker modulator={knob.member} name={knob.label} targets={knob.targets} cell />
             </div>
           ))}
         </div>

@@ -618,3 +618,61 @@ describe("the piano", () => {
     expect(client.state.snapshot?.meta.dirty).toBe(true);
   });
 });
+
+describe("the bar's button that adds a module (step 111)", () => {
+  const space = { lanes: [{ instrument: null, effects: [{ plugin: "builtin:reverb", preset: null, params: {}, mix: 0.4, pinned: [], fed: true }] }], cables: [], modulators: [] };
+
+  test("is there after the other buttons that add, and is shut while no module is saved, which no other button of the bar is", async () => {
+    page();
+    const buttons = (await screen.findAllByRole("button", { name: /^Add (an instrument|an effect|a modulator|a source of notes|a module)$/ })).map((button) => button.getAttribute("aria-label"));
+    expect(buttons).toEqual(["Add an instrument", "Add an effect", "Add a modulator", "Add a source of notes", "Add a module"]);
+    const button = screen.getByRole<HTMLButtonElement>("button", { name: "Add a module" });
+    expect(button.textContent).toBe("+ Module");
+    expect(button.disabled).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Add an effect" }).disabled).toBe(false);
+  });
+
+  test("opens a menu of the modules that were saved, under no heading, and asks for the module that is chosen; the box is on the canvas when the server has made it, and the effects' menu has none", async () => {
+    const { server } = page({ modules: { Space: space, "Big hall": space } });
+    const patch = await screen.findByTestId("patch");
+    await waitFor(() => {
+      expect(patch.querySelectorAll(".react-flow__node")).toHaveLength(4);
+    });
+    const button = await screen.findByRole("button", { name: "Add a module" });
+    await waitFor(() => {
+      expect((button as HTMLButtonElement).disabled).toBe(false);
+    });
+    fireEvent.click(button);
+    const menu = screen.getByRole("menu", { name: "Add a module" });
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Big hall", "Space"]);
+    expect(within(menu).queryAllByRole("group")).toEqual([]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Space" }));
+    await waitFor(() => {
+      expect(patch.querySelectorAll(".react-flow__node")).toHaveLength(5);
+    });
+    expect(server.received.flatMap((message) => (message.type === "request" ? [message.intent] : []))).toEqual([{ type: "addFreeEffect", plugin: "module:Space" }]);
+    expect(await screen.findByRole("button", { name: "Open Space" })).toBeTruthy();
+    // The menu has gone, and the focus is back on the button that opened it.
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(button);
+    // The menu of effects is the plugins', and has no module in it.
+    fireEvent.click(screen.getByRole("button", { name: "Add an effect" }));
+    expect(within(screen.getByRole("menu", { name: "Add an effect" })).queryByRole("menuitem", { name: "Space" })).toBeNull();
+  });
+
+  test("says why a module could not be added, in the words of what was asked, among the notices", async () => {
+    const { server } = page({ modules: { Space: space } }, { reconnectDelay: () => 60_000 });
+    await screen.findByText("Connected");
+    const button = await screen.findByRole("button", { name: "Add a module" });
+    await waitFor(() => {
+      expect((button as HTMLButtonElement).disabled).toBe(false);
+    });
+    fireEvent.click(button);
+    server.drop();
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).not.toBe("Connected");
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Space" }));
+    expect(await screen.findByText("Could not add the module Space: Not connected to the server.")).toBeTruthy();
+  });
+});

@@ -9,6 +9,7 @@ import type { Client } from "./connection";
 import { isModulation } from "./cables";
 import { trimmed } from "./inputs";
 import { MODULATOR_LABELS } from "./modulatorKinds";
+import { moduleNameOf } from "./modules";
 import { cableWords, displayNames, endLabel } from "./names";
 import type { Names } from "./names";
 import { rangeLabel } from "./notes";
@@ -143,12 +144,25 @@ export class Editor {
   /**
    * Add the plugin `plugin` (the `id` of an entry of the catalog the server told) as an effect that stands by itself: a lane of its own at the end of the session that holds it and has no instrument, so that
    * what the effect is fed is what cables bring. Resolves with the id of the effect it made (the lane is the effect's holder, and the canvas draws no card for it), which the canvas is asked to show, or with null
-   * if it was refused (the page says why). As for `addFreeModulator`: the node is the last effect the session did not have before. A module (an entry of the library) is added with everything that is in it, and the
-   * canvas draws it as one box (step 108): the node that is shown, and put where `place` says, is the module's.
+   * if it was refused (the page says why). As for `addFreeModulator`: the node is the last effect the session did not have before. (A module of the library is added by `addModule`.)
    */
-  async addFreeEffect(plugin: string, place?: NodeUi): Promise<NodeId | null> {
+  addFreeEffect(plugin: string, place?: NodeUi): Promise<NodeId | null> {
+    return this.#addFree(plugin, `add ${this.#pluginName(plugin)} as an effect of its own`, place);
+  }
+
+  /**
+   * Add the module `module` of the library (the `id` of an entry of the catalog the server told, `module:Room`) with everything that is in it (steps 104 to 108 and 111): the controller's `AddFreeEffect` of the module's
+   * id, one step that Undo takes out. The canvas draws it as one box: it resolves with the id of the module's node, which the canvas is asked to show or which is put where `place` says, and not the last effect that is
+   * in it, or with null if it was refused (the page says why: the file of the module is gone, or has a plugin that is not installed).
+   */
+  addModule(module: string, place?: NodeUi): Promise<NodeId | null> {
+    return this.#addFree(module, `add the module ${moduleNameOf(module) ?? module}`, place);
+  }
+
+  /** What `addFreeEffect` and `addModule` do: the intent is the controller's one, and the node that is placed and shown is the module's if one was made, and the last effect if not. */
+  async #addFree(plugin: string, what: string, place: NodeUi | undefined): Promise<NodeId | null> {
     const before = new Set(this.#graph?.nodes.map((node) => node.id));
-    if (!(await this.#attempt(`add ${this.#pluginName(plugin)} as an effect of its own`, { type: "addFreeEffect", plugin }))) return null;
+    if (!(await this.#attempt(what, { type: "addFreeEffect", plugin }))) return null;
     const added = this.#graph?.nodes.filter((node) => (node.kind === "effect" || node.kind === "module") && !before.has(node.id));
     return this.#placed((added?.findLast((node) => node.kind === "module") ?? added?.at(-1))?.id, place);
   }
@@ -499,25 +513,25 @@ export class Editor {
 
   /**
    * Save the chain of effects of the lane `node` is of (the lane, or an effect of its chain) as a module of the library under `name`: a file name and not a path, to which `.toml` is added, as the program checks it; a
-   * module that has the name is written over. The catalog that the server tells has the module from then on, and the bar's "+ Effect" adds it. True if it was saved, and the page says so; if it was not it says why (a name that is
+   * module that has the name is written over. The catalog that the server tells has the module from then on, and the bar's "+ Module" adds it. True if it was saved, and the page says so; if it was not it says why (a name that is
    * no name, a lane that has no effect, a program that keeps no library). The session is not changed by it: nothing is unsaved because of it, and there is nothing to undo.
    */
   async saveModule(node: NodeId, name: string): Promise<boolean> {
     const done = await this.#attempt(`save the chain of ${this.#name(node)} as the module ${quoted(name.trim())}`, { type: "saveModule", node, name });
-    if (done) this.#notices.say(`Saved the module ${quoted(name.trim())}: + Effect adds it`);
+    if (done) this.#notices.say(`Saved the module ${quoted(name.trim())}: + Module adds it`);
     return done;
   }
 
   /**
    * Save the plugins in `nodes` as a module of the library under `name` (step 105: what is chosen on the canvas, the instruments and the effects of any lanes): each lane that has one of them is a lane of the module, with the instrument
    * if it was chosen and the effects that were, each as it is now, and the audio cables that are between them. What joins them to what is not chosen is left out, as are the cables that go in and out. The server says what a name may be,
-   * and a module that has the name is written over. The catalog that the server tells has the module from then on, and the bar's "+ Effect" adds it. True if it was saved, and the page says so; if it was not it says why (a name that is no
+   * and a module that has the name is written over. The catalog that the server tells has the module from then on, and the bar's "+ Module" adds it. True if it was saved, and the page says so; if it was not it says why (a name that is no
    * name, a node that a module has none of, nothing chosen, a program that keeps no library). The session is not changed by it: nothing is unsaved because of it, and there is nothing to undo.
    */
   async saveSelectionAsModule(nodes: readonly NodeId[], name: string): Promise<boolean> {
     const what = `save ${nodes.map((node) => this.#name(node)).join(", ")} as the module ${quoted(name.trim())}`;
     const done = await this.#attempt(what, { type: "saveSelectionAsModule", nodes: [...nodes], name });
-    if (done) this.#notices.say(`Saved the module ${quoted(name.trim())}: + Effect adds it`);
+    if (done) this.#notices.say(`Saved the module ${quoted(name.trim())}: + Module adds it`);
     return done;
   }
 

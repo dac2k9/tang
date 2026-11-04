@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { expect, test as mock } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 
-import { node, open, showAll } from "./canvas";
-import { boxRound, choose as chooseNodes, names } from "./modules";
+import { cablePoints, cables, drag, node, open, port, showAll, still } from "./canvas";
+import { addFree, boxRound, choose as chooseNodes, names } from "./modules";
 import { modulatorsIn, test } from "./own";
 
 // A macro that has a name and a choice of whether the box of its module shows its knob (docs/web-ui.md D110; the user's "expose a macro-knob as well, maybe thats the most common usecase", "let a Macro have a name and an
@@ -47,6 +47,13 @@ async function collapse(page: Page, chosen: string[], name: string): Promise<voi
 /** The group of knobs that the box called `module` shows, and the knob called `name` in it. */
 const knobs = (box: Locator, module: string): Locator => box.getByRole("group", { name: `Knobs of ${module}` });
 const knob = (box: Locator, module: string, name: string): Locator => knobs(box, module).getByRole("slider", { name, exact: true });
+
+/** The port of the knob called `name` on the box `module` (step 111): the handle in the knob's cell, which is the macro's own output, where a cable is started. */
+const knobPort = (box: Locator, module: string, name: string): Locator =>
+  knobs(box, module)
+    .locator(".tang-cell")
+    .filter({ has: box.page().locator(`[aria-label="${name}"]`) })
+    .locator(".react-flow__handle");
 
 /** How tall a box is on the page, in the pixels of the layout (the canvas may be zoomed: this is not), and how tall the layout says it is: a header, a row for each port, the knobs, the line that says what is in it, the room under it. */
 async function heights(box: Locator, shownKnobs: number): Promise<{ drawn: number; said: number }> {
@@ -127,6 +134,93 @@ mock("a macro that is renamed after it is in a box is the name of the knob on th
   await expect(knobs(box, "Voice").getByRole("slider")).toHaveCount(2);
 });
 
+mock("the knob of a macro on a box has a port under it that a cable is dragged from, to a parameter of a node outside the module: the cable is drawn from the knob, is the macro's own, and goes with Undo; the knob's menu draws one as well, for a keyboard", async ({ page }) => {
+  await open(page);
+  await macroOn(node(page, "Filter"), "resonance");
+  await showAll(page);
+  await rename(page, "Macro", "Brightness");
+  await collapse(page, ["LFO", "Brightness", "Oscillator", "Filter"], "Voice");
+  await addFree(page, "Reverb", "Reverb");
+  await showAll(page);
+  const box = node(page, "Voice");
+  const reverb = node(page, "Reverb");
+  // The macro's cable to the filter, and the LFO's, are inside the box and are not drawn: the box has the one port, which is the knob's.
+  await expect(cables(page)).toHaveCount(0);
+  await expect(box.locator('.react-flow__handle[data-handleid^="modOut@"]')).toHaveCount(1);
+  const dot = knobPort(box, "Voice", "Brightness");
+  await expect(dot).toBeVisible();
+  // The port is under the knob, at the middle of it, and the box is as tall as the layout says with it there (a handle takes no room).
+  const [dial, at] = await Promise.all([knob(box, "Voice", "Brightness").boundingBox(), dot.boundingBox()]);
+  if (!dial || !at) throw new Error("the knob and its port are on the page");
+  expect(at.y).toBeGreaterThan(dial.y + dial.height);
+  expect(Math.abs(at.x + at.width / 2 - (dial.x + dial.width / 2))).toBeLessThan(8);
+  const shown = await heights(box, 1);
+  expect(shown.drawn).toBe(shown.said);
+
+  // Dragged to a parameter of the reverb, which is outside the module: one cable, which the page says is the macro's, and which starts at the knob's port.
+  await drag(page, dot, port(reverb, "decay"));
+  await expect(cables(page)).toHaveCount(1);
+  await expect(page.getByRole("slider", { name: "Depth of Brightness → Reverb: decay" })).toBeVisible();
+  const start = (await cablePoints(page, 4))[0];
+  const now = await dot.boundingBox();
+  if (!start || !now) throw new Error("the cable and the port are on the page");
+  expect(Math.hypot(start.x - (now.x + now.width / 2), start.y - (now.y + now.height))).toBeLessThan(8);
+  // (It is a step of its own that Undo takes away and Redo gives back.)
+  await page.getByRole("button", { name: "Undo draw a cable" }).click();
+  await expect(cables(page)).toHaveCount(0);
+  await page.getByRole("button", { name: "Redo draw a cable" }).click();
+  await expect(cables(page)).toHaveCount(1);
+
+  // The menu in the corner of the knob lists what the macro can still drive, plugin by plugin (the parameter that it drives already is not among them), and a choice is a cable from the same port.
+  await knob(box, "Voice", "Brightness").hover();
+  await box.getByRole("button", { name: "Add a cable from Brightness" }).click();
+  const menu = page.getByRole("menu", { name: "Add a cable from Brightness" });
+  await expect(menu.getByRole("group", { name: "Reverb" }).getByRole("menuitem", { name: "decay", exact: true })).toHaveCount(0);
+  await menu.getByRole("group", { name: "Reverb" }).getByRole("menuitem", { name: "size", exact: true }).click();
+  await expect(cables(page)).toHaveCount(2);
+  await expect(page.getByRole("slider", { name: "Depth of Brightness → Reverb: size" })).toBeVisible();
+  await expect(box.getByRole("button", { name: "Add a cable from Brightness" })).toBeFocused();
+
+  // Open, the macro is its node, with its cables; closed again, they are drawn from the knob once more.
+  await page.getByRole("button", { name: "Open Voice" }).click();
+  await expect(node(page, "Brightness")).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Depth of Brightness → Reverb: decay" })).toBeVisible();
+  await page.getByRole("button", { name: "Close Voice" }).click();
+  await expect(knobPort(node(page, "Voice"), "Voice", "Brightness")).toBeVisible();
+  await expect(cables(page)).toHaveCount(2);
+});
+
+mock("a knob that comes to a box that is as tall as it was has its port found: Undo shows the knob that was hidden, and a cable is dragged from its port at once", async ({ page }) => {
+  await open(page);
+  await macroOn(node(page, "Filter"), "resonance");
+  await showAll(page);
+  await rename(page, "Macro", "Brightness");
+  await macroOn(node(page, "Filter"), "cutoff");
+  await collapse(page, ["LFO", "Brightness", "Macro", "Oscillator", "Filter"], "Voice");
+  await addFree(page, "Reverb", "Reverb");
+  await showAll(page);
+  const box = node(page, "Voice");
+  // One of the two is told, in the open module, not to show its knob: the box that it is closed again to has the one.
+  await page.getByRole("button", { name: "Open Voice" }).click();
+  await node(page, "Macro").getByRole("combobox", { name: "Expose" }).selectOption("off");
+  await expect(page.getByRole("button", { name: "Undo hide a macro from its box" })).toBeVisible();
+  await page.getByRole("button", { name: "Close Voice" }).click();
+  await expect(knobs(box, "Voice").getByRole("slider")).toHaveCount(1);
+  await expect(knobPort(box, "Voice", "Macro")).toHaveCount(0);
+  const alone = await heights(box, 1);
+  expect(alone.drawn).toBe(alone.said);
+  // Undo shows it again, beside the other: the box is as tall as it was (a row of four), so that its size says nothing of the port that came, and the port is found all the same (the canvas hands React Flow a node that it has not measured).
+  await page.getByRole("button", { name: "Undo hide a macro from its box" }).click();
+  await expect(knobs(box, "Voice").getByRole("slider")).toHaveCount(2);
+  const both = await heights(box, 2);
+  expect(both.drawn).toBe(alone.drawn);
+  await showAll(page);
+  await still(box);
+  await drag(page, knobPort(box, "Voice", "Macro"), port(node(page, "Reverb"), "decay"));
+  await expect(cables(page)).toHaveCount(1);
+  await expect(page.getByRole("slider", { name: "Depth of Macro → Reverb: decay" })).toBeVisible();
+});
+
 test("the real program keeps the name and the flag of a macro in its file, a page that is opened again draws the knob on the box, or does not, and Undo and the box's knob go through the program's history", async ({ page, own }) => {
   test.slow();
   await page.setViewportSize({ width: 1600, height: 1000 });
@@ -188,4 +282,50 @@ test("the real program keeps the name and the flag of a macro in its file, a pag
   await expect(page.getByRole("status")).toHaveText("Connected");
   await expect(knob(node(page, "Voice"), "Voice", "Brightness")).toHaveAttribute("aria-valuenow", "1");
   expect(await names(page)).toContain("Voice");
+});
+
+test("the real program keeps a cable from the macro on a box to a parameter outside the module: it is the macro's cable in the file, a page that is opened again draws it from the knob of the box, and when the module is taken apart the macro is a node again with both its cables", async ({ page, own }) => {
+  test.slow();
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto(own.url);
+  await expect(page.getByRole("status")).toHaveText("Connected");
+  await expect(page.getByRole("slider", { name: "Depth of LFO → Filter: cutoff" })).toBeVisible();
+  await macroOn(node(page, "Filter"), "resonance");
+  await showAll(page);
+  await rename(page, "Macro", "Brightness");
+  await collapse(page, ["LFO", "Brightness", "Oscillator", "Filter"], "Voice");
+  await addFree(page, "Reverb", "Reverb");
+  await showAll(page);
+  const box = node(page, "Voice");
+  await drag(page, knobPort(box, "Voice", "Brightness"), port(node(page, "Reverb"), "decay"));
+  await expect(cables(page)).toHaveCount(1);
+  await expect(page.getByRole("slider", { name: "Depth of Brightness → Reverb: decay" })).toBeVisible();
+
+  // The file has the cable among the macro's: the one to the filter that is in the module, and the one to the reverb that is not (a lane of its own that has no instrument).
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved", { exact: true })).toBeVisible();
+  const parts = modulatorsIn(readFileSync(own.file, "utf8"));
+  expect(parts).toHaveLength(2);
+  expect(parts[1]).toContain('name = "Brightness"');
+  expect(parts[1]).toContain('param = "resonance"\nto = "instrument[0].effect[0]"');
+  expect(parts[1]).toContain('param = "decay"\nto = "instrument[1].effect[0]"');
+
+  // A page that is opened again has the module as a box, and the cable is drawn from the knob of the macro on it.
+  await page.reload();
+  await expect(page.getByRole("status")).toHaveText("Connected");
+  await expect(node(page, "Voice")).toBeVisible();
+  await expect(cables(page)).toHaveCount(1);
+  await expect(page.getByRole("slider", { name: "Depth of Brightness → Reverb: decay" })).toBeVisible();
+  const dot = knobPort(node(page, "Voice"), "Voice", "Brightness");
+  const [start, at] = await Promise.all([cablePoints(page, 4).then((points) => points[0]), dot.boundingBox()]);
+  if (!start || !at) throw new Error("the cable and the port are on the page");
+  expect(Math.hypot(start.x - (at.x + at.width / 2), start.y - (at.y + at.height))).toBeLessThan(8);
+
+  // Taken apart, the box is gone and the macro is a node again with both its cables: the one to the reverb is drawn from the node.
+  await node(page, "Voice").getByRole("button", { name: "Remove Voice" }).click();
+  await page.getByRole("menuitem", { name: /^Ungroup Voice/ }).click();
+  await expect(node(page, "Voice")).toHaveCount(0);
+  await expect(node(page, "Brightness")).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Depth of Brightness → Reverb: decay" })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Depth of Brightness → Filter: resonance" })).toBeVisible();
 });

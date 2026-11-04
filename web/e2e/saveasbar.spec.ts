@@ -5,7 +5,7 @@ import { open } from "./canvas";
 
 // The bar at the top of the page with the field of Save as open, against the mock engine in the page: it fits the windows the page is used in (the page does not
 // scroll sideways, what the bar says stays on a line and nothing in it is over anything else), and in a window that is wide enough the field takes no room from the
-// rest: the bar is as tall as it was. (With the field open the bar needs 1,467 pixels in a row: 1,555 before the bar lost the button that adds a group (step 103), 1,444 before the button that adds a modulator that is in no lane, 1,358 before the one that adds an effect that stands by itself, and 1,265 before the one that adds a source of notes.)
+// rest: the bar is as tall as it was. (With the field open the bar needs 1,561 pixels in a row: 1,467 before the bar had the button that adds a module (step 111), 1,555 before it lost the button that adds a group (step 103), 1,444 before the button that adds a modulator that is in no lane, 1,358 before the one that adds an effect that stands by itself, and 1,265 before the one that adds a source of notes.)
 
 interface Fit {
   /** How far the page scrolls sideways: more than the window is wide, or not. */
@@ -43,7 +43,7 @@ function fit(page: Page): Promise<Fit> {
   });
 }
 
-/** The width from which the open bar is as tall as the closed one: it needs 1,467 pixels in a row (1,555 before the bar lost the button that adds a group, 1,444 before the button that adds a modulator that is in no lane, 1,358 before the one that adds an effect that stands by itself, 1,265 before the one that adds a source of notes). */
+/** The width from which the open bar is as tall as the closed one: it needs 1,561 pixels in a row (1,467 before the bar had the button that adds a module, 1,555 before it lost the button that adds a group, 1,444 before the button that adds a modulator that is in no lane, 1,358 before the one that adds an effect that stands by itself, 1,265 before the one that adds a source of notes). */
 const ONE_ROW = 1600;
 
 for (const width of [1700, ONE_ROW, 1280, 1100, 1000, 900]) {

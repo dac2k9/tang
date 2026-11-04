@@ -226,9 +226,76 @@ describe("the knobs that a box shows (step 110)", () => {
       edges: [],
     };
     const collapsed = run(graph);
-    expect(collapsed.boxes.get(1)?.knobs).toEqual([{ member: 20, label: "First" }]);
-    expect(collapsed.boxes.get(4)?.knobs).toEqual([{ member: 21, label: "Second" }]);
+    expect(collapsed.boxes.get(1)?.knobs.map((knob) => [knob.member, knob.label])).toEqual([[20, "First"]]);
+    expect(collapsed.boxes.get(4)?.knobs.map((knob) => [knob.member, knob.label])).toEqual([[21, "Second"]]);
     expect(collapsed.graph.nodes.map((node) => node.id)).toEqual([22, 1, 4, MASTER]);
+  });
+});
+
+describe("the port of a knob that a box shows (step 111)", () => {
+  /** A module (1) of a lane (2) that holds a filter (3) and the macro 20; outside it a lane (10) with a reverb (11), and a modulator (30). */
+  const graph = (...edges: Graph["edges"]): Graph => ({
+    nodes: [lane(2, "Chain", null), effect(3, 2, "Filter"), macro(20, "Brightness", { name: "Brightness" }), lane(10, "Oscillator"), effect(11, 10, "Reverb"), modulator(30, "LFO"), module(1, "Room", [2, 20]), master],
+    edges: [link(2, 3), link(10, 11), ...edges],
+  });
+
+  test("has what the macro can still be drawn to, as a modulator's node has it: the parameters of every plugin of the session and the settings of the modulators, which the macro does not drive already", () => {
+    const targets = run(graph(drives(5, 20, 11, 1))).boxes.get(1)?.knobs[0]?.targets ?? [];
+    // (The filter in the module is a target as well, though it is on no canvas while the box is closed; the reverb's first parameter has a cable from the macro already, and the LFO's rate is a setting that a cable can end at.)
+    expect(targets.map((group) => group.node)).toEqual([3, 10, 11, 30]);
+    const reverb = targets.find((group) => group.node === 11);
+    expect(reverb?.params.map((param) => param.index)).toEqual([3, 5]);
+    expect(targets.find((group) => group.node === 30)?.fields.map((field) => field.port.type)).toEqual(["rate"]);
+    // (What each is called is what the canvas calls it.)
+    expect(targets.map((group) => group.name)).toEqual(["Filter", "Oscillator", "Reverb", "LFO"]);
+  });
+
+  test("is a macro's knob and nothing else's: another macro that shows its knob has its own list, which has the cable of its own and not the first one's", () => {
+    const both: Graph = { ...graph(drives(5, 20, 11, 1)), nodes: [...graph().nodes.slice(0, 3), macro(21, "Cutoff"), ...graph().nodes.slice(3)] };
+    const withBoth: Graph = { nodes: both.nodes.map((node) => (node.kind === "module" ? { ...node, members: [2, 20, 21] } : node)), edges: both.edges };
+    const [first, second] = run(withBoth).boxes.get(1)?.knobs ?? [];
+    expect(first?.member).toBe(20);
+    expect(second?.member).toBe(21);
+    expect(first?.targets.find((group) => group.node === 11)?.params.map((param) => param.index)).toEqual([3, 5]);
+    expect(second?.targets.find((group) => group.node === 11)?.params.map((param) => param.index)).toEqual([1, 3, 5]);
+  });
+
+  test("is the box's port for the macro, so that the cables of a macro that shows its knob are drawn from the knob, and not from a port on the bottom edge as well: a handle of a box is named once", () => {
+    const collapsed = run(graph(drives(5, 20, 11, 1)));
+    expect(collapsed.boxes.get(1)?.modOut).toEqual([]);
+    // (The cable is drawn from the box, by the handle that the knob has: `modOut` of the macro.)
+    const cable = collapsed.edges.find((placed) => placed.real.kind === "modulation");
+    expect([cable?.edge.from.node, cable?.sourceHandle, cable?.edge.to.node, cable?.targetHandle]).toEqual([1, "modOut@20", 11, "param-1"]);
+  });
+
+  test("is not there for a macro that is told not to show its knob, which has a port on the bottom edge for a cable that leaves the box, as any modulator in it has, and for any other modulator that drives something outside", () => {
+    const hidden: Graph = {
+      nodes: [lane(2, "Chain", null), effect(3, 2, "Filter"), macro(20, "Macro", { expose: false }), modulator(21, "LFO"), lane(10, "Oscillator"), effect(11, 10, "Reverb"), module(1, "Room", [2, 20, 21]), master],
+      edges: [link(2, 3), link(10, 11), drives(5, 20, 11, 1), drives(6, 21, 11, 3)],
+    };
+    const box = run(hidden).boxes.get(1);
+    expect(box?.knobs).toEqual([]);
+    expect(box?.modOut.map((port) => [port.member, port.handle, port.kind])).toEqual([
+      [20, "modOut", "modulation"],
+      [21, "modOut", "modulation"],
+    ]);
+  });
+
+  test("keeps the port of another modulator that drives something outside, beside a macro that shows its knob: only the macro's port is the knob's", () => {
+    const mixed: Graph = {
+      nodes: [lane(2, "Chain", null), effect(3, 2, "Filter"), macro(20, "Brightness", { name: "Brightness" }), modulator(21, "LFO"), lane(10, "Oscillator"), effect(11, 10, "Reverb"), module(1, "Room", [2, 20, 21]), master],
+      edges: [link(2, 3), link(10, 11), drives(5, 20, 11, 1), drives(6, 21, 11, 3)],
+    };
+    const box = run(mixed).boxes.get(1);
+    expect(box?.knobs.map((knob) => knob.member)).toEqual([20]);
+    expect(box?.modOut.map((port) => [port.member, port.label])).toEqual([[21, "LFO"]]);
+  });
+
+  test("keeps a macro's port at the knob when the cable goes to something in the module, which no box draws: the knob has the port whether there is a cable or not", () => {
+    const inside = run(graph(drives(5, 20, 3, 1))).boxes.get(1);
+    expect(inside?.modOut).toEqual([]);
+    expect(inside?.knobs.map((knob) => knob.member)).toEqual([20]);
+    expect(run(graph()).boxes.get(1)?.knobs.map((knob) => knob.member)).toEqual([20]);
   });
 });
 

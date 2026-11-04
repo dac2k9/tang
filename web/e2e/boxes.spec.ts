@@ -4,7 +4,7 @@ import { expect, test as mock } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 import { audioIn, audioOut, boxIn, boxOut, centre, drag, expectNodesApart, flowBoxes, node, open, showAll, still } from "./canvas";
-import { addEffect, boxRound, choose, names, save, saveChosen } from "./modules";
+import { addModuleButton, boxRound, choose, names, save, saveChosen } from "./modules";
 import { test } from "./own";
 
 // A module that is added is one box on the canvas (docs/web-ui.md D108; the user's "the goal when we re-add a module is that it gets rendered like just a single box"): the box says what is in it and has the ports of the module, a cable
@@ -21,9 +21,9 @@ async function saveVoice(page: Page, name: string): Promise<void> {
   await choose(page).click();
 }
 
-/** Add the module called `name` from the bar's "+ Effect", and wait for its box to be where it stays. */
+/** Add the module called `name` from the bar's "+ Module", and wait for its box to be where it stays. */
 async function addModule(page: Page, name: string) {
-  await addEffect(page).click();
+  await addModuleButton(page).click();
   await page.getByRole("menuitem", { name, exact: true }).click();
   const box = node(page, name);
   await expect(box).toBeVisible();

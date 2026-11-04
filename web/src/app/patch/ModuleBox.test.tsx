@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { ReactFlow, ReactFlowProvider } from "@xyflow/react";
 import type { NodeTypes } from "@xyflow/react";
-import { cleanup, fireEvent, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
 
+import { macrosFixture } from "../../client/fixtures";
 import { rig } from "../testing";
 import type { Box } from "./boxes";
 import { ConnectingContext } from "./connection";
@@ -163,5 +164,76 @@ describe("a box", () => {
     );
     await screen.findByTestId("rf__node-1");
     expect(view.container.querySelector(".tang-node--module")).toBeNull();
+  });
+});
+
+// The knob of a macro on a box (steps 110 and 111): the macro is a node of the macros fixture (3, which has no name, and 4, which hides its knob), and the box is made by hand, with the knob as the canvas makes it.
+describe("the knob of a macro on a box", () => {
+  const filterTargets = [{ node: 1, name: "Filter", params: [{ index: 1, name: "cutoff" }, { index: 3, name: "resonance" }], fields: [{ port: { type: "mix" } as const, name: "mix" }] }];
+  const knobbed: Box = { ...box, inputs: [], outputs: [], modIn: [], modOut: [], knobs: [{ member: 3, label: "Brightness", targets: filterTargets }] };
+  const withKnobs = (shown: Box): PatchNode => ({ ...node, data: { ...node.data, box: shown } });
+  const session = { snapshot: macrosFixture.snapshot };
+
+  async function drawnKnob(shown: Box = knobbed) {
+    const made = await rig(
+      <ReactFlowProvider>
+        <OpenModulesContext.Provider value={{ open: new Set(), toggle: () => undefined }}>
+          <div style={{ width: 800, height: 600 }}>
+            <ReactFlow nodes={[withKnobs(shown)]} edges={[]} nodeTypes={NODE_TYPES} />
+          </div>
+        </OpenModulesContext.Provider>
+      </ReactFlowProvider>,
+      session,
+    );
+    await screen.findByTestId("rf__node-1");
+    const cell = within(made.view.container).getByRole("group", { name: "Knobs of Room" }).querySelector<HTMLElement>(".tang-cell");
+    if (!cell) throw new Error("the box has a cell for the knob");
+    return { ...made, cell };
+  }
+
+  test("has a port in its cell for the macro's own output, which starts a cable and takes none, at the foot of the cell, named for the macro and called by what it does", async () => {
+    const { cell } = await drawnKnob();
+    const port = cell.querySelector<HTMLElement>(".react-flow__handle");
+    if (!port) throw new Error("the knob has a port");
+    expect(port.getAttribute("data-handleid")).toBe("modOut@3");
+    expect(port.getAttribute("data-handlepos")).toBe("bottom");
+    expect(port.classList.contains("source")).toBe(true);
+    expect(port.classList.contains("connectablestart")).toBe(true);
+    expect(port.classList.contains("connectableend")).toBe(false);
+    expect(port.classList.contains("tang-port--mod")).toBe(true);
+    expect(port.getAttribute("title")).toBe("Draw a cable from Brightness");
+    // (It is the only handle that the knob has, and the box has no other for the macro.)
+    expect(cell.querySelectorAll(".react-flow__handle")).toHaveLength(1);
+    expect(document.querySelectorAll('[data-handleid="modOut@3"]')).toHaveLength(1);
+  });
+
+  test("has a port for each knob that the box shows, named for its macro", async () => {
+    const two: Box = { ...knobbed, knobs: [...knobbed.knobs, { member: 4, label: "Wet", targets: [] }] };
+    const { view } = await drawnKnob(two);
+    const grid = within(view.container).getByRole("group", { name: "Knobs of Room" });
+    expect(Array.from(grid.querySelectorAll(".react-flow__handle")).map((port) => port.getAttribute("data-handleid"))).toEqual(["modOut@3", "modOut@4"]);
+    expect(Array.from(grid.querySelectorAll(".tang-cell")).map((cell) => cell.querySelectorAll(".react-flow__handle").length)).toEqual([1, 1]);
+  });
+
+  test("has a button in the corner of its cell that draws a cable from the macro, from a menu of what the macro can still drive, plugin by plugin, and a choice is the cable", async () => {
+    const { cell, requests } = await drawnKnob();
+    const button = within(cell).getByRole("button", { name: "Add a cable from Brightness" });
+    expect(button.textContent).toBe("→");
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(button.classList.contains("tang-drives--cell")).toBe(true);
+    fireEvent.click(button);
+    const menu = await screen.findByRole("menu", { name: "Add a cable from Brightness" });
+    const group = within(menu).getByRole("group", { name: "Filter" });
+    expect(within(group).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["cutoff", "resonance", "mix"]);
+    fireEvent.click(within(group).getByRole("menuitem", { name: "resonance" }));
+    await waitFor(() => {
+      expect(requests()).toEqual([{ intent: { type: "addModEdge", modulator: 3, to: { node: 1, port: { type: "param", index: 3 } } } }]);
+    });
+  });
+
+  test("has a button that is shut while the macro has nothing to be drawn to, which a screen reader says in its name and the pointer does not show", async () => {
+    const { cell } = await drawnKnob({ ...knobbed, knobs: [{ member: 3, label: "Brightness", targets: [] }] });
+    const button = within(cell).getByRole<HTMLButtonElement>("button", { name: "Add a cable from Brightness" });
+    expect(button.disabled).toBe(true);
   });
 });

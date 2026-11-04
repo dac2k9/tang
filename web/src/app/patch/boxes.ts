@@ -8,6 +8,8 @@ import { macroExposed } from "../../client/macros";
 import { endLabel, portName } from "../../client/names";
 import type { Names } from "../../client/names";
 import { laneTakesNotes } from "../../client/noteWiring";
+import { drivablesOf } from "../../client/reach";
+import type { Drivable } from "../../client/reach";
 import type { Edge, Endpoint, Graph, Node, NodeId } from "../../protocol";
 import { handleOf, memberHandle } from "./handles";
 
@@ -23,12 +25,17 @@ export interface BoxPort {
   kind: "audio" | "notes" | "modulation";
 }
 
-/** A knob that a box shows for something inside the module (step 110: the value of a macro that is not hidden from it): the macro's own knob, turned where it is. */
+/**
+ * A knob that a box shows for something inside the module (step 110: the value of a macro that is not hidden from it): the macro's own knob, turned where it is. It is where the macro's cables are started and drawn from
+ * (step 111: the user's "attach cables to the macro on the box"): its port is the handle `modOut@member` of the box, which a closed box has nowhere else for a macro that shows its knob.
+ */
 export interface BoxKnob {
   /** The macro, a modulator inside the module: the knob is its value. */
   member: NodeId;
   /** What to call it, for a person: the macro's name (`Brightness`, or `Macro 1` for one that has none: `displayNames` numbers the names that more than one node has). */
   label: string;
+  /** What the macro can still be drawn to (`drivablesOf`, as a modulator's node has it): the knob's menu lists it, and a cable that is dragged from the knob's port is looked up in it (`drawableFrom`), since the macro itself is no node of the canvas. */
+  targets: readonly Drivable[];
 }
 
 /** What a box has of the module it is: how much is inside it, its ports and its knobs. */
@@ -45,7 +52,7 @@ export interface Box {
   outputs: readonly BoxPort[];
   /** The cables of modulation that go into the module, from outside it, by the port of the node inside that each ends at (the top edge). */
   modIn: readonly BoxPort[];
-  /** The modulators inside the module that drive something outside it (the bottom edge). */
+  /** The modulators inside the module that drive something outside it (the bottom edge), but for a macro that shows its knob: the knob's port is its own (`BoxKnob`). */
   modOut: readonly BoxPort[];
   /** The knobs of the macros inside the module that show on the box, in the order of the graph (a macro that is told not to is not among them): a grid under the ports, `CONTROLS_PER_ROW` in a row. */
   knobs: readonly BoxKnob[];
@@ -205,7 +212,7 @@ export function collapse(graph: Graph, names: Names, open: ReadonlySet<NodeId>):
         if (laneTakesNotes(node)) add(notesIn, { node: node.id, port: { type: "eventsIn" } }, "notes", called(node.id));
       } else if (node.kind === "modulator") {
         modulators += 1;
-        if (node.source.type === "macro" && macroExposed(node.source)) knobs.push({ member: node.id, label: called(node.id) });
+        if (node.source.type === "macro" && macroExposed(node.source)) knobs.push({ member: node.id, label: called(node.id), targets: drivablesOf(graph, node.id, names) });
       }
     }
     for (const { module: of, end } of crossing) {
@@ -222,7 +229,8 @@ export function collapse(graph: Graph, names: Names, open: ReadonlySet<NodeId>):
           add(notesIn, end, "notes", called(end.node));
           break;
         case "modOut":
-          add(modOut, end, "modulation", called(end.node));
+          // (A macro that shows its knob has its port there, where a cable is started, and not on the bottom edge as well: a handle of a box is named once.)
+          if (!knobs.some((knob) => knob.member === end.node)) add(modOut, end, "modulation", called(end.node));
           break;
         default:
           // (A cable of modulation that ends at a parameter, a volume, a mix, a pan, a setting of a modulator or the depth of a cable inside.)

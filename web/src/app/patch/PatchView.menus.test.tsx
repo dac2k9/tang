@@ -120,6 +120,30 @@ describe("the menu of the canvas", () => {
     expect(screen.getByRole("menuitem", { name: "Add a source of notes" }).getAttribute("aria-disabled")).toBeNull();
   });
 
+  test("puts a module where the pointer was, from a menu of its own (step 111): it asks for the module, and then for the box to be put there, and a menu with no module in it is shut", async () => {
+    const space = { lanes: [{ instrument: null, effects: [{ plugin: "builtin:reverb", preset: null, params: {}, mix: 0.4, pinned: [], fed: true }] }], cables: [], modulators: [] };
+    const none = await rigged();
+    fireEvent.contextMenu(await pane(), { clientX: 100, clientY: 100 });
+    expect(screen.getByRole("menuitem", { name: "Add a module" }).getAttribute("aria-disabled")).toBe("true");
+    expect(none.requests()).toEqual([]);
+    cleanup();
+    const { requests } = await rig(<PatchView />, { snapshot: tracerSnapshot, modules: { Space: space } });
+    fireEvent.contextMenu(await pane(), { clientX: 160, clientY: 120 });
+    const entry = screen.getByRole("menuitem", { name: "Add a module" });
+    expect(entry.getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(entry);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Space" }));
+    await waitFor(() => {
+      expect(asked(requests).map((intent) => intent.type)).toEqual(["addFreeEffect", "setNodeUi"]);
+    });
+    expect(asked(requests)[0]).toEqual({ type: "addFreeEffect", plugin: "module:Space" });
+    // The box is the module's node, which is the one that is put there.
+    await waitFor(() => {
+      expect(document.querySelectorAll(".tang-node--module")).toHaveLength(1);
+    });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   test("puts what is added where the pointer was, across as it was across and down as it was down", async () => {
     const { requests } = await rigged();
     for (const [x, y] of [

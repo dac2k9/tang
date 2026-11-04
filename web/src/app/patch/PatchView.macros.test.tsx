@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { macrosFixture } from "../../client/fixtures";
+import { macrosFixture, nodeNamed } from "../../client/fixtures";
 import { MockServer } from "../../client/mock";
 import type { Intent } from "../../protocol";
 import { NoticeBoard } from "../../ui/NoticeBoard";
@@ -242,6 +242,33 @@ describe("the box of a module that has macros in it", () => {
     // (The ports, and then the knobs, and then the line that says what is in the box.)
     const parts = Array.from(group.closest(".tang-node--module")?.children ?? []).map((child) => child.className.split(" ")[0]);
     expect(parts.slice(-3)).toEqual(["tang-box__ports", "tang-node__controls", "tang-node__detail"]);
+  });
+
+  test("has a port under each knob that a cable is started at, and a menu in its corner that draws one from the macro, to what the macro can still drive, which the session says and the closed box does not draw (step 111)", async () => {
+    const { requests } = await rig(<PatchView />, collapsed());
+    await screen.findByRole("button", { name: "Open Room" });
+    const cell = grid().querySelector<HTMLElement>(".tang-cell");
+    if (!cell) throw new Error("the knob has a cell");
+    // The port is the macro's own output, named for the macro: the one handle that the knob has, and the box has no other for it.
+    const port = cell.querySelector<HTMLElement>(".react-flow__handle");
+    expect(port?.getAttribute("data-handleid")).toBe(`modOut@${String(KNOB)}`);
+    expect(port?.classList.contains("connectablestart")).toBe(true);
+    expect(port?.classList.contains("connectableend")).toBe(false);
+    expect(document.querySelectorAll(`[data-handleid="modOut@${String(KNOB)}"]`)).toHaveLength(1);
+    // The macro that does not show its knob has no port on the box (its cables, if it had any, would be drawn from the bottom edge).
+    expect(document.querySelectorAll(`[data-handleid="modOut@${String(WET)}"]`)).toHaveLength(0);
+    // The menu lists the plugins of the session, the filter that is in the module as well, and the settings of the LFO that is not.
+    fireEvent.click(within(cell).getByRole("button", { name: "Add a cable from Macro" }));
+    const menu = await screen.findByRole("menu", { name: "Add a cable from Macro" });
+    const groups = within(menu).getAllByRole("group").map((group) => group.getAttribute("aria-label"));
+    expect(groups).toEqual(expect.arrayContaining(["Filter", "LFO"]));
+    const resonance = nodeNamed(macrosFixture.snapshot, "Filter");
+    const index = resonance.kind === "effect" ? resonance.plugin.params.find((param) => param.name === "resonance")?.index : undefined;
+    expect(index).toBeDefined();
+    fireEvent.click(within(within(menu).getByRole("group", { name: "Filter" })).getByRole("menuitem", { name: "resonance" }));
+    await waitFor(() => {
+      expect(asked(requests)).toEqual([{ type: "addModEdge", modulator: KNOB, to: { node: resonance.id, port: { type: "param", index } } }]);
+    });
   });
 
   test("opens into the nodes that are in it, where each macro has its own knob and choice, and the box has none; it closes again with the knobs back", async () => {

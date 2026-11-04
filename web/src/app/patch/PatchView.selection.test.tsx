@@ -89,7 +89,7 @@ describe("choosing nodes on the canvas", () => {
     fireEvent.change(field, { target: { value: " Voice " } });
     fireEvent.submit(formOf(field));
     await waitFor(() => {
-      expect(noticeTexts()).toEqual(['Saved the module "Voice": + Effect adds it']);
+      expect(noticeTexts()).toEqual(['Saved the module "Voice": + Module adds it']);
     });
     expect(asked(requests)).toEqual([{ type: "saveSelectionAsModule", nodes: [oscillator.id], name: " Voice " }]);
     await waitFor(() => {

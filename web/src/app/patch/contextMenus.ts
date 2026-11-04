@@ -2,7 +2,7 @@
 // (`ContextItem.run`), made from the session as it is when the menu is opened (the menus are looked up when a person asks for them, not each time anything changes), by what the buttons of the page already say: the menus of
 // a node's header, the bar's "+" menus, the keys that Undo and Redo. A choice asks the editor, which says among the notices why if the server refuses it, and the things that are the canvas's own (the panel of the parameters, a
 // node's scope, what is chosen, the arrangement) are asked of `CanvasActions`. So there is one place that says what a node can be asked to do, and the menu and the buttons agree.
-import { effectItems, freeEffectItems, instrumentItems } from "../../client/catalog";
+import { effectItems, instrumentItems, moduleItems } from "../../client/catalog";
 import type { ClientState } from "../../client/connection";
 import type { Editor } from "../../client/editor";
 import { EVERY_NOTE, earItems } from "../../client/hears";
@@ -27,6 +27,7 @@ export type MenuEditor = Pick<
   Editor,
   | "addInstrument"
   | "addFreeEffect"
+  | "addModule"
   | "addFreeModulator"
   | "addSource"
   | "addEffect"
@@ -464,8 +465,7 @@ export function paneMenu(deps: MenuDeps): ContextItem[] {
     submenu(
       "add-effect",
       "Add an effect",
-      // (A module is one box on the canvas, and goes where the pointer was as an effect does.)
-      choosing(freeEffectItems(entries), (plugin) => {
+      choosing(effectItems(entries), (plugin) => {
         void editor.addFreeEffect(plugin, at);
       }),
       "No effect is installed",
@@ -487,6 +487,15 @@ export function paneMenu(deps: MenuDeps): ContextItem[] {
         },
       })),
       "The keys and every input that is open are sources already",
+    ),
+    submenu(
+      "add-module",
+      "Add a module",
+      // (A module is one box on the canvas, and goes where the pointer was as anything that is added does.)
+      choosing(moduleItems(entries), (module) => {
+        void editor.addModule(module, at);
+      }),
+      "No module is saved: choose nodes and save them as a module",
     ),
     {
       id: "undo",

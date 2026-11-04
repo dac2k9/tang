@@ -3,10 +3,13 @@ import type { Page } from "@playwright/test";
 
 import { node, nodeBoxes, still } from "./canvas";
 
-// What the tests of modules have in common (docs/web-ui.md D104 to D108): the bar's "+ Effect", saving the chain of a lane or the nodes that a box is drawn round, and adding what was saved.
+// What the tests of modules have in common (docs/web-ui.md D104 to D108 and D111): the bar's "+ Effect" and "+ Module", saving the chain of a lane or the nodes that a box is drawn round, and adding what was saved.
 
 /** The button in the bar that adds an effect. */
 export const addEffect = (page: Page) => page.getByRole("button", { name: "Add an effect", exact: true });
+
+/** The button in the bar that adds a module (step 111: the modules that were saved are listed here, and not in the effects'). */
+export const addModuleButton = (page: Page) => page.getByRole("button", { name: "Add a module", exact: true });
 
 /** The names of the nodes of the canvas, in the order of the page. */
 export const names = (page: Page): Promise<string[]> => page.locator(".tang-node__name").allTextContents();
@@ -18,7 +21,7 @@ export async function save(page: Page, lane: string, name: string): Promise<void
   await expect(dialog.getByRole("textbox", { name: "Module name" })).toBeFocused();
   await dialog.getByRole("textbox", { name: "Module name" }).fill(name);
   await dialog.getByRole("textbox", { name: "Module name" }).press("Enter");
-  await expect(page.getByText(`Saved the module "${name}": + Effect adds it`)).toBeVisible();
+  await expect(page.getByText(`Saved the module "${name}": + Module adds it`)).toBeVisible();
   await expect(dialog).toHaveCount(0);
 }
 
@@ -55,6 +58,6 @@ export async function saveChosen(page: Page, name: string): Promise<void> {
   await expect(dialog.getByRole("textbox", { name: "Module name" })).toBeFocused();
   await dialog.getByRole("textbox", { name: "Module name" }).fill(name);
   await dialog.getByRole("textbox", { name: "Module name" }).press("Enter");
-  await expect(page.getByText(`Saved the module "${name}": + Effect adds it`)).toBeVisible();
+  await expect(page.getByText(`Saved the module "${name}": + Module adds it`)).toBeVisible();
   await expect(dialog).toHaveCount(0);
 }

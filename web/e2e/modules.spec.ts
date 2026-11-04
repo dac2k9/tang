@@ -4,14 +4,14 @@ import { join } from "node:path";
 import { expect, test as mock } from "@playwright/test";
 
 import { audioIn, audioOut, boxIn, boxOut, cables, centre, drag, node, open, showAll } from "./canvas";
-import { addEffect, addFree, boxRound, choose, names, save, saveChosen } from "./modules";
+import { addEffect, addFree, addModuleButton, boxRound, choose, names, save, saveChosen } from "./modules";
 import { test } from "./own";
 import { heardAt, silentAt } from "./sound";
 
-// A chain of effects saved as a module and added again (docs/web-ui.md D104): the button in the cell of a lane that saves its chain under a name, and the bar's "+ Effect", which lists what was saved and adds it in a lane
-// of its own, with the effects it was saved with. The first test is against the mock engine in the page (what the canvas draws and says), the second against the real program, which keeps the module in a file.
+// A chain of effects saved as a module and added again (docs/web-ui.md D104): the button in the cell of a lane that saves its chain under a name, and the bar's "+ Module" (until step 111 "+ Effect"), which lists what was saved and adds it
+// as one box, with the effects it was saved with. The first test is against the mock engine in the page (what the canvas draws and says), the second against the real program, which keeps the module in a file.
 
-mock("a lane that has a chain of effects saves it as a module from its cell, and the bar's + Effect adds it: a lane of its own with the effects it was saved with, which Undo takes out and Redo gives back", async ({ page }) => {
+mock("a lane that has a chain of effects saves it as a module from its cell, and the bar's + Module adds it: a lane of its own with the effects it was saved with, which Undo takes out and Redo gives back", async ({ page }) => {
   await open(page);
   // The button is in the cell of the lane that has a chain, beside its mute and its solo.
   const cell = node(page, "Oscillator").locator(".tang-cell").filter({ has: page.getByRole("button", { name: "Mute Oscillator" }) });
@@ -31,11 +31,18 @@ mock("a lane that has a chain of effects saves it as a module from its cell, and
   await expect(page.getByRole("textbox", { name: "Module name" })).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
-  // Saved: the page says so, and the bar's menu has the module, first, under a heading of its own; the lane's own menu does not have it.
+  // Saved: the page says so, and the bar's button for modules has it, under no heading (it is shut until one is saved); the menu of effects does not have it, and the lane's own menu does not either.
+  await expect(addModuleButton(page)).toBeDisabled();
   await save(page, "Oscillator", "Tracer chain");
+  await expect(addModuleButton(page)).toBeEnabled();
+  await addModuleButton(page).click();
+  const menu = page.getByRole("menu", { name: "Add a module" });
+  await expect(menu.getByRole("menuitem")).toHaveText(["Tracer chain"]);
+  await expect(menu.getByRole("group")).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await addEffect(page).click();
-  const menu = page.getByRole("menu", { name: "Add an effect" });
-  await expect(menu.getByRole("group", { name: "Module" }).getByRole("menuitem")).toHaveText(["Tracer chain"]);
+  await expect(page.getByRole("menu", { name: "Add an effect" }).getByRole("menuitem", { name: "Tracer chain" })).toHaveCount(0);
+  await expect(page.getByRole("menu", { name: "Add an effect" }).getByRole("group", { name: "Module" })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Add an effect to Oscillator" }).click();
   await expect(page.getByRole("menu", { name: "Add an effect to Oscillator" }).getByRole("menuitem", { name: "Tracer chain" })).toHaveCount(0);
@@ -43,7 +50,7 @@ mock("a lane that has a chain of effects saves it as a module from its cell, and
 
   // Added: one box, with the lane of its own that holds a filter, as the tracer's lane has one, in it. The filter is on the canvas once the box is opened, with the lane's cell on it (and its button, since the chain is there).
   const before = await names(page);
-  await addEffect(page).click();
+  await addModuleButton(page).click();
   await page.getByRole("menuitem", { name: "Tracer chain", exact: true }).click();
   await expect.poll(() => names(page)).toHaveLength(before.length + 1);
   await expect(node(page, "Tracer chain")).toBeVisible();
@@ -78,7 +85,7 @@ test("a chain of effects is saved as a file of the library of the real program, 
   // (The page has the cut when the program has made it, and the engine has been told by then: a note is pressed after the cut and not beside it.)
   await expect(page.getByRole("button", { name: "Remove cable Filter → Master", exact: true })).toHaveCount(0);
   await silentAt(page, "the lane, with its way out cut");
-  await addEffect(page).click();
+  await addModuleButton(page).click();
   await page.getByRole("menuitem", { name: "Tracer filter", exact: true }).click();
   // (One box: the filter that is in it is not on the canvas, and the cables are drawn to the ports of the box, which are the filter's.)
   await expect(node(page, "Tracer filter")).toBeVisible();
@@ -103,18 +110,18 @@ test("a chain of effects is saved as a file of the library of the real program, 
   await page.reload();
   await expect(page.getByRole("status")).toHaveText("Connected");
   await expect(node(page, "Tracer filter")).toBeVisible();
-  await addEffect(page).click();
+  await addModuleButton(page).click();
   await expect(page.getByRole("menuitem", { name: "Tracer filter", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   const second = await browser.newPage();
   await second.goto(own.url);
   await expect(second.getByRole("status")).toHaveText("Connected");
-  await second.getByRole("button", { name: "Add an effect", exact: true }).click();
+  await second.getByRole("button", { name: "Add a module", exact: true }).click();
   await expect(second.getByRole("menuitem", { name: "Tracer filter", exact: true })).toBeVisible();
   await second.close();
 });
 
-mock("effects that stand by themselves, joined by cables, are chosen with a box and saved as one module, which + Effect adds as the same effects with the cables between them: one step that Undo takes out and Redo gives back", async ({ page }) => {
+mock("effects that stand by themselves, joined by cables, are chosen with a box and saved as one module, which + Module adds as the same effects with the cables between them: one step that Undo takes out and Redo gives back", async ({ page }) => {
   await open(page);
   // Three effects, each in a lane of its own, and a cable from the first to the second and from the second to the third: what a person builds on the canvas.
   await addFree(page, "Drive", "Drive");
@@ -146,8 +153,8 @@ mock("effects that stand by themselves, joined by cables, are chosen with a box 
   await choose(page).click();
   await expect(page.locator(".react-flow__node.selected")).toHaveCount(0);
   const before = await page.locator(".tang-node__name").allTextContents();
-  await addEffect(page).click();
-  await expect(page.getByRole("menu", { name: "Add an effect" }).getByRole("group", { name: "Module" }).getByRole("menuitem")).toHaveText(["Dub chain"]);
+  await addModuleButton(page).click();
+  await expect(page.getByRole("menu", { name: "Add a module" }).getByRole("menuitem")).toHaveText(["Dub chain"]);
   await page.getByRole("menuitem", { name: "Dub chain", exact: true }).click();
   // One box, with the three lanes and the two cables between them in it: they are on the canvas when it is opened.
   await expect.poll(async () => (await page.locator(".tang-node__name").allTextContents()).length).toBe(before.length + 1);
@@ -180,7 +187,7 @@ mock("a node that a module cannot hold is left out of what is saved and said so,
   await page.keyboard.up("Shift");
   await expect(page.getByRole("status").filter({ hasText: "2 chosen, 1 that a module cannot hold left out" })).toBeVisible();
   await saveChosen(page, "Tone");
-  await addEffect(page).click();
+  await addModuleButton(page).click();
   await expect(page.getByRole("menuitem", { name: "Tone", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   // (A click did not move the node: nodes are not moved while choosing is on.)
@@ -205,7 +212,7 @@ mock("a modulator that is chosen with the plugins that it drives is saved in the
 
   // Added: a lane with the oscillator and the filter, and a modulator, and the cable from the modulator to the new filter, in one step.
   const before = (await names(page)).length;
-  await addEffect(page).click();
+  await addModuleButton(page).click();
   await page.getByRole("menuitem", { name: "Tracer voice", exact: true }).click();
   // (One box: the new LFO and its cable are in it, and are on the canvas when it is opened.)
   await expect.poll(async () => (await names(page)).length).toBe(before + 1);
@@ -246,7 +253,7 @@ test("the tracer's LFO is chosen with the oscillator and the filter that it hear
   await choose(page).click();
 
   // Added: the oscillator and the filter in a lane of their own, and a modulator of the session's own that hears that lane and moves the new filter's cutoff.
-  await addEffect(page).click();
+  await addModuleButton(page).click();
   await page.getByRole("menuitem", { name: "Tracer voice", exact: true }).click();
   await page.getByRole("button", { name: "Open Tracer voice" }).click();
   await expect(node(page, "LFO 2")).toBeVisible();
@@ -285,7 +292,7 @@ test("effects joined by a cable are saved as one file of the real program's libr
   await choose(page).click();
 
   // Added: two lanes more and the cable between them (the session has the two that it was made from and their cable, and the two that the module made).
-  await addEffect(page).click();
+  await addModuleButton(page).click();
   await page.getByRole("menuitem", { name: "Dub pair", exact: true }).click();
   await page.getByRole("button", { name: "Open Dub pair" }).click();
   await expect(node(page, "Drive 2")).toBeVisible();

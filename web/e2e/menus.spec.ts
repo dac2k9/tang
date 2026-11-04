@@ -289,9 +289,9 @@ mock("what is chosen is saved as a module from the menu of the canvas, in a fiel
   expect(Math.abs((where?.x ?? 0) - spot.x)).toBeLessThan(3);
   await field.fill("Pair");
   await field.press("Enter");
-  await expect(page.getByText('Saved the module "Pair": + Effect adds it')).toBeVisible();
+  await expect(page.getByText('Saved the module "Pair": + Module adds it')).toBeVisible();
   await expect(dialog).toHaveCount(0);
-  await page.getByRole("button", { name: "Add an effect", exact: true }).click();
+  await page.getByRole("button", { name: "Add a module", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Pair", exact: true })).toBeVisible();
 });
 

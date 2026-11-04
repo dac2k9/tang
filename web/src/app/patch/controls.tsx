@@ -1021,9 +1021,10 @@ export const drivesId = (node: NodeId): string => `drives-${String(node)}`;
  * of another modulator, modulator by modulator: for a keyboard (which cannot drag a cable), and for the parameters a node
  * does not show as controls. It is a menu and not a native list: the arrow keys of a closed one change its value on some
  * platforms, which here is a cable on each key. Choosing a parameter or a setting is the cable; the menu closes and the
- * focus is on its button.
+ * focus is on its button. `cell` is the list as a glyph in the corner of a knob's cell, quiet until the pointer or the focus is on the knob, as a knob has
+ * its `~` (step 111: the knob of a macro on a box, which has no node of its own on the canvas to hold the list).
  */
-export const DrivePicker = memo(function DrivePicker({ modulator, name, targets }: { modulator: NodeId; name: string; targets: readonly Drivable[] }) {
+export const DrivePicker = memo(function DrivePicker({ modulator, name, targets, cell = false }: { modulator: NodeId; name: string; targets: readonly Drivable[]; cell?: boolean }) {
   const editor = useEditor();
   // What each item is the cable to: a node and a port of it, by the key of the port (`keyOf`).
   const { items, ends } = useMemo(() => {
@@ -1043,7 +1044,7 @@ export const DrivePicker = memo(function DrivePicker({ modulator, name, targets 
   return (
     <MenuButton
       id={drivesId(modulator)}
-      className="tang-drives"
+      className={cell ? "tang-drives--cell" : "tang-drives"}
       label={`Add a cable from ${name}`}
       items={items}
       onChoose={(choice) => {
@@ -1052,7 +1053,7 @@ export const DrivePicker = memo(function DrivePicker({ modulator, name, targets 
         if (end) void editor.addCable(modulator, end.node, end.port);
       }}
     >
-      {items.length === 0 ? "Nothing to drive" : "Add a cable…"}
+      {cell ? "→" : items.length === 0 ? "Nothing to drive" : "Add a cable…"}
     </MenuButton>
   );
 });

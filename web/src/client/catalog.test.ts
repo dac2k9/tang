@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import type { CatalogEntry } from "../protocol";
 import { builtinCatalog } from "./fixtures";
-import { effectItems, freeEffectItems, instrumentItems, MODULE_FORMAT } from "./catalog";
+import { effectItems, instrumentItems, MODULE_FORMAT, moduleItems } from "./catalog";
 
 const entry = (id: string, name: string, format: string, isInstrument = false): CatalogEntry => ({ id, name, format, isInstrument, params: 1, presets: 0 });
 
@@ -63,19 +63,25 @@ describe("the modules a person saved", () => {
     expect(instrumentItems(entries).map((item) => item.label)).toEqual(["Oscillator"]);
   });
 
-  test("are what an effect that stands by itself can be made of, first and under a heading of their own, and then the plugins that can be an effect", () => {
-    expect(freeEffectItems(entries).map((item) => `${item.group ?? "?"}: ${item.label} (${item.id})`)).toEqual([
-      "Module: Room (module:Room)",
-      "Module: Big hall (module:Big hall)",
-      "Built-in: Filter (builtin:filter)",
-      "CLAP: Chorus (clap:com.acme.chorus)",
+  test("are a category of their own (step 111): the modules, each by the id that the server knows it by, in the order that the server gave, and no plugin, with no heading to be listed under", () => {
+    expect(moduleItems(entries)).toEqual([
+      { id: "module:Room", label: "Room" },
+      { id: "module:Big hall", label: "Big hall" },
     ]);
+    // (The effects that stand by themselves are the plugins that can be an effect, and nothing else: the list of them has no module in it.)
+    expect(effectItems(entries).some((item) => item.id.startsWith("module:"))).toBe(false);
   });
 
-  test("are nothing when there are none: the list is the plugins', and an instrument that is called a module is not one", () => {
-    expect(freeEffectItems(builtinCatalog)).toEqual(effectItems(builtinCatalog));
-    expect(freeEffectItems([entry("module:Odd", "Odd", MODULE_FORMAT, true)])).toEqual([]);
-    expect(freeEffectItems([])).toEqual([]);
+  test("are nothing when there are none: the plugins of a catalog are none of them, and an instrument that is called a module is not one", () => {
+    expect(moduleItems(builtinCatalog)).toEqual([]);
+    expect(moduleItems([entry("module:Odd", "Odd", MODULE_FORMAT, true)])).toEqual([]);
+    expect(moduleItems([])).toEqual([]);
+  });
+
+  test("leave what was given alone", () => {
+    const copy = [...entries];
+    moduleItems(entries);
+    expect(entries).toEqual(copy);
   });
 });
 

@@ -901,9 +901,11 @@
 
 /*
  * The button that modulates a control (`ModulateMenu`): a small tilde, quiet until the pointer or the focus is on what it modulates. On a knob it is in the
- * corner of the cell, over nothing the knob draws; on the row of a cable it is at the end of the row; in the panel it is beside the pin.
+ * corner of the cell, over nothing the knob draws; on the row of a cable it is at the end of the row; in the panel it is beside the pin. The button that draws a cable from the knob of a
+ * macro on a box (`DrivePicker`, step 111) is the same glyph in the same corner, an arrow instead of a tilde: the cable goes out of the knob, and not into it.
  */
-.tang-menu-button.tang-modulate {
+.tang-menu-button.tang-modulate,
+.tang-menu-button.tang-drives--cell {
   min-width: 16px;
   height: 16px;
   padding: 0;
@@ -914,7 +916,8 @@
 }
 
 /* (Over the top right corner of the knob, which is 10px down the cell, and over nothing the control beside draws: it is in front of it.) */
-.tang-menu-button.tang-modulate--cell {
+.tang-menu-button.tang-modulate--cell,
+.tang-menu-button.tang-drives--cell {
   position: absolute;
   top: 4px;
   right: 0;
@@ -925,13 +928,18 @@
 .tang-cell:hover .tang-modulate--cell,
 .tang-cell:focus-within .tang-modulate--cell,
 .tang-modulate--cell[aria-expanded="true"],
-.tang-modulate--cell:focus-visible {
+.tang-modulate--cell:focus-visible,
+.tang-cell:hover .tang-drives--cell:not(:disabled),
+.tang-cell:focus-within .tang-drives--cell:not(:disabled),
+.tang-drives--cell[aria-expanded="true"],
+.tang-drives--cell:focus-visible {
   opacity: 1;
 }
 
 /* (A screen with no pointer to hover has no other way to find it.) */
 @media (hover: none) {
-  .tang-menu-button.tang-modulate--cell {
+  .tang-menu-button.tang-modulate--cell,
+  .tang-menu-button.tang-drives--cell:not(:disabled) {
     opacity: 0.6;
   }
 }
@@ -949,7 +957,8 @@
 }
 
 /* While a cable is dragged the buttons are not there to be let go on: the port under one takes the cable (a port grows to its cell, and a button in front of it would be what the pointer is over). */
-.tang-patch[data-connecting] .tang-menu-button.tang-modulate {
+.tang-patch[data-connecting] .tang-menu-button.tang-modulate,
+.tang-patch[data-connecting] .tang-menu-button.tang-drives--cell {
   opacity: 0;
   pointer-events: none;
 }

@@ -34,6 +34,7 @@ function recorder(): { editor: MenuEditor; asked: Ask[] } {
   const editor: MenuEditor = {
     addInstrument: added("addInstrument"),
     addFreeEffect: added("addFreeEffect"),
+    addModule: added("addModule"),
     addFreeModulator: added("addFreeModulator"),
     addSource: added("addSource"),
     addEffect: added("addEffect"),
@@ -172,11 +173,11 @@ function dataOf(found: Node, overrides: Partial<PatchNodeData> = {}): PatchNodeD
 }
 
 describe("the menu of the canvas", () => {
-  test("adds an instrument, an effect, a modulator and a source of notes, goes back and forward, chooses nodes, arranges them and shows them all, in that order", () => {
+  test("adds an instrument, an effect, a modulator, a source of notes and a module, goes back and forward, chooses nodes, arranges them and shows them all, in that order", () => {
     const { deps } = rig(tracerSnapshot);
     const items = paneMenu(deps);
-    expect(idsOf(items)).toEqual(["add-instrument", "add-effect", "add-modulator", "add-source", "undo", "redo", "choose-all", "choosing", "arrange", "fit"]);
-    expect(labelsOf(items)).toEqual(["Add an instrument", "Add an effect", "Add a modulator", "Add a source of notes", "Undo", "Redo", "Choose every node", "Choose nodes with a box", "Arrange the nodes", "Show every node"]);
+    expect(idsOf(items)).toEqual(["add-instrument", "add-effect", "add-modulator", "add-source", "add-module", "undo", "redo", "choose-all", "choosing", "arrange", "fit"]);
+    expect(labelsOf(items)).toEqual(["Add an instrument", "Add an effect", "Add a modulator", "Add a source of notes", "Add a module", "Undo", "Redo", "Choose every node", "Choose nodes with a box", "Arrange the nodes", "Show every node"]);
     // (The rules that set the sections apart: adding, history, choosing, the view.)
     expect(items.filter((item) => item.rule === true).map((item) => item.id)).toEqual(["undo", "choose-all", "arrange"]);
   });
@@ -193,20 +194,36 @@ describe("the menu of the canvas", () => {
     expect(asked).toEqual([["addInstrument", first.id, { x: 120, y: -40 }]]);
   });
 
-  test("adds an effect where the pointer was, and a module too, which is one box on the canvas; the modules come first", () => {
+  test("adds an effect where the pointer was, and the effects are the plugins that can be one: a module that was saved is not among them (step 111)", () => {
     const module: CatalogEntry = { id: "module:Dub chain", name: "Dub chain", format: MODULE_FORMAT, isInstrument: false, params: 2, presets: 0 };
     const { deps, asked } = rig(tracerSnapshot, { at: { x: 10, y: 20 }, state: { catalog: { scanning: false, entries: [...builtinCatalog, module] } } });
     const effects = opened(paneMenu(deps), "add-effect");
-    expect(effects[0]?.id).toBe("module:Dub chain");
-    expect(effects[0]?.group).toBe(MODULE_FORMAT);
-    choose(effects, "module:Dub chain");
-    const plugin = effects.find((item) => item.group === "Built-in");
+    expect(effects.map((item) => item.id)).toEqual(builtinCatalog.filter((entry) => !entry.isInstrument).map((entry) => entry.id));
+    expect(effects.every((item) => item.group === "Built-in")).toBe(true);
+    const plugin = effects[0];
     if (!plugin?.run) throw new Error("a built-in effect is there to choose");
     plugin.run();
-    expect(asked).toEqual([
-      ["addFreeEffect", "module:Dub chain", { x: 10, y: 20 }],
-      ["addFreeEffect", plugin.id, { x: 10, y: 20 }],
+    expect(asked).toEqual([["addFreeEffect", plugin.id, { x: 10, y: 20 }]]);
+  });
+
+  test("adds a module where the pointer was, which is one box on the canvas, from a list of the modules that were saved, in the order that the server has them and under no heading", () => {
+    const saved = (name: string): CatalogEntry => ({ id: `module:${name}`, name, format: MODULE_FORMAT, isInstrument: false, params: 2, presets: 0 });
+    const { deps, asked } = rig(tracerSnapshot, { at: { x: 10, y: 20 }, state: { catalog: { scanning: false, entries: [...builtinCatalog, saved("Dub chain"), saved("Hall")] } } });
+    const modules = opened(paneMenu(deps), "add-module");
+    expect(modules.map((item) => [item.id, item.label, item.group])).toEqual([
+      ["module:Dub chain", "Dub chain", undefined],
+      ["module:Hall", "Hall", undefined],
     ]);
+    choose(modules, "module:Hall");
+    expect(asked).toEqual([["addModule", "module:Hall", { x: 10, y: 20 }]]);
+  });
+
+  test("has no module to add until one is saved, and says so in the item that is shut", () => {
+    const { deps } = rig(tracerSnapshot);
+    const item = find(paneMenu(deps), "add-module");
+    expect(item.disabled).toBe(true);
+    expect(item.items).toEqual([]);
+    expect(item.title).toBe("No module is saved: choose nodes and save them as a module");
   });
 
   test("adds a modulator of every kind, hearing every note, where the pointer was", () => {
@@ -284,7 +301,7 @@ describe("the menu of the canvas", () => {
     const held = modulePluginsOf(session.graph, [oscillator.id, node("Delay").id]);
     const { deps, naming, asked, canvasAsked } = rig(session, { canvas: { chosen: [oscillator.id, node("Delay").id], held } });
     const items = paneMenu(deps);
-    expect(idsOf(items).slice(4, 10)).toEqual(["undo", "redo", "save-chosen", "collapse-chosen", "choose-none", "choose-all"]);
+    expect(idsOf(items).slice(5, 11)).toEqual(["undo", "redo", "save-chosen", "collapse-chosen", "choose-none", "choose-all"]);
     expect(find(items, "save-chosen")).toMatchObject({ label: "Save the 2 chosen as a module…", disabled: false, rule: true });
     choose(items, "save-chosen");
     expect(naming.map((name) => name.label)).toEqual([SAVE_CHOSEN]);
