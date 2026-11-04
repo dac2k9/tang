@@ -289,7 +289,7 @@ TODO: a holder's effects are still its lane's: an effect cannot be moved from on
 that a lane had when its instrument was taken out), and a modulator that hears the holder's lane is still that lane's by its ear (a modulator of the session's own reaches any module since step 94, and the "×" of an effect that is on its own takes the lane out and leaves the modulators that heard it, hearing every note).
 TODO: the lane is a rule of the picture, not of the model: the terminal's tree shows it as `♪ (empty)`, the Patch tab's matrix has it as a lane (`L3 (an empty lane)`), and `lane_words` calls a lane by what it holds even where the page draws its card; the file
 has a lane with no `plugin`. P5 dissolves the lane in the model and the file (a netlist of nodes and cables).
-TODO: the bar is full again: with "+ Effect" it needed 1,444 pixels in a row with the field of Save as open, with "+ Modulator" (step 92) 1,555 pixels, and 1,467 since the page lost "+ Group" (step 103; `e2e/saveasbar.spec.ts`): an `Add ▾` menu (instrument, effect, modulator, source) would take the four buttons back to one.
+TODO: the bar is full again: with "+ Effect" it needed 1,444 pixels in a row with the field of Save as open, with "+ Modulator" (step 92) 1,555 pixels, and 1,467 since the page lost "+ Group" (step 103), and 1,561 with the `+ Module` that step 111 gave modules (they were listed with the effects until then; `e2e/saveasbar.spec.ts`): an `Add ▾` menu (instrument, effect, modulator, source, module) would take the five buttons back to one.
 TODO: `N` is not in the action bar of the Session tab (its hints are in about a hundred snapshots; the Help tab lists it).
 
 ### Node positions (`ui`)
