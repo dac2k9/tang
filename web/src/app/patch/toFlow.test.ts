@@ -21,6 +21,7 @@ import {
   STEPS_NODE_HEIGHT,
   NODE_SCOPE_HEIGHT,
   NODE_WIDTH,
+  heightOfData,
   nodeHeight,
   PATTERN_HEIGHT,
   ROW_GAP,
@@ -28,7 +29,7 @@ import {
   SOURCE_HEIGHT,
   toFlow,
 } from "./toFlow";
-import type { PatchNode } from "./toFlow";
+import type { PatchNode, PatchNodeData } from "./toFlow";
 
 // -- Graphs made by hand --
 
@@ -2168,6 +2169,21 @@ describe("whether two graphs are laid out the same", () => {
     expect(sameStructure(hearing(), hearing())).toBe(true);
   });
 
+  test("they are not when a macro is told to show its knob on a box or not (step 110: the box has the knob, and is as tall as the knobs make it), and they are when its value differs, or the flag is said in another way", () => {
+    const knob = (source: Extract<Node, { kind: "modulator" }>["source"]): Graph => ({ nodes: [...base.nodes, { id: 60, parent: null, name: "Macro", kind: "modulator", source }], edges: base.edges });
+    const shown = knob({ type: "macro", value: 0.1 });
+    const hidden = knob({ type: "macro", value: 0.1, expose: false });
+    expect(sameStructure(shown, hidden)).toBe(false);
+    expect(sameStructure(hidden, shown)).toBe(false);
+    expect(sameStructure(hidden, knob({ type: "macro", value: 0.1, expose: false }))).toBe(true);
+    // (The wire leaves a flag that is on out, and may say it: the two are the same macro. Its value is turned at the pace of the frames, and is no structure.)
+    expect(sameStructure(shown, knob({ type: "macro", value: 0.1, expose: true }))).toBe(true);
+    expect(sameStructure(shown, knob({ type: "macro", value: 0.9 }))).toBe(true);
+    expect(sameStructure(hidden, knob({ type: "macro", value: 0.9, expose: false }))).toBe(true);
+    // A macro that is another kind of modulator after all (the node is not the same one) is not the same.
+    expect(sameStructure(shown, knob({ type: "lfo", waveform: "sine", rate: 1, retrigger: false, fade: 0, sync: 0 }))).toBe(false);
+  });
+
   test("they are when only an unrelated part of an unchanged node is a new object", () => {
     const copy: Graph = { nodes: base.nodes.map((node) => ({ ...node })), edges: [...base.edges] };
     expect(sameStructure(base, copy)).toBe(true);
@@ -2354,6 +2370,18 @@ describe("a lane that only holds effects", () => {
     const tallest = Math.max(nodeHeight(nodeOf(holding, 2), at(flow, 2).data.knobs.length, 0, false, true), nodeHeight(nodeOf(holding, 3), at(flow, 3).data.knobs.length));
     expect(at(flow, 5).position.y).toBe(rowTop + tallest + ROW_GAP);
     expect(at(flow, 6).position.x).toBe(COLUMN);
+  });
+
+  test("is as tall on the canvas as the layout says for the effect that has the cell of the lane (the first of them) and for the one that has not: `heightOfData` is told by `heldIn`", () => {
+    const flow = toFlow(holding);
+    const [first, second] = [nodeOf(holding, 2), nodeOf(holding, 3)];
+    // (Three knobs and the mix are a row of four; the cell of the lane makes it five, which is a row more.)
+    const three = (id: NodeId): PatchNodeData => ({ ...at(flow, id).data, knobs: [1, 2, 3] });
+    expect(at(flow, 2).data.heldIn?.first).toBe(true);
+    expect(heightOfData(first, three(2))).toBe(nodeHeight(first, 3, 0, false, true));
+    expect(heightOfData(first, three(2))).toBeGreaterThan(nodeHeight(first, 3));
+    expect(at(flow, 3).data.heldIn?.first).toBe(false);
+    expect(heightOfData(second, three(3))).toBe(nodeHeight(second, 3));
   });
 
   test("says of each of its effects which lane holds it, whether it is the first, which has what the card said of the lane as a whole, and whether it is on its own there", () => {

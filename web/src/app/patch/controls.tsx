@@ -13,7 +13,7 @@ import { gainPorts } from "../../client/reach";
 import type { Drivable, GainPort } from "../../client/reach";
 import { slotReader } from "../../client/readers";
 import { rateAt } from "../../client/tempo";
-import { cableDepthOf, cableGainOf, cableSourceOf, chainLengthOf, flagsOf, gainOf, groupChoicesOf, isKnob, limiterOf, modulatorFieldOf, paramOf, paramUnusedBecause, rangeOf, sameFlags, sameGroupChoices, stepsOf } from "../../client/selectors";
+import { cableDepthOf, cableGainOf, cableSourceOf, chainLengthOf, flagsOf, gainOf, groupChoicesOf, isKnob, limiterOf, macroExposedOf, modulatorFieldOf, paramOf, paramUnusedBecause, rangeOf, sameFlags, sameGroupChoices, stepsOf } from "../../client/selectors";
 import { CABLE_GAIN_RANGE, DEPTH_RANGE, GAIN_RANGES, MODULATOR_FIELD_DEFAULTS, MODULATOR_FIELD_RANGES, MODULATOR_FIELD_SCALES, SYNC_DIVISIONS, SYNC_FREE, WAVEFORMS } from "../../protocol";
 import type { EdgeId, Gain, ModulatorField, NodeId, NoteRange, Param, Port } from "../../protocol";
 import { Choice } from "../../ui/Choice";
@@ -559,7 +559,7 @@ const VALUES: Record<"value" | "glide" | "length" | "fade", { label: string; for
  * A number of a modulator that a person turns and nothing else moves, so that it has no place for a cable on its edge and no ring and no dot (what it drives shows
  * them): a macro's value, a step sequencer's glide and length, an LFO's fade. The numbers that a modulator can drive (`ModulatorFieldControl`) can be driven by a cable.
  */
-export const ModulatorValueControl = memo(function ModulatorValueControl({ node, field }: { node: NodeId; field: "value" | "glide" | "length" | "fade" }) {
+export const ModulatorValueControl = memo(function ModulatorValueControl({ node, field, label: named }: { node: NodeId; field: "value" | "glide" | "length" | "fade"; label?: string }) {
   const frames = useFrames();
   const control = useDrive().modulatorField(node, field);
   const stored = useClientState((state) => modulatorFieldOf(state, node, field));
@@ -570,7 +570,7 @@ export const ModulatorValueControl = memo(function ModulatorValueControl({ node,
   const { label, format } = VALUES[field];
   return (
     <Knob
-      label={label}
+      label={named ?? label}
       value={shown}
       min={min}
       max={max}
@@ -588,9 +588,33 @@ export const ModulatorValueControl = memo(function ModulatorValueControl({ node,
   );
 });
 
-/** The value of a macro. */
-export const MacroValueControl = memo(function MacroValueControl({ node }: { node: NodeId }) {
-  return <ModulatorValueControl node={node} field="value" />;
+/**
+ * The value of a macro, as the knob of its own node (`Value`) or, with a `label`, as the knob that the box of the module it is in shows for it (step 110): the name that the macro is called by, which is what the knob
+ * does. It is the same knob either way (it reads and sets the macro's value by its node, wherever the macro is drawn or not).
+ */
+export const MacroValueControl = memo(function MacroValueControl({ node, label }: { node: NodeId; label?: string }) {
+  return label === undefined ? <ModulatorValueControl node={node} field="value" /> : <ModulatorValueControl node={node} field="value" label={label} />;
+});
+
+/**
+ * Whether a macro shows its knob on the box of a module that it is in (step 110): a choice of off and on, in a cell of the macro's own node beside its value, on to begin with. A macro that is in no module has no box to show it
+ * on, and the choice is there all the same (it is what the macro will do when it is put in one). It is not a number of the modulator (`SetModulatorField`) but its own intent (`ExposeMacro`), whose answer is the state that this reads.
+ */
+export const ExposeControl = memo(function ExposeControl({ node }: { node: NodeId }) {
+  const editor = useEditor();
+  const exposed = useClientState((state) => macroExposedOf(state, node));
+  if (exposed === undefined) return null;
+  return (
+    <Choice
+      label="Expose"
+      title="Show the knob of this macro on the box of the module that it is in"
+      labels={["off", "on"]}
+      value={exposed ? 1 : 0}
+      onChange={(chosen) => {
+        void editor.exposeMacro(node, chosen === 1);
+      }}
+    />
+  );
 });
 
 /** Whether a note starts a step sequencer again at its first step, or an LFO again at the start of its wave: a choice of off and on. */

@@ -3,8 +3,9 @@ import { describe, expect, test } from "vitest";
 import type { Graph, Node, NodeId } from "../../protocol";
 import { measure } from "./arrange";
 import { boxRows } from "./boxes";
-import { drives, effect, hears, keys, lane, link, MASTER, master, modulator, moduleNode, plugin, send, wayOut } from "./boxesKit";
-import { blocksOf, CABLE_GAP, COLUMN, nodeHeight, NODE_WIDTH, ROW_GAP, sameStructure, toFlow } from "./toFlow";
+import { drives, effect, hears, keys, lane, link, macro, MASTER, master, modulator, moduleNode, plugin, send, wayOut } from "./boxesKit";
+import { blocksOf, CABLE_GAP, COLUMN, heightOfData, nodeHeight, NODE_WIDTH, ROW_GAP, sameStructure, toFlow } from "./toFlow";
+import { rectOf } from "./view";
 import type { PatchNode } from "./toFlow";
 
 // A module that is closed is one box on the canvas, and one that is open is its nodes (step 108): what `toFlow` makes of it.
@@ -88,6 +89,50 @@ describe("a module that is closed", () => {
     expect(nodeHeight(module, 0, 0, false, false, false, 0)).toBe(44 + 28 + 20 + 16);
   });
 
+  test("is taller for the knobs of the macros it shows (step 110): a row of the grid that a plugin's controls are in for every four of them, and the room that a grid has under it, and nothing for a box that shows none", () => {
+    const module = room.nodes.find((node) => node.kind === "module");
+    if (!module) throw new Error("the graph has the module");
+    const bare = 44 + 28 + 20 + 16;
+    expect(nodeHeight(module, 0)).toBe(bare);
+    // (A row of the grid is 108 px, and the grid has 12 under its last row: the stylesheet's numbers, which the browser spec measures on the page.)
+    expect([1, 2, 3, 4].map((knobs) => nodeHeight(module, knobs))).toEqual([bare + 108 + 12, bare + 108 + 12, bare + 108 + 12, bare + 108 + 12]);
+    expect([5, 8].map((knobs) => nodeHeight(module, knobs))).toEqual([bare + 216 + 12, bare + 216 + 12]);
+    expect(nodeHeight(module, 9)).toBe(bare + 324 + 12);
+    // The rows of ports and the rows of knobs add up.
+    expect(nodeHeight(module, 5, 0, false, false, false, 3)).toBe(44 + 3 * 28 + 216 + 12 + 20 + 16);
+  });
+
+  test("is as tall on the canvas as the knobs of its macros make it: the layout, the blocks that the arranger is given and the rectangle of the node all say the same", () => {
+    const graph: Graph = {
+      nodes: [lane(2, "Chain", null), effect(3, 2, "Filter"), ...[20, 21, 22, 23, 24].map((id) => macro(id, `Macro ${String(id)}`)), moduleNode(1, "Room", [2, 20, 21, 22, 23, 24]), master],
+      edges: [link(2, 3)],
+    };
+    const flow = toFlow(graph);
+    const box = byId(flow.nodes, 1);
+    expect(box.data.box?.knobs).toHaveLength(5);
+    const module = graph.nodes.find((node) => node.kind === "module");
+    if (!module) throw new Error("the graph has the module");
+    const wanted = nodeHeight(module, 5, 0, false, false, false, 1);
+    expect(heightOfData(module, box.data)).toBe(wanted);
+    expect(blocksOf(graph, flow).blocks.find((block) => block.id === 1)?.height).toBe(wanted);
+    expect(rectOf(graph, flow, 1)?.height).toBe(wanted);
+    // (A box that has no knob is as tall as it was, and the same three agree.)
+    const plain = toFlow(room);
+    expect(rectOf(room, plain, 1)?.height).toBe(44 + 28 + 20 + 16);
+  });
+
+  test("has the knobs of the macros that are in the module and not those that are told to hide theirs, and makes room for no more than it shows", () => {
+    const graph: Graph = {
+      nodes: [lane(2, "Chain", null), effect(3, 2, "Filter"), macro(20, "Macro 20", { expose: false }), macro(21, "Macro 21"), moduleNode(1, "Room", [2, 20, 21]), master],
+      edges: [link(2, 3)],
+    };
+    const flow = toFlow(graph);
+    expect(byId(flow.nodes, 1).data.box?.knobs.map((knob) => knob.member)).toEqual([21]);
+    expect(rectOf(graph, flow, 1)?.height).toBe(44 + 28 + 108 + 12 + 20 + 16);
+    const hidden: Graph = { ...graph, nodes: graph.nodes.map((node) => (node.id === 21 ? macro(21, "Macro 21", { expose: false }) : node)) };
+    expect(rectOf(hidden, toFlow(hidden), 1)?.height).toBe(44 + 28 + 20 + 16);
+  });
+
   test("is below the lanes, one under the other where there are several, in a column of its own", () => {
     const two: Graph = {
       nodes: [lane(10, "Oscillator"), lane(2, "Chain", null), effect(3, 2, "Filter"), lane(4, "Other", null), effect(5, 4, "Delay"), moduleNode(1, "First", [2]), moduleNode(6, "Second", [4]), master],
@@ -101,6 +146,17 @@ describe("a module that is closed", () => {
     expect(first.position.x).toBe(lanes.position.x);
     expect(second.position.x).toBe(first.position.x);
     expect(second.position.y).toBe(first.position.y + 44 + 28 + 20 + 16 + ROW_GAP);
+  });
+
+  test("leaves the room under it that the knobs of its macros make it tall by: the box below it is a gap of a row under the whole of it, and as near as it was when the macro is told to hide its knob", () => {
+    const column = (given: { expose?: boolean }): Graph => ({
+      nodes: [lane(10, "Oscillator"), lane(2, "Chain", null), effect(3, 2, "Filter"), macro(20, "Brightness", given), lane(4, "Other", null), effect(5, 4, "Delay"), moduleNode(1, "First", [2, 20]), moduleNode(6, "Second", [4]), master],
+      edges: [],
+    });
+    const gap = (graph: Graph): number => byId(toFlow(graph).nodes, 6).position.y - byId(toFlow(graph).nodes, 1).position.y;
+    // (The header, a row, the grid of one row of knobs and its room, the line that says what is in it, and the room under it, and then the gap between rows.)
+    expect(gap(column({}))).toBe(44 + 28 + 108 + 12 + 20 + 16 + ROW_GAP);
+    expect(gap(column({ expose: false }))).toBe(44 + 28 + 20 + 16 + ROW_GAP);
   });
 
   test("is in the first place below the lanes: where the strip of the lane above it ends, with the gap of a row, and what is hidden in it has no room of its own", () => {

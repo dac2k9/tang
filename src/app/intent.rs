@@ -238,6 +238,15 @@ pub enum Intent {
     /// The engine has no use for it, but it is saved with the session and told to every client. Refused, with nothing changed, for a
     /// node that is not a group and a name that is not one.
     RenameGroup { node: NodeId, name: String },
+    /// Call a macro something (step 110: the user's "let a Macro have a name"): `name` is what it is called, without the spaces around it, so that the knob of it on the box of a module that it is in says what it
+    /// does ("Brightness"); a name of nothing gives it back the name it has by default, "Macro". A name is at most `MAX_NAME` characters and has no control characters. The engine has no use for it, but it is saved with
+    /// the session and told to every client (as a snapshot, since the graph names the node by it). A step of the history ("rename a macro"), which a name that it has already is not. Refused, with nothing changed, for a
+    /// node that is not a macro and a name that is not one.
+    RenameMacro { node: NodeId, name: String },
+    /// Have a macro show its knob on the box of the module that it is in, or not (step 110: the user's "an expose option/flip, that will expose the macro-knob when used in a module"): on to begin with, which is what a
+    /// macro that is in a module is for. It changes nothing of the sound, of the cables of the macro or of what the lane of a module shows when it is open; it is saved with the session and told to every client (as a snapshot, since
+    /// the graph says it). A step of the history ("show a macro on its box", "hide a macro from its box"), which a macro that is so already is not. Refused, with nothing changed, for a node that is not a macro.
+    ExposeMacro { node: NodeId, expose: bool },
     /// Take a node out of the session (a step of the history, which undo puts back whole). A modulator can be, with its own cables and the
     /// cables of the others that drove its settings (and what drove the depth of any of those), and so can an
     /// effect or a bus effect, with the cables that drive its parameters (and what drove their depths): what they
@@ -711,7 +720,7 @@ mod tests {
     #[test]
     fn a_macro_is_made_at_rest_and_is_the_kind_that_it_says() {
         let source = ModulatorKind::Macro.source();
-        assert!(matches!(source, ModSourceSlot::Macro { value } if value == 0.0), "{source:?}");
+        assert!(matches!(source, ModSourceSlot::Macro { value, .. } if value == 0.0), "{source:?}");
         assert_eq!(ModulatorKind::of(&source), ModulatorKind::Macro);
         assert_eq!(ModulatorKind::Macro.label(), "a macro");
     }
@@ -921,6 +930,12 @@ mod tests {
                 Intent::RenameGroup { node: NodeId(7), name: "Pad".to_string() },
                 json!({"type": "renameGroup", "node": 7, "name": "Pad"}),
             ),
+            (
+                Intent::RenameMacro { node: NodeId(7), name: "Brightness".to_string() },
+                json!({"type": "renameMacro", "node": 7, "name": "Brightness"}),
+            ),
+            (Intent::ExposeMacro { node: NodeId(7), expose: false }, json!({"type": "exposeMacro", "node": 7, "expose": false})),
+            (Intent::ExposeMacro { node: NodeId(7), expose: true }, json!({"type": "exposeMacro", "node": 7, "expose": true})),
             (
                 Intent::AddModEdge { modulator: NodeId(4), to: Endpoint { node: NodeId(1), port: Port::Param { index: 3 } } },
                 json!({"type": "addModEdge", "modulator": 4, "to": {"node": 1, "port": {"type": "param", "index": 3}}}),

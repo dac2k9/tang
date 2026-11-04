@@ -22,6 +22,7 @@ import sideCables from "./fixtures/sideCables.json";
 import uses from "./fixtures/uses.json";
 import builtinPresetValues from "./fixtures/builtins.presets.json";
 import moduleBoxes from "./fixtures/moduleBoxes.json";
+import macros from "./fixtures/macros.json";
 import moduleCollapse from "./fixtures/moduleCollapse.json";
 import moduleGraphs from "./fixtures/moduleGraphs.json";
 import modules from "./fixtures/modules.json";
@@ -154,6 +155,18 @@ export const moduleBoxesFixture = moduleBoxes as unknown as { snapshot: Snapshot
  * of the script (a name and a place are looked at last, so those are tried before any box is made). Written by the controller (`the_web_clients_fixture_of_what_collapsing_into_a_module_comes_to_is_current`).
  */
 export const moduleCollapseFixture = moduleCollapse as unknown as {
+  snapshot: Snapshot;
+  steps: Omit<ModulesFixture["steps"][number], "modules">[];
+  refusals: { after: number; intent: Intent; error: string }[];
+};
+
+/**
+ * A small session (a lane with a filter that an LFO drives, a macro that is not called anything and a macro that the file calls `Wet` and hides from a box) and what the controller makes of calling a macro something and of having a box
+ * show its knob or not (step 110): the first macro called something, again (as it is: no step), hidden, hidden again, undone, undone, redone and redone, the second given back its name and shown, the filter and both macros collapsed as
+ * `Room`, the first called something else in it, undone, taken out and put back, turned, and the second given a name of the longest length. `refusals` are what it refuses, tried after the last step. Written by the controller
+ * (`the_web_clients_fixture_of_what_a_macro_that_is_called_something_comes_to_is_current`).
+ */
+export const macrosFixture = macros as unknown as {
   snapshot: Snapshot;
   steps: Omit<ModulesFixture["steps"][number], "modules">[];
   refusals: { after: number; intent: Intent; error: string }[];

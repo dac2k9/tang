@@ -22,7 +22,7 @@ import type { MenuItem } from "../../ui/MenuButton";
 import { Meter } from "../../ui/Meter";
 import { useClient, useClientSelection, useClientState, useEditor, useFrames } from "../ClientProvider";
 import { focusWhenPossible, keepFocus } from "../focus";
-import { AudioPort, DepthPort, DrivePicker, GainCell, GroupCell, LimiterCell, ModulatorSettingCell, MuteSoloCell, NotesPort, ParamCell, RangeCell, StepsControl, SyncControl } from "./controls";
+import { AudioPort, DepthPort, DrivePicker, ExposeControl, GainCell, GroupCell, LimiterCell, ModulatorSettingCell, MuteSoloCell, NotesPort, ParamCell, RangeCell, StepsControl, SyncControl } from "./controls";
 import { controlDetail, kindOf, outputScale, seconds, settingsOf } from "./describe";
 import { HearsMenu } from "./HearsMenu";
 import { InspectorContext, paramsButtonId } from "./inspector";
@@ -330,21 +330,23 @@ function RemoveLaneOrGroupMenu({ node }: { node: NodeId }) {
 /** The `id` of the button that turns the name of the group `node` into a field. */
 const renameGroupId = (node: NodeId): string => `rename-group-${String(node)}`;
 
+/** The `id` of the button that turns the name of the macro `node` into a field (step 110). */
+const renameMacroId = (node: NodeId): string => `rename-macro-${String(node)}`;
+
 /**
- * The name of a group, in a field, in place of the name in its header: Enter (or leaving the field) asks the server for it, Escape leaves it as it
- * was, and a name that is the one it was asks nothing. The server takes the spaces off, and gives a name of nothing the name the group has by
+ * The name of a node that a person gives it, in a field, in place of the name in its header: Enter (or leaving the field) asks the server for it (`rename`), Escape leaves it as it
+ * was, and a name that is the one it was asks nothing. The server takes the spaces off, and gives a name of nothing the name the node has by
  * default. `done` is called once, with whether the focus goes back to the button that opened the field (it does, for Enter and Escape: the
  * person is still there).
  */
-function GroupNameField({ node, name, done }: { node: NodeId; name: string; done: (focusBack: boolean) => void }) {
-  const editor = useEditor();
+function NameField({ name, rename, done }: { name: string; rename: (text: string) => Promise<boolean>; done: (focusBack: boolean) => void }) {
   const finished = useRef(false);
   const [text, setText] = useState(name);
   const finish = (ask: boolean, focusBack: boolean): void => {
     if (finished.current) return;
     finished.current = true;
     // (If it is refused the page says so: `Editor` puts the reason among the notices.)
-    if (ask && text !== name) void editor.renameGroup(node, text);
+    if (ask && text !== name) void rename(text);
     done(focusBack);
   };
   return (
@@ -375,10 +377,24 @@ function GroupNameField({ node, name, done }: { node: NodeId; name: string; done
   );
 }
 
-/** The button of a group that turns its name into a field. */
-function RenameGroupButton({ node, name, onEdit }: { node: NodeId; name: string; onEdit: () => void }) {
+/** The name of a group, in a field in its header. */
+function GroupNameField({ node, name, done }: { node: NodeId; name: string; done: (focusBack: boolean) => void }) {
+  const editor = useEditor();
+  const rename = useCallback((text: string) => editor.renameGroup(node, text), [editor, node]);
+  return <NameField name={name} rename={rename} done={done} />;
+}
+
+/** The name of a macro, in a field in its header (step 110). */
+function MacroNameField({ node, name, done }: { node: NodeId; name: string; done: (focusBack: boolean) => void }) {
+  const editor = useEditor();
+  const rename = useCallback((text: string) => editor.renameMacro(node, text), [editor, node]);
+  return <NameField name={name} rename={rename} done={done} />;
+}
+
+/** The button of a node that turns its name into a field (`id` is its own, which the focus goes back to). */
+function RenameButton({ id, name, onEdit }: { id: string; name: string; onEdit: () => void }) {
   return (
-    <button type="button" id={renameGroupId(node)} className="tang-menu-button tang-node__rename nodrag nopan" aria-label={`Rename ${name}`} title={`Rename ${name}`} onClick={onEdit}>
+    <button type="button" id={id} className="tang-menu-button tang-node__rename nodrag nopan" aria-label={`Rename ${name}`} title={`Rename ${name}`} onClick={onEdit}>
       ✎
     </button>
   );
@@ -526,6 +542,8 @@ function CableRows({ node, name, cables }: { node: NodeId; name: string; cables:
 export function ModulatorNode({ data }: NodeProps<PatchNode>) {
   const client = useClient();
   const frames = useFrames();
+  // (A macro is called what a person calls it, in place: the field takes the place of its name, as a group's does.)
+  const [editing, setEditing] = useState(false);
   const node = useClientSelection((state) => nodeById(state, data.node), sameModulatorShape);
   const read = useMemo(() => slotReader(client.telemetry, "modulation", data.node, { type: "modOut" }, "modOutput"), [client, data.node]);
   const source = node?.kind === "modulator" ? node.source : null;
@@ -544,9 +562,31 @@ export function ModulatorNode({ data }: NodeProps<PatchNode>) {
         badge={kind === data.name || data.name.startsWith(`${kind ?? ""} `) ? null : kind}
         // (A modulator that is in no lane and no group chooses whose notes it hears: one that is in a lane or a group hears its own.)
         sub={node?.kind === "modulator" ? <HearsMenu node={data.node} name={data.name} /> : null}
+        field={
+          editing ? (
+            <MacroNameField
+              node={data.node}
+              name={data.name}
+              done={(focusBack) => {
+                setEditing(false);
+                if (focusBack) focusWhenPossible(renameMacroId(data.node));
+              }}
+            />
+          ) : undefined
+        }
       >
         {/* (The note length that an LFO or a step sequencer follows the tempo by: no other kind has one, and the control is nothing for it.) */}
         <SyncControl node={data.node} />
+        {/* (A macro is the one modulator that a person names: the others are called what they are.) */}
+        {source?.type === "macro" ? (
+          <RenameButton
+            id={renameMacroId(data.node)}
+            name={data.name}
+            onEdit={() => {
+              setEditing(true);
+            }}
+          />
+        ) : null}
         <RemoveNodeButton node={data.node} name={data.name} focusTo={node ? addedBy : null} />
       </Header>
       {settings.length > 0 ? (
@@ -554,6 +594,12 @@ export function ModulatorNode({ data }: NodeProps<PatchNode>) {
           {settings.map((field) => (
             <ModulatorSettingCell key={field} node={data.node} field={field} driven={data.drivenSettings.some((setting) => setting === field)} />
           ))}
+          {/* (Whether the box of a module that the macro is in shows its knob, beside the value that the knob turns.) */}
+          {source?.type === "macro" ? (
+            <div className="tang-cell">
+              <ExposeControl node={data.node} />
+            </div>
+          ) : null}
         </div>
       ) : null}
       <div className="tang-node__body">
@@ -597,8 +643,8 @@ export function GroupNode({ data }: NodeProps<PatchNode>) {
         }
       >
         <span className="tang-node__actions">
-          <RenameGroupButton
-            node={data.node}
+          <RenameButton
+            id={renameGroupId(data.node)}
             name={data.name}
             onEdit={() => {
               setEditing(true);

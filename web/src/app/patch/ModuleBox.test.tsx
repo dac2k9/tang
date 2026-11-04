@@ -29,6 +29,7 @@ const box: Box = {
     { member: 5, handle: "param-3", label: "Filter: resonance", kind: "modulation" },
   ],
   modOut: [{ member: 9, handle: "modOut", label: "LFO", kind: "modulation" }],
+  knobs: [],
 };
 
 const node: PatchNode = {

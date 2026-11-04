@@ -218,7 +218,7 @@ impl Snapshot {
                     (ModulatorSource::Envelope { decay, .. }, ModulatorField::Decay) => *decay = *value,
                     (ModulatorSource::Envelope { sustain, .. }, ModulatorField::Sustain) => *sustain = *value,
                     (ModulatorSource::Envelope { release, .. }, ModulatorField::Release) => *release = *value,
-                    (ModulatorSource::Macro { value: set }, ModulatorField::Value) => *set = *value,
+                    (ModulatorSource::Macro { value: set, .. }, ModulatorField::Value) => *set = *value,
                     (ModulatorSource::Steps { rate, .. }, ModulatorField::Rate) => *rate = *value,
                     (ModulatorSource::Steps { glide, .. }, ModulatorField::Glide) => *glide = *value,
                     (ModulatorSource::Steps { length, .. }, ModulatorField::Length) => {
@@ -827,7 +827,7 @@ type = "envelope"
         told.apply(&applied).unwrap();
         assert_eq!(told, ctl.snapshot());
         let found = told.graph.nodes.iter().find(|n| n.id == knob).unwrap();
-        assert_eq!(found.kind, NodeKind::Modulator { source: ModulatorSource::Macro { value: 0.8 }, hears: Some(ctl.model.instruments[0].node) });
+        assert_eq!(found.kind, NodeKind::Modulator { source: ModulatorSource::Macro { value: 0.8, name: String::new(), expose: true }, hears: Some(ctl.model.instruments[0].node) });
         let before = told.clone();
         let error = told.apply(&Applied::of(2, vec![Event::ModulatorFieldSet { node: knob, field: ModulatorField::Rate, value: 1.0 }])).unwrap_err().to_string();
         assert!(error.contains("does not apply"), "{error}");

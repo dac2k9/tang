@@ -661,8 +661,16 @@ mod tests {
         assert_eq!(drives(envelope), [(ModuleDrives::Depth { modulator: 0, target: 0 }, 0.1), (ModuleDrives::Setting { modulator: 0, port: Port::Rate }, 0.5)]);
         assert!(knob.targets.is_empty());
         // What the loader makes of a table is what a module has: the knob that a file says is at 3 is held to the 1 that a knob goes to.
-        assert!(matches!(knob.source, ModSourceSlot::Macro { value } if value == 1.0), "{:?}", knob.source);
+        assert!(matches!(knob.source, ModSourceSlot::Macro { value, .. } if value == 1.0), "{:?}", knob.source);
         assert_eq!(module.plugin_count(), 3, "a module's plugins are the effects and the instruments: the modulators are not counted");
+    }
+
+    #[test]
+    fn a_macro_of_a_module_has_its_name_and_whether_its_knob_is_shown_and_one_that_has_neither_is_a_macro_that_is_shown() {
+        let text = format!("{TWO_LANES}[[modulator]]\ntype = \"macro\"\nname = \"Brightness\"\nexpose = false\n[[modulator]]\ntype = \"macro\"\nvalue = 0.5\n");
+        let module = parse(&text).unwrap();
+        assert!(matches!(&module.modulators[0].source, ModSourceSlot::Macro { name, expose: false, .. } if name == "Brightness"), "{:?}", module.modulators[0].source);
+        assert!(matches!(&module.modulators[1].source, ModSourceSlot::Macro { name, expose: true, value } if name.is_empty() && *value == 0.5), "{:?}", module.modulators[1].source);
     }
 
     #[test]

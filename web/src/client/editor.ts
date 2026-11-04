@@ -70,6 +70,8 @@ const DOING: Record<Intent["type"], string> = {
   addGroup: "add a group",
   setLaneGroup: "put a lane in a group",
   renameGroup: "name a group",
+  renameMacro: "name a macro",
+  exposeMacro: "show or hide the knob of a macro on its box",
   removeNode: "remove a node",
   collapseIntoModule: "collapse the chosen nodes into a module",
   ungroupModule: "ungroup a module",
@@ -194,6 +196,21 @@ export class Editor {
    */
   renameGroup(node: NodeId, name: string): Promise<boolean> {
     return this.#attempt(`give ${this.#name(node)} the name ${quoted(name)}`, { type: "renameGroup", node, name });
+  }
+
+  /**
+   * Call the macro `node` `name` (step 110): the spaces round it are not part of it, and a name of nothing gives the macro its default name back (`Macro`). The knob that a box shows for it says the name. One step of the
+   * history. True if it was done (the page says why if it was not).
+   */
+  renameMacro(node: NodeId, name: string): Promise<boolean> {
+    return this.#attempt(`give ${this.#name(node)} the name ${quoted(name)}`, { type: "renameMacro", node, name });
+  }
+
+  /**
+   * Have the macro `node` show its knob on the box of the module that it is in, or not (step 110): it does to begin with. Nothing of the sound changes. One step of the history. True if it was done (the page says why if it was not).
+   */
+  exposeMacro(node: NodeId, expose: boolean): Promise<boolean> {
+    return this.#attempt(`${expose ? "show" : "hide"} the knob of ${this.#name(node)} on its box`, { type: "exposeMacro", node, expose });
   }
 
   /**

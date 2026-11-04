@@ -125,6 +125,8 @@ impl Controller {
             Intent::SetNodeUi { node, ui } => Done::Event(self.set_node_ui(node, ui)?),
             Intent::SetPinned { node, params } => Done::Event(self.set_pinned(node, params)?),
             Intent::RenameGroup { node, name } => Done::Event(self.rename_group(node, &name)?),
+            Intent::RenameMacro { node, name } => self.rename_macro_intent(node, &name)?,
+            Intent::ExposeMacro { node, expose } => self.expose_macro_intent(node, expose)?,
             Intent::AddGroup { members } => self.add_group_intent(&members)?,
             Intent::SetLaneGroup { node, group } => self.set_lane_group_intent(node, group)?,
             Intent::RemoveEdge { edge } => self.remove_edge_intent(edge)?,
@@ -338,15 +340,36 @@ impl Controller {
         let NodePath::Group(group) = self.model.locate(node).ok_or(IntentError::NotFound(node))? else {
             return Err(invalid("only a group has a name to change"));
         };
-        let name = name.trim();
-        if name.chars().count() > MAX_NAME {
-            return Err(invalid(format!("a name is at most {MAX_NAME} characters")));
-        }
-        if name.chars().any(char::is_control) {
-            return Err(invalid("a name has no control characters"));
-        }
+        let name = tidy_name(name)?;
         self.model.groups[group].name = if name.is_empty() { None } else { Some(name.to_string()) };
         Ok(Event::GroupRenamed { node, name: self.model.groups[group].display_name(group) })
+    }
+
+    /// The two things that a macro has besides its value, for the one that has `node` to change (`Intent::RenameMacro`, `ExposeMacro`, step 110): its name (nothing for none) and whether its knob is on the box of a module that it is in. A modulator is
+    /// in the session's own rack, wherever it is heard from; a node that is no modulator and a modulator that is no macro are refused in the same words.
+    fn macro_properties_mut(&mut self, node: NodeId) -> Result<(&mut String, &mut bool), IntentError> {
+        let NodePath::Modulator { at, index } = self.model.locate(node).ok_or(IntentError::NotFound(node))? else {
+            return Err(invalid("only a macro has a name and a knob to show"));
+        };
+        match self.model.modulators_mut(at).and_then(|rack| rack.get_mut(index)).map(|slot| &mut slot.source) {
+            Some(ModSourceSlot::Macro { name, expose, .. }) => Ok((name, expose)),
+            Some(_) => Err(invalid("only a macro has a name and a knob to show")),
+            None => Err(IntentError::NotFound(node)),
+        }
+    }
+
+    /// Call a macro something, in the model alone (`Intent::RenameMacro`): the audio thread has no use for a name. The graph names the node by it, so it is told as a snapshot.
+    fn rename_macro_intent(&mut self, node: NodeId, name: &str) -> Result<Done, IntentError> {
+        let (was, _) = self.macro_properties_mut(node)?;
+        *was = macro_name(name)?;
+        Ok(Done::Restructured)
+    }
+
+    /// Have a macro show its knob on the box of its module, or not, in the model alone (`Intent::ExposeMacro`). It is told as a snapshot, since the graph says it.
+    fn expose_macro_intent(&mut self, node: NodeId, expose: bool) -> Result<Done, IntentError> {
+        let (_, was) = self.macro_properties_mut(node)?;
+        *was = expose;
+        Ok(Done::Restructured)
     }
 
     /// A group at the end, with the lanes in `members` put in it. Every member is looked at before anything is made.
@@ -682,7 +705,7 @@ impl Controller {
                 envelope_command(at, index, (*attack, *decay, *sustain, *release))
             }
             // (A macro has nothing but its value, so the engine is given a macro of the new one in place of the old.)
-            (ModSourceSlot::Macro { value: set }, ModulatorField::Value) => {
+            (ModSourceSlot::Macro { value: set, .. }, ModulatorField::Value) => {
                 *set = value;
                 macro_command(at, index, value)
             }
@@ -1497,6 +1520,18 @@ fn invalid(why: impl Into<String>) -> IntentError {
 /// What the box of a module that is collapsed is called (`Intent::CollapseIntoModule`, step 109): the name without the spaces round it, as a group's is (at most `MAX_NAME` characters, no control character), and
 /// `Module` for a name of nothing.
 pub(super) fn module_title(name: &str) -> Result<String, IntentError> {
+    let name = tidy_name(name)?;
+    Ok(if name.is_empty() { session::DEFAULT_MODULE_NAME.to_string() } else { name.to_string() })
+}
+
+/// What a macro is called (`Intent::RenameMacro`, step 110): the name without the spaces round it, by a group's rule, and nothing for a name of nothing (a macro with no name is called `Macro`).
+pub(super) fn macro_name(name: &str) -> Result<String, IntentError> {
+    Ok(tidy_name(name)?.to_string())
+}
+
+/// The name of a group, a module's box or a macro as a person typed it, held to the rule that they share: the text without the spaces round it, at most `MAX_NAME` characters (counted as characters, not bytes) and no control
+/// character. What a name of nothing is is for each to say.
+fn tidy_name(name: &str) -> Result<&str, IntentError> {
     let name = name.trim();
     if name.chars().count() > MAX_NAME {
         return Err(invalid(format!("a name is at most {MAX_NAME} characters")));
@@ -1504,7 +1539,7 @@ pub(super) fn module_title(name: &str) -> Result<String, IntentError> {
     if name.chars().any(char::is_control) {
         return Err(invalid("a name has no control characters"));
     }
-    Ok(if name.is_empty() { session::DEFAULT_MODULE_NAME.to_string() } else { name.to_string() })
+    Ok(name)
 }
 
 /// Refused, in words, if `reason` says that the audio would go round with the cables there are when `what` is done (`SessionModel::loop_if_lane_goes_to`,
@@ -3440,7 +3475,7 @@ value = 0.25
 
     fn lane_macro(ctl: &Controller) -> f32 {
         match &ctl.model.free_modulators[0].source {
-            ModSourceSlot::Macro { value } => *value,
+            ModSourceSlot::Macro { value, .. } => *value,
             other => panic!("{other:?} is not a macro"),
         }
     }
@@ -4721,7 +4756,7 @@ type = "steps"
             ModSourceSlot::Envelope { attack, decay, sustain, release } if (attack, decay, sustain, release) == (0.01, 0.3, 0.7, 0.5)
         ));
         assert!(matches!(rack[2].source, ModSourceSlot::MidiLearn { source: None, learning: true }), "armed for the next control");
-        assert!(matches!(rack[3].source, ModSourceSlot::Macro { value } if value == 0.0), "at rest: it moves nothing until it is turned");
+        assert!(matches!(rack[3].source, ModSourceSlot::Macro { value, .. } if value == 0.0), "at rest: it moves nothing until it is turned");
         assert!(matches!(rack[4].source, ModSourceSlot::MidiLearn { source: Some(MidiBindSource::Velocity), learning: false }), "bound at once: no controller is moved for it");
         assert!(matches!(rack[5].source, ModSourceSlot::MidiLearn { source: Some(MidiBindSource::Key), learning: false }));
         let sources = [
@@ -4913,7 +4948,7 @@ type = "steps"
         assert!(matches!(rack[0].source, ModSourceSlot::Lfo { .. }));
         assert!(matches!(rack[1].source, ModSourceSlot::Envelope { .. }));
         assert!(matches!(rack[2].source, ModSourceSlot::MidiLearn { source: None, learning: true }), "armed for the next control");
-        assert!(matches!(rack[3].source, ModSourceSlot::Macro { value } if value == 0.0));
+        assert!(matches!(rack[3].source, ModSourceSlot::Macro { value, .. } if value == 0.0));
         assert!(matches!(rack[4].source, ModSourceSlot::MidiLearn { source: Some(MidiBindSource::Velocity), learning: false }));
         assert!(matches!(rack[5].source, ModSourceSlot::MidiLearn { source: Some(MidiBindSource::Key), learning: false }));
         assert!(rack[6].source.steps().is_some(), "a step sequencer");
@@ -5252,7 +5287,7 @@ type = "steps"
         assert!(matches!(rack[0].source, ModSourceSlot::Lfo { waveform: LfoWaveform::Sine, rate, .. } if rate == 1.0));
         assert!(matches!(rack[1].source, ModSourceSlot::Envelope { attack, decay, sustain, release } if (attack, decay, sustain, release) == (0.01, 0.3, 0.7, 0.5)));
         assert!(matches!(rack[2].source, ModSourceSlot::MidiLearn { source: None, learning: true }), "armed for the next control");
-        assert!(matches!(rack[3].source, ModSourceSlot::Macro { value } if value == 0.0), "at rest, so that the cable moves nothing until the macro is turned");
+        assert!(matches!(rack[3].source, ModSourceSlot::Macro { value, .. } if value == 0.0), "at rest, so that the cable moves nothing until the macro is turned");
         assert!(matches!(rack[4].source, ModSourceSlot::MidiLearn { source: Some(MidiBindSource::Velocity), learning: false }), "{:?}", rack[4].source);
         assert!(matches!(rack[5].source, ModSourceSlot::MidiLearn { source: Some(MidiBindSource::Key), learning: false }), "{:?}", rack[5].source);
         assert_eq!(rack.iter().map(|m| m.targets.len()).collect::<Vec<_>>(), [1, 1, 1, 1, 1, 1]);
@@ -7012,6 +7047,138 @@ type = "midi"
         assert!(rename(&mut ctl, group, &"å".repeat(65)).is_err());
     }
 
+    // -- The name of a macro and whether a box shows its knob (RenameMacro and ExposeMacro, step 110) --
+
+    /// The name and the flag that the macro `node` has.
+    fn macro_has(ctl: &Controller, node: NodeId) -> (String, bool) {
+        let NodePath::Modulator { index, .. } = ctl.model.locate(node).unwrap() else { panic!("a modulator") };
+        match &ctl.model.free_modulators[index].source {
+            ModSourceSlot::Macro { name, expose, .. } => (name.clone(), *expose),
+            other => panic!("a macro, and not {other:?}"),
+        }
+    }
+
+    /// What the graph, which a client reads, calls the node and says of the macro it is.
+    fn macro_in_graph(ctl: &Controller, node: NodeId) -> (String, serde_json::Value) {
+        let graph = ctl.model.graph();
+        let found = graph.nodes.iter().find(|n| n.id == node).unwrap();
+        let NodeKind::Modulator { source, .. } = &found.kind else { panic!("a modulator") };
+        (found.name.clone(), serde_json::to_value(source).unwrap())
+    }
+
+    #[test]
+    fn rename_macro_names_a_macro_in_the_model_alone_and_the_node_is_called_by_it() {
+        let (engine, mut ctl) = controller_without_modulators();
+        let knob = add_free(&mut ctl, ModulatorKind::Macro);
+        ctl.apply(Intent::SetModulatorField { node: knob, field: ModulatorField::Value, value: 0.25 }).unwrap();
+        assert_eq!(macro_has(&ctl, knob), (String::new(), true), "no name to begin with, and its knob is shown");
+        assert_eq!(macro_in_graph(&ctl, knob), ("Macro".to_string(), serde_json::json!({"type": "macro", "value": 0.25})));
+        sent(&engine);
+        let rev = ctl.rev;
+        let applied = ctl.apply(Intent::RenameMacro { node: knob, name: "Brightness".to_string() }).unwrap();
+        assert_eq!(applied, Applied::restructured(rev + 1));
+        assert!(applied.events.is_empty(), "nothing a client could apply: it is told by a snapshot");
+        assert!(sent(&engine).is_empty(), "the audio thread has no use for a name");
+        assert!(ctl.dirty);
+        assert_eq!(macro_has(&ctl, knob).0, "Brightness");
+        assert_eq!(macro_in_graph(&ctl, knob), ("Brightness".to_string(), serde_json::json!({"type": "macro", "value": 0.25, "name": "Brightness"})));
+        // The spaces round a name are not part of it, and a name of nothing is no name: the macro is called what it is called by default.
+        ctl.apply(Intent::RenameMacro { node: knob, name: "  Cutoff  ".to_string() }).unwrap();
+        assert_eq!(macro_has(&ctl, knob).0, "Cutoff");
+        for blank in ["", "   "] {
+            ctl.apply(Intent::RenameMacro { node: knob, name: blank.to_string() }).unwrap();
+            assert_eq!(macro_in_graph(&ctl, knob), ("Macro".to_string(), serde_json::json!({"type": "macro", "value": 0.25})), "{blank:?}");
+            assert_eq!(macro_has(&ctl, knob).0, "");
+        }
+        // A name of 64 characters is fine, and so is one that is not ASCII (it is the characters that are counted, not the bytes).
+        assert!(ctl.apply(Intent::RenameMacro { node: knob, name: "å".repeat(64) }).is_ok());
+        ctl.model.check_ids().unwrap();
+    }
+
+    #[test]
+    fn rename_macro_refuses_what_is_not_a_macro_a_name_too_long_and_one_with_a_control_character() {
+        let (engine, mut ctl) = controller();
+        let knob = add_free(&mut ctl, ModulatorKind::Macro);
+        let lfo = add_free(&mut ctl, ModulatorKind::Lfo);
+        let (lane0, group) = (node(&ctl, NodePath::Instrument(0)), node(&ctl, NodePath::Group(0)));
+        let ghost = NodeId(9_999);
+        sent(&engine);
+        let (rev, dirty) = (ctl.rev, ctl.dirty);
+        let rename = |ctl: &mut Controller, node: NodeId, name: &str| ctl.apply(Intent::RenameMacro { node, name: name.to_string() });
+        let nothing_to_name = || invalid("only a macro has a name and a knob to show");
+        assert_eq!(rename(&mut ctl, lfo, "x"), Err(nothing_to_name()));
+        assert_eq!(rename(&mut ctl, lane0, "x"), Err(nothing_to_name()));
+        assert_eq!(rename(&mut ctl, group, "x"), Err(nothing_to_name()));
+        assert_eq!(rename(&mut ctl, ghost, "x"), Err(IntentError::NotFound(ghost)));
+        assert_eq!(rename(&mut ctl, NodeId::MASTER, "x"), Err(IntentError::NotFound(NodeId::MASTER)));
+        assert_eq!(rename(&mut ctl, knob, &"x".repeat(65)), Err(invalid("a name is at most 64 characters")));
+        assert_eq!(rename(&mut ctl, knob, &"å".repeat(65)), Err(invalid("a name is at most 64 characters")));
+        assert_eq!(rename(&mut ctl, knob, "two\nlines"), Err(invalid("a name has no control characters")));
+        assert_eq!(rename(&mut ctl, knob, "tab\there"), Err(invalid("a name has no control characters")));
+        assert_eq!((ctl.rev, ctl.dirty), (rev, dirty), "a refusal is not a revision");
+        assert_eq!(macro_has(&ctl, knob), (String::new(), true));
+        assert!(sent(&engine).is_empty());
+        // The LFO and the rest are as they were: it is not that a node that is no macro was given a name.
+        assert_eq!(ctl.model.free_modulators.last().unwrap().source.node_name(), "LFO");
+    }
+
+    #[test]
+    fn expose_macro_turns_the_knob_on_a_box_off_and_on_in_the_model_alone_and_it_is_on_to_begin_with() {
+        let (engine, mut ctl) = controller_without_modulators();
+        let knob = add_free(&mut ctl, ModulatorKind::Macro);
+        ctl.apply(Intent::SetModulatorField { node: knob, field: ModulatorField::Value, value: 0.25 }).unwrap();
+        ctl.apply(Intent::RenameMacro { node: knob, name: "Wet".to_string() }).unwrap();
+        sent(&engine);
+        let rev = ctl.rev;
+        let applied = ctl.apply(Intent::ExposeMacro { node: knob, expose: false }).unwrap();
+        assert_eq!(applied, Applied::restructured(rev + 1));
+        assert!(applied.events.is_empty(), "nothing a client could apply: it is told by a snapshot");
+        assert!(sent(&engine).is_empty(), "the audio thread has no use for it");
+        assert!(ctl.dirty);
+        assert_eq!(macro_has(&ctl, knob), ("Wet".to_string(), false));
+        // The graph says it when it is off, and says nothing when it is on (a client reads that as on), and the name and the value are as they were.
+        assert_eq!(macro_in_graph(&ctl, knob), ("Wet".to_string(), serde_json::json!({"type": "macro", "value": 0.25, "name": "Wet", "expose": false})));
+        ctl.apply(Intent::ExposeMacro { node: knob, expose: true }).unwrap();
+        assert_eq!(macro_has(&ctl, knob), ("Wet".to_string(), true));
+        assert_eq!(macro_in_graph(&ctl, knob), ("Wet".to_string(), serde_json::json!({"type": "macro", "value": 0.25, "name": "Wet"})));
+        ctl.model.check_ids().unwrap();
+    }
+
+    #[test]
+    fn expose_macro_refuses_what_is_not_a_macro_and_changes_nothing() {
+        let (engine, mut ctl) = controller();
+        let lfo = add_free(&mut ctl, ModulatorKind::Lfo);
+        let (lane0, group) = (node(&ctl, NodePath::Instrument(0)), node(&ctl, NodePath::Group(0)));
+        let ghost = NodeId(9_999);
+        sent(&engine);
+        let (rev, dirty) = (ctl.rev, ctl.dirty);
+        let expose = |ctl: &mut Controller, node: NodeId| ctl.apply(Intent::ExposeMacro { node, expose: false });
+        let nothing_to_show = || invalid("only a macro has a name and a knob to show");
+        assert_eq!(expose(&mut ctl, lfo), Err(nothing_to_show()));
+        assert_eq!(expose(&mut ctl, lane0), Err(nothing_to_show()));
+        assert_eq!(expose(&mut ctl, group), Err(nothing_to_show()));
+        assert_eq!(expose(&mut ctl, ghost), Err(IntentError::NotFound(ghost)));
+        assert_eq!(expose(&mut ctl, NodeId::MASTER), Err(IntentError::NotFound(NodeId::MASTER)));
+        assert_eq!((ctl.rev, ctl.dirty), (rev, dirty), "a refusal is not a revision");
+        assert!(sent(&engine).is_empty());
+    }
+
+    #[test]
+    fn a_macro_that_is_called_something_and_is_not_shown_is_in_the_file_and_comes_back_from_it() {
+        let (_engine, mut ctl) = controller_without_modulators();
+        let (_plain, named, hidden) = (add_free(&mut ctl, ModulatorKind::Macro), add_free(&mut ctl, ModulatorKind::Macro), add_free(&mut ctl, ModulatorKind::Macro));
+        ctl.apply(Intent::RenameMacro { node: named, name: "Brightness".to_string() }).unwrap();
+        ctl.apply(Intent::RenameMacro { node: hidden, name: "Wet".to_string() }).unwrap();
+        ctl.apply(Intent::ExposeMacro { node: hidden, expose: false }).unwrap();
+        let text = saved_text(&ctl.model);
+        let macros: Vec<&str> = text.split("[[modulator]]").skip(1).collect();
+        assert_eq!(macros.len(), 3, "{text}");
+        // (What is as it is by default is not written: a file with a macro in it that has neither key is a macro that is called `Macro` and is shown.)
+        assert!(!macros[0].contains("name") && !macros[0].contains("expose"), "{}", macros[0]);
+        assert!(macros[1].contains("name = \"Brightness\"") && !macros[1].contains("expose"), "{}", macros[1]);
+        assert!(macros[2].contains("name = \"Wet\"") && macros[2].contains("expose = false"), "{}", macros[2]);
+    }
+
     #[test]
     fn remove_node_takes_a_group_out_with_its_effects_and_its_members_are_in_no_group_and_the_modulators_that_heard_it_stay() {
         let (engine, mut ctl) = groups_scene();
@@ -8018,6 +8185,26 @@ to = "master"
     }
 
     #[test]
+    fn a_macro_that_is_called_something_and_is_not_shown_is_saved_in_a_module_and_added_again_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_engine, mut ctl) = a_graph(dir.path());
+        let n = choice_of(&ctl);
+        ctl.apply(Intent::RenameMacro { node: n.knob, name: "Brightness".to_string() }).unwrap();
+        ctl.apply(Intent::ExposeMacro { node: n.knob, expose: false }).unwrap();
+        save_selection(&mut ctl, &[n.math, n.knob], "Bright").unwrap();
+        let text = std::fs::read_to_string(dir.path().join("Bright.toml")).unwrap();
+        assert!(text.contains("name = \"Brightness\"") && text.contains("expose = false"), "{text}");
+        let module = module_in(dir.path(), "Bright");
+        assert!(matches!(&module.modulators[0].source, ModSourceSlot::Macro { name, expose: false, .. } if name == "Brightness"), "{:?}", module.modulators[0].source);
+        let before = ctl.model.free_modulators.len();
+        add_free_effect(&mut ctl, "module:Bright").unwrap();
+        assert_eq!(ctl.model.free_modulators.len(), before + 1);
+        let added = ctl.model.free_modulators.last().unwrap();
+        assert!(matches!(&added.source, ModSourceSlot::Macro { name, expose: false, .. } if name == "Brightness"), "{:?}", added.source);
+        assert_eq!(macro_in_graph(&ctl, added.node).0, "Brightness", "the node is called by the name");
+    }
+
+    #[test]
     fn the_cables_of_a_modulator_to_what_is_not_chosen_are_left_out_and_so_is_an_ear_that_is_not_a_lane_of_the_module() {
         use module::ModuleDrives as Drives;
         let dir = tempfile::tempdir().unwrap();
@@ -8187,7 +8374,7 @@ depth = 0.5
         let lane = ctl.model.instruments.last().unwrap();
         let (new_filter, new_osc) = (lane.effects[0].node, lane.node);
         // What the loader holds a file's modulator to: a knob to 1, a fade to 5 seconds, a depth to 1.
-        assert!(matches!(knob.source, ModSourceSlot::Macro { value } if value == 1.0), "{:?}", knob.source);
+        assert!(matches!(knob.source, ModSourceSlot::Macro { value, .. } if value == 1.0), "{:?}", knob.source);
         assert!(matches!(lfo.source, ModSourceSlot::Lfo { rate, fade, .. } if rate == 1.5 && fade == 5.0), "{:?}", lfo.source);
         assert_eq!((knob.ear, lfo.ear), (Some(new_osc), None));
         let (cutoff, _) = param(&ctl, NodePath::Effect { inst: ctl.model.instruments.len() - 1, index: 0 }, "cutoff");
@@ -9503,6 +9690,122 @@ type = "macro"
         assert!(
             committed == fresh,
             "{} is not what collapsing into a module comes to now: run `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture` and commit the result",
+            path.display()
+        );
+    }
+
+    /// A small session for the web client's fixture of the macro that is called something and shows its knob on a box (step 110): a lane with a filter that an LFO drives, a macro that is not called anything, and a macro that the
+    /// file calls `Wet` and hides from a box.
+    const A_SESSION_WITH_MACROS: &str = r#"
+[[instrument]]
+plugin = "builtin:osc"
+[[instrument.effect]]
+plugin = "builtin:filter"
+
+[[modulator]]
+type = "lfo"
+hears = "instrument[0]"
+[[modulator.target]]
+to = "instrument[0].effect[0]"
+param = "cutoff"
+depth = 0.25
+
+[[modulator]]
+type = "macro"
+value = 0.5
+
+[[modulator]]
+type = "macro"
+name = "Wet"
+expose = false
+"#;
+
+    /// What the controller makes of calling a macro something and of having a box show its knob or not (step 110), as the web client's tests read it (`web/src/client/fixtures/macros.json`): on `A_SESSION_WITH_MACROS`, the first
+    /// macro called something, again (as it is: no step), hidden, hidden again, undone, undone, redone and redone, the second given back its name and shown, the filter and both macros collapsed as `Room`, the first
+    /// called something else in it, undone, taken out and put back, turned (its value is not its name), and then what is refused. Each step is answered by the events it made (stamped), whether it changed the structure,
+    /// what Undo and Redo would do after it, and the nodes, the cables and the layout of the telemetry that the session has then. `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture` rewrites it.
+    #[test]
+    fn the_web_clients_fixture_of_what_a_macro_that_is_called_something_comes_to_is_current() {
+        let (handles, engine) = testutil::stub_engine_of(4_096);
+        let mut ctl = Controller::new(load(A_SESSION_WITH_MACROS).model, handles, None);
+        ctl.catalog.add(plugin::builtin::enumerate_plugins());
+        ctl.subscribe(Box::new(|_: &Applied| {}));
+        let normalized = |mut layout: serde_json::Value| {
+            layout["rev"] = serde_json::json!(1);
+            layout
+        };
+        let mut snapshot = testutil::wire(&ctl.snapshot());
+        snapshot["telemetry"]["rev"] = serde_json::json!(1);
+        let (filter, lfo, knob, wet) = (ctl.model.instruments[0].effects[0].node, ctl.model.free_modulators[0].node, ctl.model.free_modulators[1].node, ctl.model.free_modulators[2].node);
+        let lane = ctl.model.instruments[0].node;
+        let mut steps = Vec::new();
+        let mut take = |ctl: &mut Controller, intent: Intent| {
+            let applied = ctl.apply(intent.clone()).unwrap_or_else(|error| panic!("{intent:?}: {error}"));
+            engine.drain();
+            let state = ctl.snapshot();
+            let history = ctl.history_state();
+            steps.push(serde_json::json!({
+                "intent": testutil::wire(&intent),
+                "events": testutil::wire(&applied.stamped()),
+                "restructured": applied.restructured,
+                "history": { "undo": history.undo, "redo": history.redo },
+                "graph": testutil::wire(&state.graph),
+                "telemetry": normalized(testutil::wire(&state.telemetry)),
+            }));
+        };
+        let rename = |node: NodeId, name: &str| Intent::RenameMacro { node, name: name.to_string() };
+        take(&mut ctl, rename(knob, "  Brightness  "));
+        take(&mut ctl, rename(knob, "Brightness"));
+        take(&mut ctl, Intent::ExposeMacro { node: knob, expose: false });
+        take(&mut ctl, Intent::ExposeMacro { node: knob, expose: false });
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::Redo);
+        take(&mut ctl, Intent::Redo);
+        take(&mut ctl, rename(wet, ""));
+        take(&mut ctl, Intent::ExposeMacro { node: wet, expose: true });
+        take(&mut ctl, collapse(&[filter, knob, wet], "Room", Some(NodeUi { x: 40.0, y: 120.5 })));
+        take(&mut ctl, rename(knob, "Cutoff"));
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::RemoveNode { node: knob });
+        take(&mut ctl, Intent::Undo);
+        take(&mut ctl, Intent::SetModulatorField { node: knob, field: ModulatorField::Value, value: 0.75 });
+        take(&mut ctl, rename(wet, &"å".repeat(64)));
+        // What is refused on the session as it is now: a node that is no macro, a node that is not there, the master, a name that is too long and one with a control character.
+        let mut refusals: Vec<serde_json::Value> = Vec::new();
+        let (rev, ids) = (ctl.rev, ctl.model.nodes().map(|(node, _)| node.0).max());
+        for intent in [
+            rename(lfo, "x"),
+            rename(lane, "x"),
+            rename(filter, "x"),
+            rename(NodeId(9_999), "x"),
+            rename(NodeId::MASTER, "x"),
+            rename(knob, &"x".repeat(65)),
+            rename(knob, &"å".repeat(65)),
+            rename(knob, "Ro\u{7}om"),
+            rename(knob, "tab\there"),
+            Intent::ExposeMacro { node: lfo, expose: false },
+            Intent::ExposeMacro { node: lane, expose: false },
+            Intent::ExposeMacro { node: filter, expose: true },
+            Intent::ExposeMacro { node: NodeId(9_999), expose: false },
+            Intent::ExposeMacro { node: NodeId::MASTER, expose: false },
+        ] {
+            let error = ctl.apply(intent.clone()).expect_err("refused").to_string();
+            refusals.push(serde_json::json!({ "after": steps.len(), "intent": testutil::wire(&intent), "error": error }));
+        }
+        assert_eq!((ctl.rev, ctl.model.nodes().map(|(node, _)| node.0).max()), (rev, ids), "a refusal changes nothing and uses no id");
+        let fixture = serde_json::json!({ "snapshot": snapshot, "steps": steps, "refusals": refusals });
+        let fresh = serde_json::to_string_pretty(&fixture).unwrap() + "\n";
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/src/client/fixtures/macros.json");
+        if std::env::var_os("TANG_UPDATE_TYPES").is_some() {
+            std::fs::write(&path, &fresh).unwrap();
+            return;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            committed == fresh,
+            "{} is not what a macro that is called something comes to now: run `TANG_UPDATE_TYPES=1 cargo test the_web_clients_fixture` and commit the result",
             path.display()
         );
     }

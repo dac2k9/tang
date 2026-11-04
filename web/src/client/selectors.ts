@@ -5,6 +5,7 @@ import type { EdgeId, Gain, ModulatorField, Node, NodeId, NoteRange, Param, Patt
 import type { ClientState } from "./connection";
 import type { Stages } from "./envelope";
 import { audibleOf, ownAudibleOf } from "./audible";
+import { macroExposed } from "./macros";
 import { displayNames } from "./names";
 import { shownParams } from "./pinning";
 import { unusedBecause } from "./uses";
@@ -276,6 +277,12 @@ export function modulatorFieldOf(state: ClientState, id: NodeId, field: Modulato
     if (field === "sync") return source.sync;
   }
   return undefined;
+}
+
+/** Whether the macro in node `id` shows its knob on the box of a module that it is in (step 110); undefined for a node that is no macro. */
+export function macroExposedOf(state: ClientState, id: NodeId): boolean | undefined {
+  const node = nodeById(state, id);
+  return node?.kind === "modulator" && node.source.type === "macro" ? macroExposed(node.source) : undefined;
 }
 
 /** The steps of the step sequencer `id`, all of them (the list that its node has, so that an unchanged one is the same list): none for a node that is not one. */

@@ -5130,7 +5130,7 @@ fn the_modulate_popup_has_a_new_macro_that_is_made_at_rest_with_a_cable_to_the_p
     h.press(KeyCode::Enter);
     let rack = &h.s.ctl.model.free_modulators;
     assert_eq!(rack.len(), 4);
-    assert!(matches!(rack[3].source, ModSourceSlot::Macro { value } if value == 0.0), "{:?}", rack[3].source);
+    assert!(matches!(rack[3].source, ModSourceSlot::Macro { value, .. } if value == 0.0), "{:?}", rack[3].source);
     assert_eq!(rack[3].targets.len(), 1);
     let commands = h.commands();
     assert_eq!(commands[0], "InsertFreeModulator index=3 source=Macro { value: 0.0 }", "{commands:?}");
@@ -5146,7 +5146,7 @@ fn the_modulate_popup_on_a_bus_parameter_can_make_a_macro_that_hears_the_group()
     h.press(KeyCode::Enter).press(KeyCode::Char('m')).press_n(KeyCode::Down, 2).press(KeyCode::Enter);
     let rack = &h.s.ctl.model.free_modulators;
     assert_eq!(rack.len(), 4, "the three of the session, and the macro");
-    assert!(matches!(rack[3].source, ModSourceSlot::Macro { value } if value == 0.0), "{:?}", rack[3].source);
+    assert!(matches!(rack[3].source, ModSourceSlot::Macro { value, .. } if value == 0.0), "{:?}", rack[3].source);
     assert_eq!((rack[3].targets.len(), rack[3].ear), (1, Some(pad)));
     assert_eq!(h.commands()[0], "InsertFreeModulator index=3 source=Macro { value: 0.0 }");
 }
@@ -5190,7 +5190,7 @@ fn a_value_typed_into_a_macro_is_set_and_kept_between_nothing_and_one() {
 
 fn macro_value(h: &Harness) -> f32 {
     match h.s.ctl.model.free_modulators[0].source {
-        ModSourceSlot::Macro { value } => value,
+        ModSourceSlot::Macro { value, .. } => value,
         ref other => panic!("{other:?}"),
     }
 }

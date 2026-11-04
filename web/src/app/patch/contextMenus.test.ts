@@ -774,7 +774,7 @@ describe("the menus of a module that is a box, and of the lanes of one that is o
     if (!found) throw new Error(`no node ${String(id)}`);
     return found;
   };
-  const box = { node: 1, plugins: 2, modulators: 1, inputs: [], outputs: [], modIn: [], modOut: [] };
+  const box = { node: 1, plugins: 2, modulators: 1, inputs: [], outputs: [], modIn: [], modOut: [], knobs: [] };
 
   test("a box opens, or is taken out with all that is in it, in the words that its × says", () => {
     const { deps, asked, canvasAsked } = rig(snapshot);

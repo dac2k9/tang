@@ -1644,9 +1644,13 @@ pub enum ModSourceSlot {
         source: Option<crate::plugin::chain::MidiBindSource>,
         learning: bool,
     },
-    /// A number that the person sets, 0 to 1: a knob that drives what has a cable from it.
+    /// A number that the person sets, 0 to 1: a knob that drives what has a cable from it. It can be called something (`name`: a person's word for it, "Brightness"; empty is the
+    /// default, "Macro"), and a box that stands for a module that it is in shows its knob unless it is told not to (`expose`, on to begin with, which is what a macro is for). Neither is
+    /// told to the audio thread: it has nothing of a macro but its value.
     Macro {
         value: f32,
+        name: String,
+        expose: bool,
     },
     /// A step sequencer: the values it goes through, -1 to 1 (the first `length` of them are in use, the others are kept for when it is longer), how many
     /// steps it goes through a second, how much of each step is spent gliding to the next one's value, whether a note starts it again at the first step, and the note length of the tempo
@@ -1683,9 +1687,15 @@ impl ModSourceSlot {
         ModSourceSlot::MidiLearn { source: Some(source), learning: false }
     }
 
-    /// A macro at rest: it drives nothing until it is turned.
+    /// A macro at rest: it drives nothing until it is turned. It has no name of its own (it is `Macro`) and shows its knob on the box of a module that it is in (`expose`).
     pub fn new_macro() -> Self {
-        ModSourceSlot::Macro { value: 0.0 }
+        ModSourceSlot::Macro { value: 0.0, name: String::new(), expose: true }
+    }
+
+    /// A macro at a value, with no name and exposed: what a test needs a macro to be, apart from what it is set to.
+    #[cfg(test)]
+    pub fn macro_at(value: f32) -> Self {
+        ModSourceSlot::Macro { value, name: String::new(), expose: true }
     }
 
     /// A step sequencer as the modulate popup makes it: all sixteen steps in use, a staircase that climbs from the bottom in eighths (so that it shows at once
@@ -1715,11 +1725,12 @@ impl ModSourceSlot {
     }
 
     /// What the modulator's node is called for a client: its kind, or what a control
-    /// is bound to. Not its settings, which a client is told when they change and
+    /// is bound to, or, for a macro that the person has named, the name. Not its settings, which a client is told when they change and
     /// which a name would have to follow (`label` has them, for the TUI).
     pub fn node_name(&self) -> String {
         match self {
             ModSourceSlot::Lfo { .. } => "LFO".to_string(),
+            ModSourceSlot::Macro { name, .. } if !name.is_empty() => name.clone(),
             ModSourceSlot::Macro { .. } => "Macro".to_string(),
             ModSourceSlot::Steps { .. } => "Steps".to_string(),
             other => other.label(),
@@ -1742,7 +1753,8 @@ impl ModSourceSlot {
                 None if *learning => "MIDI (learning…)".to_string(),
                 None => "MIDI (unbound)".to_string(),
             },
-            ModSourceSlot::Macro { value } => format!("Macro {value:.2}"),
+            ModSourceSlot::Macro { value, name, .. } if !name.is_empty() => format!("Macro {name} {value:.2}"),
+            ModSourceSlot::Macro { value, .. } => format!("Macro {value:.2}"),
             ModSourceSlot::Steps { length, rate, sync, .. } if *sync == 0 => format!("Steps {length} {rate:.1}Hz"),
             ModSourceSlot::Steps { length, sync, .. } => format!("Steps {length} {}", sync_name(*sync)),
         }
@@ -2130,7 +2142,7 @@ impl ModSourceSlot {
             (ModSourceSlot::Envelope { decay, .. }, ModulatorField::Decay) => Some(*decay),
             (ModSourceSlot::Envelope { sustain, .. }, ModulatorField::Sustain) => Some(*sustain),
             (ModSourceSlot::Envelope { release, .. }, ModulatorField::Release) => Some(*release),
-            (ModSourceSlot::Macro { value }, ModulatorField::Value) => Some(*value),
+            (ModSourceSlot::Macro { value, .. }, ModulatorField::Value) => Some(*value),
             (ModSourceSlot::Steps { rate, .. }, ModulatorField::Rate) => Some(*rate),
             (ModSourceSlot::Steps { glide, .. }, ModulatorField::Glide) => Some(*glide),
             (ModSourceSlot::Steps { length, .. }, ModulatorField::Length) => Some(*length as f32),
@@ -2289,7 +2301,7 @@ pub fn mod_source_slot_to_graph(slot: &ModSourceSlot) -> crate::plugin::chain::M
             value: source.map_or(0.0, crate::plugin::chain::MidiBindSource::rest),
             learning: *learning,
         },
-        ModSourceSlot::Macro { value } => crate::plugin::chain::ModSource::Macro { value: *value },
+        ModSourceSlot::Macro { value, .. } => crate::plugin::chain::ModSource::Macro { value: *value },
         ModSourceSlot::Steps { values, length, rate, glide, retrigger, sync } => crate::plugin::chain::ModSource::Steps {
             values: *values,
             length: *length,
@@ -3502,23 +3514,36 @@ mod_rate = 0
 
     #[test]
     fn a_macro_goes_to_the_audio_thread_as_a_macro_of_its_value() {
-        assert!(matches!(mod_source_slot_to_graph(&ModSourceSlot::Macro { value: 0.4 }), ModSource::Macro { value } if value == 0.4));
+        assert!(matches!(mod_source_slot_to_graph(&ModSourceSlot::macro_at(0.4)), ModSource::Macro { value } if value == 0.4));
         assert!(matches!(mod_source_slot_to_graph(&ModSourceSlot::new_macro()), ModSource::Macro { value } if value == 0.0));
     }
 
     #[test]
     fn a_new_macro_is_at_rest() {
-        assert!(matches!(ModSourceSlot::new_macro(), ModSourceSlot::Macro { value } if value == 0.0));
+        assert!(matches!(ModSourceSlot::new_macro(), ModSourceSlot::Macro { value, .. } if value == 0.0));
     }
 
     #[test]
     fn a_macro_is_labelled_with_its_value_and_its_node_is_called_a_macro_whatever_the_value() {
-        assert_eq!(ModSourceSlot::Macro { value: 0.5 }.label(), "Macro 0.50");
-        assert_eq!(ModSourceSlot::Macro { value: 0.0 }.label(), "Macro 0.00");
-        assert_eq!(ModSourceSlot::Macro { value: 1.0 }.label(), "Macro 1.00");
+        assert_eq!(ModSourceSlot::macro_at(0.5).label(), "Macro 0.50");
+        assert_eq!(ModSourceSlot::macro_at(0.0).label(), "Macro 0.00");
+        assert_eq!(ModSourceSlot::macro_at(1.0).label(), "Macro 1.00");
         // (A node's name is its kind: a client is told the settings when they change, and a name would have to follow them.)
-        assert_eq!(ModSourceSlot::Macro { value: 0.5 }.node_name(), "Macro");
-        assert_eq!(ModSourceSlot::Macro { value: 0.9 }.node_name(), "Macro");
+        assert_eq!(ModSourceSlot::macro_at(0.5).node_name(), "Macro");
+        assert_eq!(ModSourceSlot::macro_at(0.9).node_name(), "Macro");
+    }
+
+    #[test]
+    fn a_macro_that_is_called_something_is_called_so_by_its_node_and_in_the_tree_and_one_that_is_not_called_anything_is_a_macro() {
+        let named = |name: &str| ModSourceSlot::Macro { value: 0.5, name: name.to_string(), expose: true };
+        assert_eq!(named("Brightness").node_name(), "Brightness");
+        assert_eq!(named("Brightness").label(), "Macro Brightness 0.50", "the kind first, as every other label has it, and then the name and the value");
+        assert_eq!(named("").node_name(), "Macro");
+        assert_eq!(named("").label(), "Macro 0.50", "no name is the label that a macro always had");
+        // A new macro is not called anything and shows its knob; whether a box shows it is not what the audio thread is told.
+        assert!(matches!(ModSourceSlot::new_macro(), ModSourceSlot::Macro { ref name, expose: true, .. } if name.is_empty()));
+        let hidden = ModSourceSlot::Macro { value: 0.4, name: "Wet".to_string(), expose: false };
+        assert!(matches!(mod_source_slot_to_graph(&hidden), ModSource::Macro { value } if value == 0.4));
     }
 
     #[test]
@@ -3673,7 +3698,7 @@ mod_rate = 0
     }
 
     fn knob(targets: Vec<ModTargetSlot>) -> ModulatorSlot {
-        ModulatorSlot { node: NodeId(7), source: ModSourceSlot::Macro { value: 0.25 }, targets, output: None, position: None, ear: None }
+        ModulatorSlot { node: NodeId(7), source: ModSourceSlot::macro_at(0.25), targets, output: None, position: None, ear: None }
     }
 
     /// An LFO that a note starts again and that comes in over three quarters of a second.

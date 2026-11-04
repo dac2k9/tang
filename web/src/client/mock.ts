@@ -46,6 +46,8 @@ import { cablesThatGo, isAudioCable, isLink, isModulation, isNotesCable } from "
 import { Counters } from "./counters";
 import { History, addedStep, laneOrGroupWords, planOf, removedStep, takesOut } from "./history";
 import type { HistoryState, Made, Plan } from "./history";
+import { macroExposed, macroName } from "./macros";
+import type { MacroSource } from "./macros";
 import { noise } from "./noise";
 import { deviceName, eventCableEnds, withHears } from "./noteWiring";
 import { MODULATOR_LABELS, kindOf } from "./modulatorKinds";
@@ -1331,6 +1333,44 @@ function renameGroupOutcome(snapshot: Snapshot, node: NodeId, name: string): Out
   return { event: { type: "groupRenamed", node, name: tidied.name === "" ? `Group ${place + 1}` : tidied.name } };
 }
 
+/** What the controller says of a node that is no macro, when it is asked for a name or for the knob that a box shows (`macro_properties_mut`). */
+const NOT_A_MACRO = "only a macro has a name and a knob to show";
+
+/**
+ * The macro `node` with its name or its flag changed (step 110), as the graph says them: the node is called by the name (`Macro` for none), and the source leaves out what a macro is to begin with (no name, and shown),
+ * as the wire does. The other nodes are as they were.
+ */
+function withMacroChanged(snapshot: Snapshot, node: Extract<Node, { kind: "modulator" }>, source: MacroSource, change: { name: string } | { expose: boolean }): Snapshot {
+  const name = "name" in change ? change.name : macroName(source);
+  const expose = "expose" in change ? change.expose : macroExposed(source);
+  const next: MacroSource = { type: "macro", value: source.value };
+  if (name !== "") next.name = name;
+  if (!expose) next.expose = false;
+  const changed: Node = { ...node, name: name === "" ? "Macro" : name, source: next };
+  return { ...snapshot, graph: { ...snapshot.graph, nodes: snapshot.graph.nodes.map((n) => (n === node ? changed : n)) } };
+}
+
+/**
+ * A macro called something, as the controller's `rename_macro_intent` does it (step 110): the node has to be a macro (the master is no node of the model, as far as the controller goes), and the name is tidied as a group's is
+ * (the spaces round it go, at most `NAME_LIMIT` characters, no control character); a name of nothing is no name, and the macro is called `Macro`.
+ */
+function renameMacroOutcome(snapshot: Snapshot, node: NodeId, name: string): Outcome {
+  const found = snapshot.graph.nodes.find((n) => n.id === node && n.kind !== "master");
+  if (!found) return noNode(node);
+  if (found.kind !== "modulator" || found.source.type !== "macro") return invalid(NOT_A_MACRO);
+  const tidied = tidyName(name);
+  if ("error" in tidied) return invalid(tidied.error);
+  return { restructured: withMacroChanged(snapshot, found, found.source, { name: tidied.name }) };
+}
+
+/** A macro that shows its knob on the box of its module, or not, as the controller's `expose_macro_intent` does it (step 110): the node has to be a macro. */
+function exposeMacroOutcome(snapshot: Snapshot, node: NodeId, expose: boolean): Outcome {
+  const found = snapshot.graph.nodes.find((n) => n.id === node && n.kind !== "master");
+  if (!found) return noNode(node);
+  if (found.kind !== "modulator" || found.source.type !== "macro") return invalid(NOT_A_MACRO);
+  return { restructured: withMacroChanged(snapshot, found, found.source, { expose }) };
+}
+
 /** The lane `lane` put in the group `group` (or in none), the snapshot as it is: see `setLaneGroupOutcome`. Both are known to be what they should be. */
 function lanePutIn(snapshot: Snapshot, lane: NodeId, group: NodeId | null): Snapshot {
   const found = snapshot.graph.nodes.find((n) => n.id === lane);
@@ -1568,6 +1608,8 @@ function intentOutcome(snapshot: Snapshot, intent: Intent, counters: Counters, c
   if (intent.type === "setNodeUi") return placeOutcome(snapshot, intent.node, intent.ui);
   if (intent.type === "setPinned") return pinnedOutcome(snapshot, intent.node, intent.params);
   if (intent.type === "renameGroup") return renameGroupOutcome(snapshot, intent.node, intent.name);
+  if (intent.type === "renameMacro") return renameMacroOutcome(snapshot, intent.node, intent.name);
+  if (intent.type === "exposeMacro") return exposeMacroOutcome(snapshot, intent.node, intent.expose);
   if (intent.type === "setLaneGroup") return setLaneGroupOutcome(snapshot, intent.node, intent.group);
   if (intent.type === "setRoute") return setRouteOutcome(snapshot, intent.node, intent.route);
   if (intent.type === "setModulatorEar") return setModulatorEarOutcome(snapshot, intent.node, intent.ear);

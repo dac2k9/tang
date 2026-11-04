@@ -1,9 +1,9 @@
 import { describe, expect, test } from "vitest";
 
 import { displayNames } from "../../client/names";
-import type { Graph, NodeId } from "../../protocol";
+import type { Graph, Node, NodeId } from "../../protocol";
 import { boxDetail, boxRows, collapse } from "./boxes";
-import { drives, effect, hears, keys, lane, link, MASTER, master, modulator, moduleNode as module, plugin, send, wayOut } from "./boxesKit";
+import { drives, effect, hears, keys, lane, link, macro, MASTER, master, modulator, moduleNode as module, plugin, send, wayOut } from "./boxesKit";
 
 const run = (graph: Graph, open: ReadonlySet<NodeId> = new Set()) => collapse(graph, displayNames(graph), open);
 
@@ -52,6 +52,7 @@ describe("a module that is closed is one box", () => {
       outputs: [{ member: 4, handle: "audioOut", label: "Delay", kind: "audio" }],
       modIn: [],
       modOut: [],
+      knobs: [],
     });
     expect(boxRows(box ?? { inputs: [], outputs: [] })).toBe(1);
     // (A box that has no port is as tall as one that has one, and one that has more of one side than of the other has as many rows as that side.)
@@ -175,6 +176,59 @@ describe("a module that is closed is one box", () => {
       [3, 4],
     ]);
     expect(collapsed.graph.nodes.map((node) => node.id)).toEqual([1, 4, MASTER]);
+  });
+});
+
+describe("the knobs that a box shows (step 110)", () => {
+  /** A module (1) of a lane (2) that holds a filter (3), and `inside`, which are the modulators that came with it; a macro (22) of the session's own is outside it. */
+  const room_with = (...inside: Node[]): Graph => ({
+    nodes: [lane(2, "Chain", null), effect(3, 2, "Filter"), ...inside, macro(22, "Macro"), module(1, "Room", [2, ...inside.map((node) => node.id)]), master],
+    edges: [link(2, 3)],
+  });
+  const knobs = (graph: Graph, open: ReadonlySet<NodeId> = new Set()) => run(graph, open).boxes.get(1)?.knobs.map((knob) => [knob.member, knob.label]);
+
+  test("are one for each macro in the module, in the order of the graph, called by the macro's name as the canvas calls the node (a name that more than one node has is numbered)", () => {
+    // (The macro that is outside the module is called `Macro` too: the two are `Macro 1` and `Macro 2`, which is how the canvas tells them apart.)
+    expect(knobs(room_with(macro(20, "Macro"), macro(21, "Brightness", { name: "Brightness" })))).toEqual([
+      [20, "Macro 1"],
+      [21, "Brightness"],
+    ]);
+    // (A macro that is alone with its name keeps it, whatever the module is called.)
+    expect(knobs(room_with(macro(21, "Brightness", { name: "Brightness" })))).toEqual([[21, "Brightness"]]);
+  });
+
+  test("are none for a module that has no macro in it, and a box says nothing more of itself for the macros: they are modulators in the count of what is in it", () => {
+    const graph = room_with(modulator(20, "LFO"));
+    expect(knobs(graph)).toEqual([]);
+    expect(run(graph).boxes.get(1)?.modulators).toBe(1);
+    const hidden = room_with(macro(20, "Macro", { expose: false }), macro(21, "Macro"));
+    expect(run(hidden).boxes.get(1)?.modulators, "a macro that is hidden from the box is still in it").toBe(2);
+    expect(boxDetail(run(hidden).boxes.get(1) ?? { plugins: 0, modulators: 0 })).toBe("1 plugin · 2 modulators");
+  });
+
+  test("leave out a macro that is told not to show its knob, and the one outside the module, and any modulator that is not a macro; a flag that the wire leaves out, or says is on, shows it", () => {
+    const graph = room_with(macro(20, "Hidden", { expose: false }), macro(21, "Left out"), macro(23, "Said", { expose: true }), modulator(24, "LFO"));
+    expect(knobs(graph)).toEqual([
+      [21, "Left out"],
+      [23, "Said"],
+    ]);
+  });
+
+  test("are on a box and not on a module that is open, which has its nodes: each macro has its own knob there", () => {
+    const graph = room_with(macro(20, "Macro"));
+    expect(knobs(graph, new Set([1]))).toBeUndefined();
+    expect(run(graph, new Set([1])).graph.nodes.map((node) => node.id)).toContain(20);
+  });
+
+  test("are those of the module that each macro is in, and a macro that has been taken out of a module (the record no longer names it) is not on any box", () => {
+    const graph: Graph = {
+      nodes: [lane(2, "A"), lane(3, "B"), macro(20, "First"), macro(21, "Second"), macro(22, "Alone"), module(1, "One", [2, 20]), module(4, "Two", [3, 21]), master],
+      edges: [],
+    };
+    const collapsed = run(graph);
+    expect(collapsed.boxes.get(1)?.knobs).toEqual([{ member: 20, label: "First" }]);
+    expect(collapsed.boxes.get(4)?.knobs).toEqual([{ member: 21, label: "Second" }]);
+    expect(collapsed.graph.nodes.map((node) => node.id)).toEqual([22, 1, 4, MASTER]);
   });
 });
 

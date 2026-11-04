@@ -3,7 +3,8 @@
 // for as long as the module is closed: the nodes inside are not on the canvas, and a cable that has one end inside goes to the box instead, to a port of the box that stands for the port of the node inside
 // (`memberHandle`). The ports that a box has are the ones that a module has to the world: the inputs of audio that nothing inside feeds, the outputs of audio that nothing inside takes, the inputs of notes of
 // its instruments, and every port that a cable crosses the box's edge at. An open module is its nodes, with no box: this is a function of the graph and of which modules are open (the viewer's own choice,
-// like which node shows its scope), and is what `toFlow` lays out and draws.
+// like which node shows its scope), and is what `toFlow` lays out and draws. (Step 110: a box also shows the knob of every macro that is in it and has not been told to hide it, `BoxKnob`.)
+import { macroExposed } from "../../client/macros";
 import { endLabel, portName } from "../../client/names";
 import type { Names } from "../../client/names";
 import { laneTakesNotes } from "../../client/noteWiring";
@@ -22,7 +23,15 @@ export interface BoxPort {
   kind: "audio" | "notes" | "modulation";
 }
 
-/** What a box has of the module it is: how much is inside it, and its ports. */
+/** A knob that a box shows for something inside the module (step 110: the value of a macro that is not hidden from it): the macro's own knob, turned where it is. */
+export interface BoxKnob {
+  /** The macro, a modulator inside the module: the knob is its value. */
+  member: NodeId;
+  /** What to call it, for a person: the macro's name (`Brightness`, or `Macro 1` for one that has none: `displayNames` numbers the names that more than one node has). */
+  label: string;
+}
+
+/** What a box has of the module it is: how much is inside it, its ports and its knobs. */
 export interface Box {
   /** The module's node. */
   node: NodeId;
@@ -38,6 +47,8 @@ export interface Box {
   modIn: readonly BoxPort[];
   /** The modulators inside the module that drive something outside it (the bottom edge). */
   modOut: readonly BoxPort[];
+  /** The knobs of the macros inside the module that show on the box, in the order of the graph (a macro that is told not to is not among them): a grid under the ports, `CONTROLS_PER_ROW` in a row. */
+  knobs: readonly BoxKnob[];
 }
 
 /** How many rows the inputs and the outputs of a box take: as many as the longer of the two, and one at least (a box that has no port is as tall as one that has). */
@@ -177,6 +188,7 @@ export function collapse(graph: Graph, names: Names, open: ReadonlySet<NodeId>):
     };
     let plugins = 0;
     let modulators = 0;
+    const knobs: BoxKnob[] = [];
     for (const node of inside.get(module.id) ?? []) {
       if (node.kind === "effect") {
         plugins += 1;
@@ -193,6 +205,7 @@ export function collapse(graph: Graph, names: Names, open: ReadonlySet<NodeId>):
         if (laneTakesNotes(node)) add(notesIn, { node: node.id, port: { type: "eventsIn" } }, "notes", called(node.id));
       } else if (node.kind === "modulator") {
         modulators += 1;
+        if (node.source.type === "macro" && macroExposed(node.source)) knobs.push({ member: node.id, label: called(node.id) });
       }
     }
     for (const { module: of, end } of crossing) {
@@ -219,7 +232,7 @@ export function collapse(graph: Graph, names: Names, open: ReadonlySet<NodeId>):
     /** A box's ports in the order of the nodes they are the ports of (the order of the graph), and the order of the handles of one node. */
     const ordered = (ports: Map<string, BoxPort>): BoxPort[] =>
       [...ports.values()].sort((a, b) => (order.get(a.member) ?? 0) - (order.get(b.member) ?? 0) || (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 : 0));
-    boxes.set(module.id, { node: module.id, plugins, modulators, inputs: [...ordered(audioIn), ...ordered(notesIn)], outputs: ordered(audioOut), modIn: ordered(modIn), modOut: ordered(modOut) });
+    boxes.set(module.id, { node: module.id, plugins, modulators, inputs: [...ordered(audioIn), ...ordered(notesIn)], outputs: ordered(audioOut), modIn: ordered(modIn), modOut: ordered(modOut), knobs });
   }
   return { graph: { nodes, edges: placed.map((cable) => cable.edge) }, edges: placed, boxes, moduleOf };
 }

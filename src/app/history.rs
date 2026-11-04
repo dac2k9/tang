@@ -19,7 +19,7 @@ use crate::app::controller::Controller;
 use crate::app::graph::{NoteRange, Port, SourceInfo};
 use crate::app::intent::{Applied, Gain, Intent, IntentError, ModulatorField, ModulatorKind};
 use crate::app::journal::{Journal, lane_words};
-use crate::app::model::{EdgeId, Made, NodeId, NodePath, PluginSlot};
+use crate::app::model::{EdgeId, Made, ModSourceSlot, NodeId, NodePath, PluginSlot};
 use crate::app::module;
 use crate::piano_filter::PianoMode;
 use crate::plugin::chain::ModulatorLocation;
@@ -362,6 +362,17 @@ impl Controller {
         }
     }
 
+    /// The name that the macro `node` has (nothing for none: it is called `Macro`) and whether its knob is on the box of a module that it is in, as `RenameMacro` and `ExposeMacro` say them: none for a node that is no macro.
+    fn macro_properties(&self, node: NodeId) -> Option<(&str, bool)> {
+        match self.model.locate(node)? {
+            NodePath::Modulator { at: ModulatorLocation::Free, index } => match &self.model.free_modulators[index].source {
+                ModSourceSlot::Macro { name, expose, .. } => Some((name, *expose)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// What a lane or a group is called in the words of a step of what a modulator hears ("the lane of Oscillator", "Pad"): none for a node that is neither.
     fn lane_or_group_words(&self, node: NodeId) -> Option<String> {
         match self.model.locate(node)? {
@@ -489,6 +500,21 @@ impl Controller {
                     // (None is the name a group has by default, which a name of nothing gives back.)
                     let old = self.model.groups[group].name.clone().unwrap_or_default();
                     step("rename a group".to_string(), Intent::RenameGroup { node: *node, name: old }, None)
+                }
+                _ => Plan::Nothing,
+            },
+            // (As a group's name is: a node that is no macro, and a name that is not one, are refused, and a name that the macro has changes nothing: no step is kept for any of them.)
+            Intent::RenameMacro { node, name } => match self.macro_properties(*node) {
+                Some((was, _)) if super::apply::macro_name(name).is_ok_and(|new| new != was) => {
+                    step("rename a macro".to_string(), Intent::RenameMacro { node: *node, name: was.to_string() }, None)
+                }
+                _ => Plan::Nothing,
+            },
+            // (As a mute is: a node that is no macro is refused, and what is as it is asked to be changes nothing: no step is kept for either.)
+            Intent::ExposeMacro { node, expose } => match self.macro_properties(*node) {
+                Some((_, was)) if was != *expose => {
+                    let label = if *expose { "show a macro on its box" } else { "hide a macro from its box" };
+                    step(label.to_string(), Intent::ExposeMacro { node: *node, expose: was }, None)
                 }
                 _ => Plan::Nothing,
             },
@@ -1971,6 +1997,107 @@ rate = 3.0
         let applied = ctl.undo().unwrap();
         assert_eq!(ctl.model.groups[0].name, None);
         assert_eq!(applied.events, [Event::GroupRenamed { node: group, name: "Group 1".to_string() }]);
+    }
+
+    // -- The name of a macro and whether a box shows its knob (RenameMacro and ExposeMacro, step 110) --
+
+    /// A macro in the session's own rack, with the name and the flag it has.
+    fn a_macro(ctl: &mut Controller) -> NodeId {
+        ctl.apply(Intent::AddFreeModulator { kind: ModulatorKind::Macro, hears: None }).unwrap();
+        ctl.model.free_modulators.last().unwrap().node
+    }
+
+    fn macro_has(ctl: &Controller, node: NodeId) -> (String, bool) {
+        let Some(NodePath::Modulator { index, .. }) = ctl.model.locate(node) else { panic!("a modulator") };
+        match &ctl.model.free_modulators[index].source {
+            ModSourceSlot::Macro { name, expose, .. } => (name.clone(), *expose),
+            other => panic!("a macro, and not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_name_of_a_macro_is_put_back_and_a_macro_that_had_none_has_none_again() {
+        let (_engine, mut ctl, _clock) = controller();
+        let knob = a_macro(&mut ctl);
+        ctl.apply(Intent::RenameMacro { node: knob, name: "Brightness".to_string() }).unwrap();
+        assert_eq!(undo_label(&ctl).as_deref(), Some("rename a macro"));
+        // (Two in a row are two steps: a name is not a gesture that goes on, and nothing of it is merged.)
+        ctl.apply(Intent::RenameMacro { node: knob, name: "  Cutoff ".to_string() }).unwrap();
+        ctl.apply(Intent::RenameMacro { node: knob, name: String::new() }).unwrap();
+        assert_eq!(macro_has(&ctl, knob), (String::new(), true));
+        ctl.undo().unwrap();
+        assert_eq!(macro_has(&ctl, knob).0, "Cutoff");
+        ctl.undo().unwrap();
+        assert_eq!(macro_has(&ctl, knob).0, "Brightness");
+        ctl.undo().unwrap();
+        assert_eq!(macro_has(&ctl, knob).0, "", "a macro that had no name has none again, and is not given the one it was called by");
+        assert_eq!(undo_label(&ctl).as_deref(), Some("add a macro"), "the three steps were three, and the macro is the next");
+        ctl.redo().unwrap();
+        ctl.redo().unwrap();
+        ctl.redo().unwrap();
+        assert_eq!(macro_has(&ctl, knob).0, "");
+        assert_eq!(redo_label(&ctl), None);
+    }
+
+    #[test]
+    fn showing_a_macro_on_its_box_and_hiding_it_are_steps_with_their_own_words_that_undo_and_redo_put_back() {
+        let (_engine, mut ctl, _clock) = controller();
+        let knob = a_macro(&mut ctl);
+        ctl.apply(Intent::ExposeMacro { node: knob, expose: false }).unwrap();
+        assert_eq!((undo_label(&ctl).as_deref(), macro_has(&ctl, knob).1), (Some("hide a macro from its box"), false));
+        ctl.apply(Intent::ExposeMacro { node: knob, expose: true }).unwrap();
+        assert_eq!((undo_label(&ctl).as_deref(), macro_has(&ctl, knob).1), (Some("show a macro on its box"), true));
+        ctl.undo().unwrap();
+        assert!(!macro_has(&ctl, knob).1);
+        ctl.undo().unwrap();
+        assert!(macro_has(&ctl, knob).1, "on to begin with");
+        ctl.redo().unwrap();
+        assert!(!macro_has(&ctl, knob).1);
+        // The name is not touched by the flag, nor the flag by the name.
+        ctl.apply(Intent::RenameMacro { node: knob, name: "Wet".to_string() }).unwrap();
+        ctl.undo().unwrap();
+        assert_eq!(macro_has(&ctl, knob), (String::new(), false));
+    }
+
+    #[test]
+    fn a_macro_that_is_asked_to_be_what_it_is_and_what_is_refused_leave_no_step() {
+        let (_engine, mut ctl, _clock) = controller();
+        let knob = a_macro(&mut ctl);
+        let lane0 = lane(&ctl);
+        let steps = |ctl: &Controller| undo_label(ctl);
+        let before = steps(&ctl);
+        // As it is: not a step, and the one before it is the next to undo.
+        ctl.apply(Intent::ExposeMacro { node: knob, expose: true }).unwrap();
+        ctl.apply(Intent::RenameMacro { node: knob, name: String::new() }).unwrap();
+        ctl.apply(Intent::RenameMacro { node: knob, name: "   ".to_string() }).unwrap();
+        assert_eq!(steps(&ctl), before);
+        ctl.apply(Intent::RenameMacro { node: knob, name: "Wet".to_string() }).unwrap();
+        let before = steps(&ctl);
+        ctl.apply(Intent::RenameMacro { node: knob, name: " Wet ".to_string() }).unwrap();
+        assert_eq!(steps(&ctl), before, "the name it has, once the spaces are gone, is not a step either");
+        // Refused: not a step (and the plan, which is made before the controller says no, is none either).
+        for name in ["x".repeat(65), "tab\there".to_string()] {
+            assert!(matches!(ctl.plan_history(&Intent::RenameMacro { node: knob, name: name.clone() }), Plan::Nothing), "{name:?}");
+            assert!(ctl.apply(Intent::RenameMacro { node: knob, name }).is_err());
+        }
+        assert!(matches!(ctl.plan_history(&Intent::RenameMacro { node: lane0, name: "x".to_string() }), Plan::Nothing));
+        assert!(matches!(ctl.plan_history(&Intent::ExposeMacro { node: lane0, expose: false }), Plan::Nothing));
+        assert!(ctl.apply(Intent::RenameMacro { node: lane0, name: "x".to_string() }).is_err());
+        assert!(ctl.apply(Intent::ExposeMacro { node: lane0, expose: false }).is_err());
+        assert_eq!(steps(&ctl), before);
+        ctl.undo().unwrap();
+        assert_eq!(macro_has(&ctl, knob).0, "", "one undo takes the one step that there was");
+    }
+
+    #[test]
+    fn a_macro_that_is_taken_out_and_put_back_has_its_name_and_its_flag() {
+        let (_engine, mut ctl, _clock) = controller();
+        let knob = a_macro(&mut ctl);
+        ctl.apply(Intent::RenameMacro { node: knob, name: "Brightness".to_string() }).unwrap();
+        ctl.apply(Intent::ExposeMacro { node: knob, expose: false }).unwrap();
+        ctl.apply(Intent::RemoveNode { node: knob }).unwrap();
+        ctl.undo().unwrap();
+        assert_eq!(macro_has(&ctl, knob), ("Brightness".to_string(), false));
     }
 
     #[test]
@@ -3494,7 +3621,7 @@ depth = 0.9
 
     fn macro_value(ctl: &Controller) -> f32 {
         match ctl.model.free_modulators[0].source {
-            ModSourceSlot::Macro { value } => value,
+            ModSourceSlot::Macro { value, .. } => value,
             ref other => panic!("{other:?} is not a macro"),
         }
     }

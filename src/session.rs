@@ -492,6 +492,13 @@ pub struct ModulatorConfig {
     /// For `type = "macro"`: the value the knob is at, 0 to 1 (held to it when the session is loaded). A macro that has none is at rest.
     #[serde(default)]
     pub value: f64,
+    /// For `type = "macro"`: what the macro is called, which the knob of it on the box of a module that it is in says (step 110). None, or a name of nothing, is `Macro`; the loader holds a name to what the controller takes
+    /// (no control character, at most 64 characters).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// For `type = "macro"`: whether the knob of it is on the box of a module that it is in (step 110). On if the file does not say.
+    #[serde(default)]
+    pub expose: Option<bool>,
     /// For `type = "steps"`: the values of the steps from the first, each -1 to 1 (held to it when the session is loaded), 1 to 16 of them; the steps that
     /// are not given are 0. None (no list at all) is the staircase that a new one starts as.
     #[serde(default)]
@@ -1487,8 +1494,8 @@ pub enum SaveModSource {
     /// `aftertouch` select the wheel or key pressure, and `velocity` / `key` follow the notes
     /// of the lane. All unset = unbound (still learning).
     MidiLearn { cc: Option<u8>, pitch_bend: bool, aftertouch: bool, velocity: bool, key: bool },
-    /// A macro: the number it is set to.
-    Macro { value: f32 },
+    /// A macro: the number it is set to, what it is called (nothing for none: `Macro`) and whether its knob is on the box of a module that it is in.
+    Macro { value: f32, name: String, expose: bool },
     /// A step sequencer: all its steps, how many are in use, how fast it goes, how it glides, whether a note starts it again and the name of the note length that a step of it
     /// follows the tempo by (`None` for none).
     Steps { values: Vec<f32>, length: usize, rate: f32, glide: f32, retrigger: bool, sync: Option<String> },
@@ -1789,6 +1796,11 @@ struct ModulatorOut {
     release: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<f64>,
+    /// A macro's name, written only if it has one, and whether its knob is on a module's box, written only if it is not (the file that has neither is a macro that is called `Macro` and is exposed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expose: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     steps: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1988,9 +2000,11 @@ fn mods_to_out(mods: &[SaveModulator]) -> Vec<ModulatorOut> {
                     ui,
                     ..Default::default()
                 },
-                SaveModSource::Macro { value } => ModulatorOut {
+                SaveModSource::Macro { value, name, expose } => ModulatorOut {
                     mod_type: "macro".into(),
                     value: Some(clean_f64(*value)),
+                    name: (!name.is_empty()).then(|| name.clone()),
+                    expose: (!*expose).then_some(false),
                     hears: hears.clone(),
                     targets,
                     ui,
@@ -2720,7 +2734,7 @@ mod tests {
         // The rest of the modulators have none of it (an LFO that is free has neither of its key's keys, so that a file that was written before it had a key is as it was).
         let lfo = SaveModulator { source: SaveModSource::Lfo { waveform: "sine".into(), rate: 1.0, retrigger: false, fade: 0.0, sync: None }, targets: vec![], ui: None, hears: None };
         let envelope = SaveModulator { source: SaveModSource::Envelope { attack: 0.01, decay: 0.3, sustain: 0.7, release: 0.5 }, targets: vec![], ui: None, hears: None };
-        let knob = SaveModulator { source: SaveModSource::Macro { value: 0.5 }, targets: vec![], ui: None, hears: None };
+        let knob = SaveModulator { source: SaveModSource::Macro { value: 0.5, name: String::new(), expose: true }, targets: vec![], ui: None, hears: None };
         let (text, _) = saved_with(vec![lfo, envelope, knob]);
         for key in ["steps", "length", "glide", "retrigger"] {
             assert!(!text.contains(key), "{key}: {text}");

@@ -2,7 +2,7 @@
 // the layout, and the view that puts a rectangle in the middle of the screen. All of it is
 // arithmetic on numbers; moving the canvas is the view's business (`PatchView`).
 import type { Graph, NodeId } from "../../protocol";
-import { nodeHeight, NODE_WIDTH } from "./toFlow";
+import { heightOfData, NODE_WIDTH } from "./toFlow";
 import type { Flow } from "./toFlow";
 
 /** A rectangle, in the canvas's own units. */
@@ -36,7 +36,7 @@ export function rectOf(graph: Graph, flow: Flow, id: NodeId): Rect | null {
   const placed = flow.nodes.find((node) => node.id === String(id));
   const node = graph.nodes.find((n) => n.id === id);
   if (!placed || !node) return null;
-  return { x: placed.position.x, y: placed.position.y, width: NODE_WIDTH, height: nodeHeight(node, placed.data.knobs.length, placed.data.cables.length, placed.data.scope, false, placed.data.groupCell) };
+  return { x: placed.position.x, y: placed.position.y, width: NODE_WIDTH, height: heightOfData(node, placed.data) };
 }
 
 /**

@@ -244,8 +244,17 @@ pub enum ModulatorSource {
     /// A hardware control. `control` is null until one is bound; `learning` is
     /// true while it waits for the next control to come in.
     MidiLearn { control: Option<MidiControl>, learning: bool },
-    /// A knob: a number that a person sets, 0 to 1.
-    Macro { value: f32 },
+    /// A knob: a number that a person sets, 0 to 1. It can be called something (`name`, step 110: what a person calls it, which is the name of the node too; left out of the wire when it has none, and a front-end then
+    /// reads `Macro`), and the box of a module that it is in shows its knob unless `expose` says no (left out of the wire while it is on, which it is to begin with, so that a front-end reads an absent one as true).
+    Macro {
+        value: f32,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        #[cfg_attr(feature = "web", ts(as = "Option<String>", optional))]
+        name: String,
+        #[serde(default = "yes", skip_serializing_if = "is_yes")]
+        #[cfg_attr(feature = "web", ts(as = "Option<bool>", optional))]
+        expose: bool,
+    },
     /// A step sequencer: all of its `MAX_STEPS` values, -1 to 1, the first `length` of them in use, how many steps it goes through a second, how much of each is
     /// spent going to the next one's value (0 to 1), whether a note starts it again at the first step, and the note length of the tempo that a step of it is in place of the rate (as
     /// for an LFO: 0 for none).
@@ -653,7 +662,7 @@ fn modulator_node(modulator: &ModulatorSlot, parent: Option<NodeId>, hears: Opti
         ModSourceSlot::MidiLearn { source, learning } => {
             ModulatorSource::MidiLearn { control: source.map(MidiControl::from), learning: *learning }
         }
-        ModSourceSlot::Macro { value } => ModulatorSource::Macro { value: *value },
+        ModSourceSlot::Macro { value, name, expose } => ModulatorSource::Macro { value: *value, name: name.clone(), expose: *expose },
         ModSourceSlot::Steps { values, length, rate, glide, retrigger, sync } => {
             ModulatorSource::Steps { values: values.to_vec(), length: *length as u32, rate: *rate, glide: *glide, retrigger: *retrigger, sync: *sync as u32 }
         }
@@ -830,7 +839,7 @@ mod tests {
         let graph = model.graph();
         let node = graph.nodes.iter().find(|node| matches!(node.kind, NodeKind::Modulator { .. })).unwrap();
         assert_eq!(node.name, "Macro");
-        assert!(matches!(&node.kind, NodeKind::Modulator { source: ModulatorSource::Macro { value }, .. } if *value == 0.5));
+        assert!(matches!(&node.kind, NodeKind::Modulator { source: ModulatorSource::Macro { value, .. }, .. } if *value == 0.5));
         assert!(graph.edges.iter().all(|edge| edge.from.node != node.id && edge.to.node != node.id), "a modulator with no cable has no edge");
     }
 
@@ -1375,7 +1384,7 @@ depth = 0.1
         let graph = model.graph();
         let found = node(&graph, knob);
         assert_eq!(found.name, "Macro");
-        assert_eq!(found.kind, NodeKind::Modulator { source: ModulatorSource::Macro { value: 0.25 }, hears: Some(model.instruments[0].node) });
+        assert_eq!(found.kind, NodeKind::Modulator { source: ModulatorSource::Macro { value: 0.25, name: String::new(), expose: true }, hears: Some(model.instruments[0].node) });
         assert_eq!(found.parent, None, "in no lane: it hears the lane that it was in");
     }
 
@@ -2031,7 +2040,25 @@ depth = 0.2
             serde_json::to_value(ModulatorSource::MidiLearn { control: Some(MidiControl::Cc { number: 74 }), learning: false }).unwrap(),
             json!({"type": "midiLearn", "control": {"type": "cc", "number": 74}, "learning": false})
         );
-        assert_eq!(serde_json::to_value(ModulatorSource::Macro { value: 0.25 }).unwrap(), json!({"type": "macro", "value": 0.25}));
+        assert_eq!(serde_json::to_value(ModulatorSource::Macro { value: 0.25, name: String::new(), expose: true }).unwrap(), json!({"type": "macro", "value": 0.25}));
+        // A name that a macro has and a box that is told not to show its knob are in the wire, and when they are what a macro is to begin with they are not, so that a client reads an absent one as nothing and as true.
+        assert_eq!(
+            serde_json::to_value(ModulatorSource::Macro { value: 0.25, name: "Brightness".to_string(), expose: true }).unwrap(),
+            json!({"type": "macro", "value": 0.25, "name": "Brightness"})
+        );
+        assert_eq!(
+            serde_json::to_value(ModulatorSource::Macro { value: 0.25, name: String::new(), expose: false }).unwrap(),
+            json!({"type": "macro", "value": 0.25, "expose": false})
+        );
+        assert_eq!(
+            serde_json::from_value::<ModulatorSource>(json!({"type": "macro", "value": 0.25})).unwrap(),
+            ModulatorSource::Macro { value: 0.25, name: String::new(), expose: true },
+            "an absent name is none, and an absent flag is on"
+        );
+        assert_eq!(
+            serde_json::from_value::<ModulatorSource>(json!({"type": "macro", "value": 0.5, "name": "Wet", "expose": false})).unwrap(),
+            ModulatorSource::Macro { value: 0.5, name: "Wet".to_string(), expose: false }
+        );
         assert_eq!(serde_json::to_value(MidiControl::PitchBend).unwrap(), json!({"type": "pitchBend"}));
         assert_eq!(serde_json::to_value(MidiControl::Velocity).unwrap(), json!({"type": "velocity"}));
         assert_eq!(serde_json::to_value(MidiControl::Key).unwrap(), json!({"type": "key"}));

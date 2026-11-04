@@ -54,6 +54,15 @@ export const modulator = (id: NodeId, name: string, hears?: NodeId): Node => ({
   ...(hears === undefined ? {} : { hears }),
 });
 
+/** A macro (step 110): a modulator that is a knob, with the name that a person gave it and whether a box shows its knob, as the wire says them (left out while they are what a macro is to begin with). */
+export const macro = (id: NodeId, name: string, given: { name?: string; expose?: boolean } = {}): Node => ({
+  id,
+  parent: null,
+  name,
+  kind: "modulator",
+  source: { type: "macro", value: 0.5, ...(given.name === undefined ? {} : { name: given.name }), ...(given.expose === undefined ? {} : { expose: given.expose }) },
+});
+
 export const moduleNode = (id: NodeId, name: string, members: NodeId[]): Node => ({ id, parent: null, name, kind: "module", members });
 export const master: Node = { id: MASTER, parent: null, name: "Master", kind: "master", volume: 1, limiter: true, ceiling: -1 };
 export const keys: Node = { id: 99, parent: null, name: "Keys", kind: "source", source: { type: "keys" } };

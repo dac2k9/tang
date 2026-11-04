@@ -217,7 +217,7 @@ pub(super) fn source_to_save(source: &ModSourceSlot) -> SaveModSource {
             velocity: matches!(source, Some(MidiBindSource::Velocity)),
             key: matches!(source, Some(MidiBindSource::Key)),
         },
-        ModSourceSlot::Macro { value } => SaveModSource::Macro { value: *value },
+        ModSourceSlot::Macro { value, name, expose } => SaveModSource::Macro { value: *value, name: name.clone(), expose: *expose },
         ModSourceSlot::Steps { values, length, rate, glide, retrigger, sync } => SaveModSource::Steps { values: values.to_vec(), length: *length, rate: *rate, glide: *glide, retrigger: *retrigger, sync: sync_for_file(*sync) },
     }
 }
@@ -611,6 +611,26 @@ pinned = ["cutoff", "resonance"]
         assert_eq!(saved(&second.model), file, "a second save is the same file");
     }
 
+    #[test]
+    fn a_macro_that_is_called_something_and_is_not_shown_is_saved_with_both_and_one_that_is_neither_is_saved_with_neither() {
+        let mut run = load(MACROS);
+        // (The lane's macro is the first of the session's own, and the group's the second.)
+        run.model.free_modulators[0].source = ModSourceSlot::Macro { value: 0.25, name: "Brightness".to_string(), expose: false };
+        let file = saved(&run.model);
+        assert_eq!((file.matches("name =").count(), file.matches("expose").count()), (1, 1), "the group's macro has neither, and is not given one: {file}");
+        assert!(file.contains("name = \"Brightness\"") && file.contains("expose = false"), "{file}");
+        // Loaded again, both are what they were, and a second save is the same file.
+        let second = load(&file);
+        assert!(matches!(&second.model.free_modulators[0].source, ModSourceSlot::Macro { name, expose: false, .. } if name == "Brightness"), "{:?}", second.model.free_modulators[0].source);
+        assert!(matches!(&second.model.free_modulators[1].source, ModSourceSlot::Macro { name, expose: true, .. } if name.is_empty()), "{:?}", second.model.free_modulators[1].source);
+        assert_eq!(saved(&second.model), file);
+        // A name that is a macro's alone is not written for a modulator that is another kind, and a macro that is shown and has none is as it always was in the file.
+        let plain = saved(&load(MACROS).model);
+        assert!(!plain.contains("name") && !plain.contains("expose"), "{plain}");
+        let lfo = saved(&load("[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument.modulator]]\ntype = \"lfo\"\n").model);
+        assert!(!lfo.contains("name") && !lfo.contains("expose"), "{lfo}");
+    }
+
     const SEQUENCERS: &str = "[[group]]\n[[group.modulator]]\ntype = \"steps\"\nsteps = [0.5, -0.5]\nrate = 3.0\nglide = 0.5\nretrigger = false\n\n[[instrument]]\nplugin = \"builtin:osc\"\ngroup = 0\n[[instrument.modulator]]\ntype = \"steps\"\n";
 
     #[test]
@@ -647,8 +667,8 @@ pinned = ["cutoff", "resonance"]
     fn a_macro_that_is_turned_is_saved_at_the_value_it_has_and_a_macro_at_rest_says_so() {
         let mut run = load(MACROS);
         // (The lane's macro is the first of the session's own, and the group's the second.)
-        run.model.free_modulators[0].source = ModSourceSlot::Macro { value: 0.8 };
-        run.model.free_modulators[1].source = ModSourceSlot::Macro { value: 0.0 };
+        run.model.free_modulators[0].source = ModSourceSlot::macro_at(0.8);
+        run.model.free_modulators[1].source = ModSourceSlot::macro_at(0.0);
         let file = saved(&run.model);
         assert!(file.contains("value = 0.8") && file.contains("value = 0.0"), "{file}");
         assert!(!file.contains("value = 0.25") && !file.contains("value = 0.5"), "{file}");

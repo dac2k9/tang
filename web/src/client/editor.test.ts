@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import type { Edge, Node, Port } from "../protocol";
 import { Client } from "./connection";
-import { MASTER, groupsFixture, movesFixture, nodeNamed, reachFixture, tracerSnapshot } from "./fixtures";
+import { MASTER, groupsFixture, macrosFixture, movesFixture, nodeNamed, reachFixture, tracerSnapshot } from "./fixtures";
 import { MockServer } from "./mock";
 import type { MockOptions } from "./mock";
 import type { Module } from "./modules";
@@ -690,6 +690,73 @@ describe("naming a group", () => {
     client.stop();
     expect(await editor.renameGroup(0, "Strings")).toBe(false);
     expect(said(notices)).toEqual(['Could not give Group 1 the name "Strings": Not connected to the server.']);
+  });
+});
+
+describe("naming a macro and having a box show its knob (step 110)", () => {
+  // The session of the macros fixture: a lane (0) with a filter (1) that an LFO (2) drives, a macro that is not called anything (3) and one that the file calls Wet and hides from a box (4).
+  const macros = { snapshot: macrosFixture.snapshot };
+  const nodeOf = (client: Client, node: number): Node | undefined => client.state.snapshot?.graph.nodes.find((n) => n.id === node);
+
+  test("resolves true when the macro has the name, which the session shows as the node's name and in its source, and says nothing; a name of nothing gives it `Macro` back", async () => {
+    const { client, notices, editor, server } = await open(macros);
+    expect(await editor.renameMacro(3, "  Brightness ")).toBe(true);
+    // (What is asked is the name as it was typed: the controller takes the spaces off, and the page does not decide it.)
+    expect(server.received.at(-1)).toMatchObject({ type: "request", intent: { type: "renameMacro", node: 3, name: "  Brightness " } });
+    expect(nodeOf(client, 3)?.name).toBe("Brightness");
+    expect(nodeOf(client, 3)).toMatchObject({ source: { type: "macro", value: 0.5, name: "Brightness" } });
+    expect(await editor.renameMacro(3, "")).toBe(true);
+    expect(nodeOf(client, 3)?.name).toBe("Macro");
+    expect(nodeOf(client, 3)).toMatchObject({ source: { type: "macro", value: 0.5 } });
+    expect((nodeOf(client, 3) as { source: object }).source).not.toHaveProperty("name");
+    expect(said(notices)).toEqual([]);
+  });
+
+  test("is refused for a name that is too long or has a control character, and for a node that is not a macro: it resolves false, and the page says what it could not do and why", async () => {
+    const { client, notices, editor } = await open(macros);
+    const cases: [number, string, string][] = [
+      [3, "x".repeat(65), `Could not give Macro the name "${"x".repeat(24)}…": a name is at most 64 characters`],
+      [3, "two\nlines", 'Could not give Macro the name "two\\nlines": a name has no control characters'],
+      [2, "Strings", 'Could not give LFO the name "Strings": only a macro has a name and a knob to show'],
+      [1, "Strings", 'Could not give Filter the name "Strings": only a macro has a name and a knob to show'],
+      [9999, "Strings", 'Could not give that node the name "Strings": there is no node 9999'],
+    ];
+    for (const [node, name, words] of cases) {
+      expect(await editor.renameMacro(node, name), words).toBe(false);
+      expect(said(notices).at(-1)).toBe(words);
+    }
+    expect(client.state.snapshot).toEqual(macrosFixture.snapshot);
+  });
+
+  test("resolves true when the macro shows its knob on a box or not, as asked, which the session says (and says nothing of a macro that does), and says nothing", async () => {
+    const { client, notices, editor } = await open(macros);
+    expect(await editor.exposeMacro(3, false)).toBe(true);
+    expect(nodeOf(client, 3)).toMatchObject({ source: { type: "macro", value: 0.5, expose: false } });
+    expect(await editor.exposeMacro(4, true)).toBe(true);
+    expect((nodeOf(client, 4) as { source: object }).source).toEqual({ type: "macro", value: 0, name: "Wet" });
+    expect(await editor.exposeMacro(3, true)).toBe(true);
+    expect((nodeOf(client, 3) as { source: object }).source).toEqual({ type: "macro", value: 0.5 });
+    expect(said(notices)).toEqual([]);
+  });
+
+  test("is refused for a node that is not a macro: it resolves false, and the page says what it could not do and why", async () => {
+    const { client, notices, editor } = await open(macros);
+    expect(await editor.exposeMacro(2, false)).toBe(false);
+    expect(said(notices).at(-1)).toBe("Could not hide the knob of LFO on its box: only a macro has a name and a knob to show");
+    expect(await editor.exposeMacro(9999, true)).toBe(false);
+    expect(said(notices).at(-1)).toBe("Could not show the knob of that node on its box: there is no node 9999");
+    expect(client.state.snapshot).toEqual(macrosFixture.snapshot);
+  });
+
+  test("with no connection says so", async () => {
+    const { client, notices, editor } = await open(macros);
+    client.stop();
+    expect(await editor.renameMacro(3, "Brightness")).toBe(false);
+    expect(await editor.exposeMacro(3, false)).toBe(false);
+    expect(said(notices)).toEqual([
+      'Could not give Macro the name "Brightness": Not connected to the server.',
+      "Could not hide the knob of Macro on its box: Not connected to the server.",
+    ]);
   });
 });
 

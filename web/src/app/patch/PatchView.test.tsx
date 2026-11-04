@@ -290,12 +290,12 @@ describe("the patch", () => {
     expect(within(control).getByText("CC 74", { selector: ".tang-node__detail" })).toBeTruthy();
   });
 
-  test("gives a macro one knob, its value, which is turned on its node, with no place for a cable on it and no button that modulates it, and says nothing of its kind twice", async () => {
+  test("gives a macro a knob for its value, which is turned on its node, with no place for a cable on it and no button that modulates it, and a choice of whether the box of its module shows the knob (step 110), and says nothing of its kind twice", async () => {
     const snapshot: Snapshot = structuredClone(tracerSnapshot);
     snapshot.graph.nodes.push({ id: 90, parent: 1, name: "Macro", kind: "modulator", source: { type: "macro", value: 0.25 } });
     const { requests, clock } = await rig(<PatchView />, { snapshot });
     const knob = await nodeOf(90);
-    expect(controlsIn(knob)).toEqual(["Value"]);
+    expect(controlsIn(knob)).toEqual(["Value", "Expose"]);
     expect(Array.from(knob.querySelectorAll('[role="slider"]')).map((control) => control.getAttribute("aria-valuetext"))).toContain("0.25");
     // (Its name is its kind: no badge says it again.)
     expect(knob.querySelector(".tang-node__badge")).toBeNull();

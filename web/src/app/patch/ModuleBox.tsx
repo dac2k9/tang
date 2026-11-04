@@ -1,6 +1,7 @@
 // A module that is closed, as the canvas draws it (docs/web-ui.md §9.3, step 108; the user's "the goal when we re-add a module is that it gets rendered like just a single box"): one node with the
 // module's name, a line that says what is in it, a port on its edge for each of the module's inputs and outputs (a cable that is dragged to one ends at the node inside that it stands for: `connection.ts`),
-// and the buttons that open it and take it out. Open, the module is its nodes, and the tag that is over each of its lanes closes it again.
+// and the buttons that open it and take it out. Open, the module is its nodes, and the tag that is over each of its lanes closes it again. (Step 110: under its ports it has the knob of every macro that is in it and
+// has not been told to hide its own, which is the macro's value turned where it is: the user's "expose a macro-knob as well, maybe thats the most common usecase".)
 import { Handle, Position } from "@xyflow/react";
 import type { NodeProps } from "@xyflow/react";
 import { useContext } from "react";
@@ -14,6 +15,7 @@ import { boxDetail, boxRows } from "./boxes";
 import type { Box, BoxPort } from "./boxes";
 import { ConnectingContext, keyOf } from "./connection";
 import { memberHandle } from "./handles";
+import { MacroValueControl } from "./controls";
 import { ADD_FREE_EFFECT_ID, Header } from "./nodes";
 import { OpenModulesContext, openModuleId } from "./openModules";
 import { BOX_ROW_HEIGHT } from "./toFlow";
@@ -163,6 +165,16 @@ export function ModuleNode({ data }: NodeProps<PatchNode>) {
           );
         })}
       </ul>
+      {/* (The knobs of the macros that are in it and have not been told to hide theirs, in the grid that a plugin's controls are in: each is the macro's own, turned where it is, and called by the macro's name.) */}
+      {box.knobs.length > 0 ? (
+        <div className="tang-node__controls nodrag nopan nowheel" role="group" aria-label={`Knobs of ${data.name}`}>
+          {box.knobs.map((knob) => (
+            <div key={knob.member} className="tang-cell">
+              <MacroValueControl node={knob.member} label={knob.label} />
+            </div>
+          ))}
+        </div>
+      ) : null}
       <p className="tang-node__detail tang-box__detail">{boxDetail(box)}</p>
     </div>
   );

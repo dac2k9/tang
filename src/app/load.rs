@@ -13,7 +13,7 @@ use crossbeam_channel::Sender;
 
 use crate::app::controller::outputs_fit_the_chain;
 use crate::app::model::{
-    AudioCable, BPM_MAX, BPM_MIN, CABLE_GAIN_MAX, CEILING_MAX, CEILING_MIN, Driven, EdgeId, EventCable, FREE, GroupNode, InstrumentNode, MASTER_VOLUME_MAX, MasterNode, ModGain, ModSourceSlot,
+    AudioCable, BPM_MAX, BPM_MIN, CABLE_GAIN_MAX, CEILING_MAX, CEILING_MIN, Driven, EdgeId, EventCable, FREE, GroupNode, InstrumentNode, MASTER_VOLUME_MAX, MAX_NAME, MasterNode, ModGain, ModSourceSlot,
     ModTargetSlot, ModuleInstance, ModulatorSlot, NEW_CABLE_GAIN, NodeId, NodeIds,
     ParamKind, ParamSlot, PatternState, PluginSlot, SYNC_DIVISIONS, SessionModel, SourceKind, SourceNode, format_from_id, mod_source_slot_to_graph, modulator_slot_commands,
     setting_of, sync_from_name, sync_name, tempo_of_patterns,
@@ -988,6 +988,13 @@ fn plan_sibling_target(
     Some(Plan { drives, label, param_min, param_max, base_value })
 }
 
+/// What a macro is called, from the text a file has (step 110): the text without its control characters and the spaces round it, cut at `MAX_NAME` characters, so that every name in the model is one that `RenameMacro` takes (undo of a
+/// rename puts the old name back by that intent, and a name that it refused could not come back). Nothing for a name of nothing: the macro is called `Macro`.
+fn macro_name_of(text: &str) -> String {
+    let name: String = text.chars().filter(|c| !c.is_control()).collect();
+    name.trim().chars().take(MAX_NAME).collect::<String>().trim_end().to_string()
+}
+
 /// Build the model's source for a modulator config, with a description for the
 /// log. The audio thread's `ModSource` is derived from it (`mod_source_slot_to_graph`). A module's modulators are made of it too (`app::module`).
 pub(super) fn build_mod_source(mod_config: &session::ModulatorConfig) -> (ModSourceSlot, String) {
@@ -1031,7 +1038,8 @@ pub(super) fn build_mod_source(mod_config: &session::ModulatorConfig) -> (ModSou
             // (The number is held to the knob's range: a file can say what the knob cannot be at.)
             let (min, max) = crate::app::intent::ModulatorField::Value.range();
             let value = (mod_config.value as f32).clamp(min, max);
-            (ModSourceSlot::Macro { value }, format!("macro at {value:.2}"))
+            let name = macro_name_of(mod_config.name.as_deref().unwrap_or_default());
+            (ModSourceSlot::Macro { value, name, expose: mod_config.expose.unwrap_or(true) }, format!("macro at {value:.2}"))
         }
         "steps" => {
             // (What the file gives is held to what a step sequencer can be: a value to -1 to 1, a glide to 0 to 1 and a length to 1 to 16. A step that is
@@ -1864,8 +1872,8 @@ depth = 0.4
     fn a_macro_is_loaded_at_the_value_the_file_gives_it_in_a_lane_and_in_a_group_and_the_engine_is_given_it() {
         let run = load(MACROS);
         // (The lane's is the first of the session's own, and the group's the second.)
-        assert!(matches!(run.model.free_modulators[0].source, ModSourceSlot::Macro { value } if value == 0.25));
-        assert!(matches!(run.model.free_modulators[1].source, ModSourceSlot::Macro { value } if value == 0.5));
+        assert!(matches!(run.model.free_modulators[0].source, ModSourceSlot::Macro { value, .. } if value == 0.25));
+        assert!(matches!(run.model.free_modulators[1].source, ModSourceSlot::Macro { value, .. } if value == 0.5));
         assert!(run.commands.contains(&"InsertFreeModulator index=0 source=Macro { value: 0.25 }".to_string()), "{:#?}", run.commands);
         assert!(run.commands.contains(&"InsertFreeModulator index=1 source=Macro { value: 0.5 }".to_string()), "{:#?}", run.commands);
         // Its cable is a cable like any other.
@@ -1877,7 +1885,7 @@ depth = 0.4
     #[test]
     fn a_macro_that_has_no_value_is_at_rest_and_a_value_beyond_its_range_is_held_in_it() {
         let value_of = |text: &str| match load(text).model.free_modulators[0].source {
-            ModSourceSlot::Macro { value } => value,
+            ModSourceSlot::Macro { value, .. } => value,
             ref other => panic!("{other:?}"),
         };
         let lane = |value: &str| format!("[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument.modulator]]\ntype = \"macro\"\n{value}");
@@ -1885,6 +1893,36 @@ depth = 0.4
         assert_eq!(value_of(&lane("value = 1.5\n")), 1.0);
         assert_eq!(value_of(&lane("value = -2.0\n")), 0.0);
         assert_eq!(value_of(&lane("value = 0.75\n")), 0.75);
+    }
+
+    #[test]
+    fn a_macro_is_loaded_with_the_name_that_the_file_gives_it_and_shows_its_knob_on_a_box_unless_the_file_says_not() {
+        let macro_of = |keys: &str| {
+            let text = format!("[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument.modulator]]\ntype = \"macro\"\n{keys}");
+            match load(&text).model.free_modulators.remove(0).source {
+                ModSourceSlot::Macro { name, expose, .. } => (name, expose),
+                other => panic!("{other:?}"),
+            }
+        };
+        // (A file that is from before a macro had either is a macro that is called `Macro` and is shown.)
+        assert_eq!(macro_of(""), (String::new(), true));
+        assert_eq!(macro_of("name = \"Brightness\"\n"), ("Brightness".to_string(), true));
+        assert_eq!(macro_of("expose = false\n"), (String::new(), false));
+        assert_eq!(macro_of("name = \"Wet\"\nexpose = true\n"), ("Wet".to_string(), true));
+        // What a hand wrote is held to what the controller takes, so that no name in the model is one that `RenameMacro` refuses (undo of a rename puts the old name back by it): the spaces round it and the control
+        // characters in it go, and it is cut at 64 characters (counted as characters, not bytes), and a name of nothing is none.
+        assert_eq!(macro_of("name = \"  Wet  \"\n").0, "Wet");
+        assert_eq!(macro_of("name = \"\"\n").0, "");
+        assert_eq!(macro_of("name = \"   \"\n").0, "");
+        assert_eq!(macro_of("name = \"a\\tb\\nc\"\n").0, "abc");
+        assert_eq!(macro_of(&format!("name = \"{}\"\n", "x".repeat(70))).0, "x".repeat(64));
+        assert_eq!(macro_of(&format!("name = \"{}\"\n", "å".repeat(70))).0, "å".repeat(64));
+        assert_eq!(macro_of(&format!("name = \"{} yyy\"\n", "x".repeat(63))).0, "x".repeat(63), "the space that the cut leaves at the end goes too");
+        // The keys of a macro are the macro's: a modulator that is another kind is what it is, whatever it is called.
+        let text = "[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument.modulator]]\ntype = \"lfo\"\nname = \"Wobble\"\nexpose = false\n";
+        let run = load(text);
+        assert!(matches!(run.model.free_modulators[0].source, ModSourceSlot::Lfo { .. }));
+        assert_eq!(run.model.free_modulators[0].source.node_name(), "LFO");
     }
 
     /// A group with a step sequencer that the file describes, and a lane in it with one that the file leaves as a new one is, and an LFO whose cable drives its rate.

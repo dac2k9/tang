@@ -19,6 +19,7 @@
 import type { Edge as FlowEdge, Node as FlowNode } from "@xyflow/react";
 
 import { holdersOf } from "../../client/holders";
+import { macroExposed } from "../../client/macros";
 import { cableWords, displayNames, endLabel } from "../../client/names";
 import { laneTakesNotes } from "../../client/noteWiring";
 import { knobsOf } from "../../client/pinning";
@@ -51,6 +52,8 @@ const CONTROLS_PER_ROW = 4;
 /** The width of a control's cell in a node's grid (`.tang-node__controls`: four columns of 72 px, in the middle of the node). */
 const CELL_WIDTH = 72;
 const NODE_PADDING = 16;
+/** The room under a grid of controls (`.tang-node__controls`' padding), which a box that shows the knobs of macros has under them as a plugin's node does. */
+const CONTROLS_PADDING = 12;
 /** The list at the foot of a modulator, with which it draws a cable (measured in a browser: 29). */
 const DRIVES_HEIGHT = 30;
 /** The trace of what a modulator puts out is this much taller than the bar it was (44 against 8: the bar's nodes were 119 and 213). */
@@ -248,12 +251,15 @@ export function canScope(node: Node): boolean {
  * How tall a node is, as the layout assumes it (the components' styles keep to it). `cables` is how many a modulator lists (`CableRow`); it is nothing to the other nodes.
  * `scope` is whether an instrument, an effect or a group shows its scope, which it is taller by (`NODE_SCOPE_HEIGHT`); it is nothing to a modulator, and to the master.
  * `carriesLane` is whether an effect has the cell of the lane that holds it, and `groupCell` whether a lane has the choice of group (`controlCount`): they are nothing to the other nodes.
- * `rows` is how many rows of ports a box that stands for a module has (`boxRows`): it is nothing to the other nodes.
+ * `rows` is how many rows of ports a box that stands for a module has (`boxRows`): it is nothing to the other nodes. For a box, `knobs` is how many knobs of macros it shows (`Box.knobs`, step 110), in a grid
+ * under its ports that is a row of `CONTROL_ROW_HEIGHT` for every `CONTROLS_PER_ROW` of them and has the room that a grid has under it (none, for a box that shows none).
  */
 export function nodeHeight(node: Node, knobs: number, cables = 0, scope = false, carriesLane = false, groupCell = false, rows = 1): number {
   switch (node.kind) {
-    case "module":
-      return HEADER_HEIGHT + Math.max(1, rows) * BOX_ROW_HEIGHT + BOX_DETAIL_HEIGHT + NODE_PADDING;
+    case "module": {
+      const grid = knobs > 0 ? Math.ceil(knobs / CONTROLS_PER_ROW) * CONTROL_ROW_HEIGHT + CONTROLS_PADDING : 0;
+      return HEADER_HEIGHT + Math.max(1, rows) * BOX_ROW_HEIGHT + grid + BOX_DETAIL_HEIGHT + NODE_PADDING;
+    }
     case "modulator": {
       const listed = cables > 0 ? CABLES_GAP + cables * CABLE_ROW_HEIGHT : 0;
       if (node.source.type === "midiLearn") return MODULATOR_HEIGHT + listed;
@@ -269,6 +275,12 @@ export function nodeHeight(node: Node, knobs: number, cables = 0, scope = false,
       return HEADER_HEIGHT + rows * CONTROL_ROW_HEIGHT + NODE_PADDING + (laneTakesNotes(node) ? PATTERN_HEIGHT : 0) + (scope ? NODE_SCOPE_HEIGHT : 0);
     }
   }
+}
+
+/** How tall the node `node` is that the canvas draws as `data` (the layout assumes it: `nodeHeight`): what the flow node shows of it, a box's ports and knobs, a lane's choice of group, the scope, the cables that a modulator lists. */
+export function heightOfData(node: Node, data: PatchNodeData): number {
+  const box = data.box;
+  return nodeHeight(node, box ? box.knobs.length : data.knobs.length, data.cables.length, data.scope, data.heldIn?.first ?? false, data.groupCell, box ? boxRows(box) : 1);
 }
 
 /** A strip: nodes in a row, left to right, from a column, with the modulators that sit above them. */
@@ -798,8 +810,7 @@ export function blocksOf(graph: Graph, flow: Flow, open: ReadonlySet<NodeId> = N
   const blocks = flow.nodes.flatMap((placed): Block[] => {
     const node = known.get(placed.data.node);
     if (!node) return [];
-    const height = nodeHeight(node, placed.data.knobs.length, placed.data.cables.length, placed.data.scope, placed.data.heldIn?.first ?? false, placed.data.groupCell, placed.data.box ? boxRows(placed.data.box) : 1);
-    return [{ id: node.id, x: placed.position.x, y: placed.position.y, width: NODE_WIDTH, height }];
+    return [{ id: node.id, x: placed.position.x, y: placed.position.y, width: NODE_WIDTH, height: heightOfData(node, placed.data) }];
   });
   return { blocks, wires: wiresOf(seen, new Map(flow.nodes.map((placed) => [placed.data.node, placed.data.knobs]))) };
 }
@@ -841,7 +852,7 @@ export function toFlow(graph: Graph, remembered: Places = NOTHING_REMEMBERED, sc
   const groups = graph.nodes.some((node) => node.kind === "group");
   const heightOf = (node: Node): number => {
     const box = collapsed.boxes.get(node.id);
-    return nodeHeight(node, knobCounts.get(node.id) ?? 0, cableCounts.get(node.id) ?? 0, withScope.has(node.id), carriers.has(node.id), groups, box ? boxRows(box) : 1);
+    return nodeHeight(node, box ? box.knobs.length : (knobCounts.get(node.id) ?? 0), cableCounts.get(node.id) ?? 0, withScope.has(node.id), carriers.has(node.id), groups, box ? boxRows(box) : 1);
   };
   const ownerOf = ownersOf(seen);
   const baseline = layout(seen, heightOf, holders, ownerOf);
@@ -997,8 +1008,11 @@ function sameNodeStructure(x: Node, y: Node): boolean {
   if ((x.kind === "instrument" || x.kind === "effect") && (y.kind === "instrument" || y.kind === "effect")) {
     return samePluginStructure(x.plugin, y.plugin);
   }
-  // (Whom a modulator hears is part of it: the menu on its node has it, and the structure is what the menus are given.)
-  if (x.kind === "modulator" && y.kind === "modulator") return x.source.type === y.source.type && x.hears === y.hears;
+  // (Whom a modulator hears is part of it: the menu on its node has it, and the structure is what the menus are given. So is whether a macro shows its knob on a box (step 110): the box has the knob, and is as tall as the knobs make it.)
+  if (x.kind === "modulator" && y.kind === "modulator") {
+    const same = x.source.type === y.source.type && x.hears === y.hears;
+    return same && (x.source.type !== "macro" || y.source.type !== "macro" || macroExposed(x.source) === macroExposed(y.source));
+  }
   // (What is in a module is part of it: the box has a port for what a cable crosses its edge at, and what is inside is on the canvas while it is open.)
   if (x.kind === "module" && y.kind === "module") return x.members.length === y.members.length && x.members.every((member, i) => member === y.members[i]);
   if (x.kind === "source" && y.kind === "source") return sameSource(x.source, y.source);

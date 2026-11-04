@@ -10,8 +10,9 @@ import { HISTORY_MAX_STEPS, HISTORY_SAME_STEP, WAVEFORMS } from "../protocol";
 import type { CatalogEntry, EdgeId, Endpoint, Gain, Graph, Intent, ModulatorField, Node, NodeId, Snapshot, TelemetryLayout } from "../protocol";
 import { cablesThatGo, drivesRoundToItself, isAudioCable, isModulation, isNotesCable } from "./cables";
 import { trimmed } from "./inputs";
+import { macroExposed, macroName } from "./macros";
 import { MODULATOR_LABELS, kindOf } from "./modulatorKinds";
-import { boxTitle, moduleNameOf } from "./modules";
+import { boxTitle, moduleNameOf, tidyName } from "./modules";
 
 /** What a change is of, for a change that goes on to be told from the rest: a string that says which parameter, gain, setting or cable. */
 export type Key = string;
@@ -422,6 +423,21 @@ export function planOf(snapshot: Snapshot, intent: Intent, now: number, catalog:
       const place = snapshot.graph.nodes.filter((n) => n.kind === "group").findIndex((n) => n.id === node.id);
       const old = node.name === `Group ${String(place + 1)}` ? "" : node.name;
       return step("rename a group", { type: "renameGroup", node: intent.node, name: old }, null);
+    }
+    // (As a group's name is: what is no macro is refused, a name that is refused is no step, and a name that the macro has changes nothing: no step is kept for any. The graph says the name that a macro was given and nothing for none.)
+    case "renameMacro": {
+      const node = nodeOf(intent.node);
+      if (node?.kind !== "modulator" || node.source.type !== "macro") return "nothing";
+      const tidied = tidyName(intent.name);
+      const old = macroName(node.source);
+      if ("error" in tidied || tidied.name === old) return "nothing";
+      return step("rename a macro", { type: "renameMacro", node: intent.node, name: old }, null);
+    }
+    // (As a mute is: what is no macro is refused, and a flag that is as it is asked to be changes nothing: no step is kept for either.)
+    case "exposeMacro": {
+      const node = nodeOf(intent.node);
+      if (node?.kind !== "modulator" || node.source.type !== "macro" || macroExposed(node.source) === intent.expose) return "nothing";
+      return step(intent.expose ? "show a macro on its box" : "hide a macro from its box", { type: "exposeMacro", node: intent.node, expose: !intent.expose }, null);
     }
     case "setScale":
       return step("set the scale", { type: "setScale", scale: snapshot.meta.piano.scale }, null);
