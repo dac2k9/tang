@@ -24,6 +24,8 @@ tang listen [input]              # listen to an audio input for a few seconds an
 tang window <plugin>             # open a plugin's own window by itself, for a check (macOS, VST3; plays nothing)
 ```
 
+Tang is also a **plugin for a DAW** (step 113): `cargo build --release -p tang-clap` makes the CLAP file that Bitwig loads, which has an instrument (Tang) and an effect (Tang FX), each with its session in the host's project and its page in a browser (`docs/reference/plugin-host.md`: how to build it and where to put it, on Windows too). The package is a library (`src/lib.rs`) and a thin binary (`src/main.rs`); `cargo test --lib` runs the unit tests.
+
 ## Flags
 
 These flags apply to the TUI and to the `play` and `serve` subcommands, and
@@ -308,6 +310,7 @@ This file is the front door: what every session needs (usage, flags, subcommands
 | `docs/reference/inputs-and-midi.md` | sources of notes and cables of notes, MIDI routing, the virtual piano, the audio input (the microphone), the audio host | Sources of notes and cables of notes; The audio input; MIDI routing; Virtual piano; Audio host selection |
 | `docs/reference/engine.md` | the threads and the exit, the master limiter and volume, latency, the kernel of the patch graph (the signal chain is in `CLAUDE.md`) | The master limiter and volume; Latency; Architecture; The kernel |
 | `docs/reference/oracle.md` | what renders are held to, the corpus, the edits, the benchmark | The oracle |
+| `docs/reference/plugin-host.md` | Tang as a CLAP plugin in a DAW (Bitwig, step 113): the two plugins in `Tang.clap`, how to build and install them (Windows first), the engine driven by the host's blocks (`tang::embed`), the session as the host's state, the page as the plugin's window, what is not done | The two plugins in `Tang.clap`; How it is built; Building it and putting it where a DAW looks; Using it in Bitwig; What it does not do yet; Held by tests; Found on the way; Decisions |
 | `docs/reference/plugins.md` | plugin formats, a plugin's own window (the editor of a VST3 plugin in a window of the program's own, and `tang window`), the built-in plugins, how plugin I/O is handled, a parameter that has an effect only sometimes | A parameter that has an effect only sometimes; A plugin's own window; Plugin compatibility; Built-in plugins; Plugin I/O handling |
 | `docs/reference/terminal-ui.md` | the tabs, the Session tab and its popups, the Piano, Scope and Patch tabs, logging, the TUI's tests | TUI; Splash screen; Tabs; Global keybindings; Session tab; Chain; Parameters; Plugin selector popup; Preset selector popup; Value entry popup; Range entry popup; Rename group popup; Save As popup; Modulation target selector popup; Modulate popup; Piano tab; Scope tab; Patch tab; Help tab; Dirty indicator; Logging; TUI framework; TUI tests |
 | `docs/reference/controller.md` | intents, events, the history (undo and redo), snapshots, telemetry | Session state |
