@@ -95,6 +95,65 @@ jobs:
       - name: Test (release)
         run: cargo test -p kernel --release
 
+  # Tang as a CLAP plugin (tang-clap/, docs/reference/plugin-host.md, step 113): clippy and the tests on the three platforms, and Tang.clap, the file that a DAW loads, built in release with the page in it
+  # and kept as an artifact (`Tang-clap-Windows` is the one for Bitwig on Windows). The plugin formats that can be loaded inside it are VST3 only: LV2 needs a library that Windows has not.
+  plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install apt packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-dev
+
+      # The page is what a release build embeds in the plugin (rust-embed reads web/dist when it compiles).
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the page
+        working-directory: web
+        run: npm ci && npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy -p tang-clap --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p tang-clap
+
+      - name: Build (release)
+        run: cargo build --release -p tang-clap
+
+      - name: Make Tang.clap
+        if: runner.os != 'Windows'
+        run: tang-clap/bundle.sh release dist
+
+      - name: Make Tang.clap
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/tang_clap.dll dist/Tang.clap
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tang-clap-${{ runner.os }}
+          path: dist
+          retention-days: 30
+
   # The TypeScript in web/src/protocol/generated/ is generated from the protocol
   # types (docs/web-ui.md section 7) and committed. This fails when what is
   # committed is not what the types generate now; the failure says how to

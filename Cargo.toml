@@ -1,5 +1,5 @@
 [workspace]
-members = ["view", "kernel"]
+members = ["view", "kernel", "tang-clap"]
 
 [package]
 name = "tang"
@@ -31,9 +31,9 @@ crossterm = "0.28"
 toml = "0.8"
 toml_edit = "0.22"
 serde = { version = "1", features = ["derive"] }
-clack-host = { git = "https://github.com/prokopyl/clack" }
-clack-finder = { git = "https://github.com/prokopyl/clack" }
-clack-extensions = { git = "https://github.com/prokopyl/clack", features = ["clack-host", "audio-ports", "latency", "note-ports", "params", "preset-discovery", "state"] }
+clack-host = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7" }
+clack-finder = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7" }
+clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-host", "audio-ports", "latency", "note-ports", "params", "preset-discovery", "state"] }
 vst3 = { version = "0.3", optional = true }
 libloading = { version = "0.8", optional = true }
 ts-rs = { version = "12", optional = true }

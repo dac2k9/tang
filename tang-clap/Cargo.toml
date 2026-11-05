@@ -1,0 +1,29 @@
+[package]
+name = "tang-clap"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Tang as a CLAP plugin, an instrument and an effect, for a DAW such as Bitwig (step 113)"
+
+[lib]
+name = "tang_clap"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The formats of the plugins that can be loaded inside Tang (the program's own features: `lv2` needs liblilv, which Windows has not).
+default = ["vst3"]
+vst3 = ["tang/vst3"]
+lv2 = ["tang/lv2"]
+
+[dependencies]
+tang = { path = "..", default-features = false, features = ["web"] }
+clack-plugin = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7" }
+clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin", "audio-ports", "note-ports", "state", "gui"] }
+log = "0.4"
+
+[dev-dependencies]
+# A host in the same process, to run the plugin through the way a DAW does (and the raw buffers that a host that processes in place gives).
+clap-sys = "0.5"
+tempfile = "3"
+clack-host = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin"] }
+clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin", "clack-host", "audio-ports", "note-ports", "state", "gui"] }

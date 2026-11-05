@@ -318,7 +318,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "clack-common"
 version = "0.1.0"
-source = "git+https://github.com/prokopyl/clack#57e89b356f16194a04fa03cc5c5a87d88db560c7"
+source = "git+https://github.com/prokopyl/clack?rev=57e89b356f16194a04fa03cc5c5a87d88db560c7#57e89b356f16194a04fa03cc5c5a87d88db560c7"
 dependencies = [
  "bitflags 2.10.0",
  "clap-sys",
@@ -327,18 +327,19 @@ dependencies = [
 [[package]]
 name = "clack-extensions"
 version = "0.1.0"
-source = "git+https://github.com/prokopyl/clack#57e89b356f16194a04fa03cc5c5a87d88db560c7"
+source = "git+https://github.com/prokopyl/clack?rev=57e89b356f16194a04fa03cc5c5a87d88db560c7#57e89b356f16194a04fa03cc5c5a87d88db560c7"
 dependencies = [
  "bitflags 2.10.0",
  "clack-common",
  "clack-host",
+ "clack-plugin",
  "clap-sys",
 ]
 
 [[package]]
 name = "clack-finder"
 version = "0.1.0"
-source = "git+https://github.com/prokopyl/clack#57e89b356f16194a04fa03cc5c5a87d88db560c7"
+source = "git+https://github.com/prokopyl/clack?rev=57e89b356f16194a04fa03cc5c5a87d88db560c7#57e89b356f16194a04fa03cc5c5a87d88db560c7"
 dependencies = [
  "dirs-sys",
  "objc2-foundation",
@@ -348,11 +349,21 @@ dependencies = [
 [[package]]
 name = "clack-host"
 version = "0.1.0"
-source = "git+https://github.com/prokopyl/clack#57e89b356f16194a04fa03cc5c5a87d88db560c7"
+source = "git+https://github.com/prokopyl/clack?rev=57e89b356f16194a04fa03cc5c5a87d88db560c7#57e89b356f16194a04fa03cc5c5a87d88db560c7"
+dependencies = [
+ "clack-common",
+ "clack-plugin",
+ "clap-sys",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "clack-plugin"
+version = "0.1.0"
+source = "git+https://github.com/prokopyl/clack?rev=57e89b356f16194a04fa03cc5c5a87d88db560c7#57e89b356f16194a04fa03cc5c5a87d88db560c7"
 dependencies = [
  "clack-common",
  "clap-sys",
- "libloading 0.8.9",
 ]
 
 [[package]]
@@ -2618,6 +2629,19 @@ dependencies = [
  "ts-rs",
  "view",
  "vst3",
+]
+
+[[package]]
+name = "tang-clap"
+version = "0.1.0"
+dependencies = [
+ "clack-extensions",
+ "clack-host",
+ "clack-plugin",
+ "clap-sys",
+ "log",
+ "tang",
+ "tempfile",
 ]
 
 [[package]]
