@@ -18,6 +18,8 @@ mod macos;
 pub use macos::{available, open, pump};
 
 /// How a window is to be opened.
+// (The macOS window reads every field; a platform that has no window does not, and says so in its answer to `open`.)
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct Spec<'a> {
     pub title: &'a str,
     /// The size of what is inside the window, in points (see [`Window::size`]).
@@ -42,6 +44,9 @@ pub trait Window {
 
     /// Whether the window is on the screen: false once the person has closed it, and after [`Window::close`].
     fn is_open(&self) -> bool;
+
+    /// Bring the window to the front again, as it was when it was opened: `focus` is whether it takes the keyboard from the program that has it.
+    fn raise(&self, focus: bool);
 
     /// Take the window away. A window that is already gone is left as it is.
     fn close(&self);

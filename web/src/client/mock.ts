@@ -81,6 +81,8 @@ export interface MockOptions {
   inputs?: readonly string[];
   /** The modules that its library has, by name: chains of effects that a person saved, which the catalog lists and an effect that stands by itself can be made of (none by default). */
   modules?: Readonly<Record<string, Module>>;
+  /** Whether it says that its machine can show a plugin's own window (`windows` among what `hello` says it can do), as a server on a machine that has a screen does (not by default: the mock has no screen). */
+  windows?: boolean;
 }
 
 /**
@@ -1120,6 +1122,20 @@ function moduleCable(
 }
 
 /**
+ * A plugin's own window opened (`open_editor_intent`, step 112), in the order the controller checks: the node, whether it has a plugin, whether the plugin has a window, and whether this machine can show one (`windows`).
+ * What opens, and where, is the server's own machine: the event only says that it did.
+ */
+function openEditorOutcome(snapshot: Snapshot, node: NodeId, windows: boolean): Outcome {
+  const found = snapshot.graph.nodes.find((n) => n.id === node);
+  if (!found || node === MASTER) return noNode(node);
+  if (found.kind !== "instrument" && found.kind !== "effect") return invalid("that node has no plugin");
+  if (found.plugin === null) return invalid("that instrument has no plugin");
+  if (found.plugin.hasEditor !== true) return invalid(`${found.name} has no window of its own`);
+  if (!windows) return invalid("this session has no screen to open a window on (a login over ssh, a container, CI)");
+  return { event: { type: "editorOpened", node } };
+}
+
+/**
  * A chain of effects saved as a module (`save_module_intent`): the chain of the lane that `node` is, or is an effect in, under the name that `cleanModuleName` makes of `name`. The node is looked for first, then the name, then
  * the chain: a node that is not there is not found whatever the name is, and a name that is no name is refused before the chain is looked at. The event says the name the module has; what the library keeps is the server's.
  */
@@ -1599,8 +1615,9 @@ function intentOutcome(snapshot: Snapshot, intent: Intent, counters: Counters, c
   if (intent.type === "saveAs") return saveAsOutcome(snapshot, intent.name, files);
   if (intent.type === "saveModule") return saveModuleOutcome(snapshot, intent.node, intent.name);
   if (intent.type === "saveSelectionAsModule") return saveSelectionOutcome(snapshot, intent.nodes, intent.name);
-  // (Undo and Redo are not the outcome of an intent on a snapshot: the history is the server's, `MockServer#carry`.)
+  // (Undo and Redo are not the outcome of an intent on a snapshot: the history is the server's, `MockServer#carry`. Nor is the window of a plugin, which `carry` opens: whether the machine can show one is the server's.)
   if (intent.type === "undo" || intent.type === "redo") return invalid(`${intent.type} is done by the history`);
+  if (intent.type === "openEditor") return invalid("a window is opened by the server");
   if (intent.type === "setScale") return scaleOutcome(intent.scale);
   if (intent.type === "setLocked") return { event: { type: "lockedSet", locked: intent.locked } };
   if (intent.type === "setBpm") return bpmOutcome(intent.bpm);
@@ -1950,7 +1967,7 @@ export class MockServer {
       type: "hello",
       protocol: this.#options.protocol ?? PROTOCOL,
       rev: this.#snapshot.rev,
-      features: ["notes", "telemetry"],
+      features: this.#options.windows === true ? ["notes", "telemetry", "windows"] : ["notes", "telemetry"],
       needsToken: this.#options.token !== undefined,
     };
   }
@@ -2064,6 +2081,11 @@ export class MockServer {
     // (What has run out by now is done first: an intent is about the session as it is.)
     this.settle();
     if (requested.type === "undo" || requested.type === "redo") return this.#backAndForth(requested.type, tell);
+    // (A window that is opened is no change of the session: `Controller::open_editor_intent` uses a revision, as a save does, and keeps nothing in the history.)
+    if (requested.type === "openEditor") {
+      const opened = openEditorOutcome(this.#snapshot, requested.node, this.#options.windows === true);
+      return "error" in opened ? opened : this.#commit(opened, tell);
+    }
     // (An audio cable between the two ends of a link of the audio path that a lane or a group makes by itself is that link, given back if it is cut: `Controller::link_or_cable`.)
     const asked = linkOrCable(this.#snapshot.graph, requested);
     if ("error" in asked) return asked;

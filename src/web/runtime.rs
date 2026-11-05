@@ -37,6 +37,9 @@ pub const OWNER_QUEUE: usize = 1024;
 /// connections read.
 const TICK: Duration = Duration::from_millis(50);
 
+/// How long the headless loop waits between two turns of the plugins' windows while one is open (`Controller::pump_windows`, which itself waits for an event for a moment): short enough for a window that answers the mouse.
+const WINDOW_TURN: Duration = Duration::from_millis(1);
+
 pub struct Runtime {
     // (The server goes first when the runtime is dropped: the clients are closed before
     // the owner stops answering them.)
@@ -106,6 +109,8 @@ impl Runtime {
         let requests = self.owner.requests().clone();
         let tick = crossbeam_channel::tick(TICK);
         loop {
+            // While a plugin's own window is open (step 112) its events are turned between the rest, a few milliseconds apart; with none open, and while the plugin scan goes (f179), this never comes.
+            let windows = if ctl.windows_open() { crossbeam_channel::after(WINDOW_TURN) } else { crossbeam_channel::never() };
             crossbeam_channel::select! {
                 recv(requests) -> request => match request {
                     Ok(request) => {
@@ -117,6 +122,11 @@ impl Runtime {
                 recv(tick) -> _ => {
                     ctl.poll();
                     self.refresh(ctl);
+                }
+                recv(windows) -> _ => {
+                    // (What a knob in a window did is applied by the controller's `poll`, here and not only at the next tick, so that the sound follows the hand.)
+                    ctl.pump_windows();
+                    ctl.poll();
                 }
                 recv(quit) -> _ => break,
             }

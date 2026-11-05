@@ -52,6 +52,8 @@ impl Controller {
             // (A module that is saved is nothing of the session: it is not marked, and the history is as it was.)
             Intent::SaveModule { node, name } => return self.save_module_intent(node, &name),
             Intent::SaveSelectionAsModule { nodes, name } => return self.save_selection_intent(&nodes, &name),
+            // (A window that is opened is no change of the session either: what the person does in it comes back as `SetParam`.)
+            Intent::OpenEditor { node } => return self.open_editor_intent(node),
             // (What they do is carried out as any intent is, and is no step of the history.)
             Intent::Undo => return self.undo(),
             Intent::Redo => return self.redo(),
@@ -144,7 +146,7 @@ impl Controller {
             Intent::AddInstrument { plugin } => self.add_instrument_intent(&plugin)?,
             Intent::ReplaceInstrument { node, plugin } => self.replace_instrument_intent(node, &plugin)?,
             Intent::ClearInstrument { node } => self.clear_instrument_intent(node)?,
-            Intent::Save | Intent::SaveAs { .. } | Intent::SaveModule { .. } | Intent::SaveSelectionAsModule { .. } | Intent::Undo | Intent::Redo => unreachable!("done above"),
+            Intent::Save | Intent::SaveAs { .. } | Intent::SaveModule { .. } | Intent::SaveSelectionAsModule { .. } | Intent::OpenEditor { .. } | Intent::Undo | Intent::Redo => unreachable!("done above"),
         };
         Ok(self.conclude(done))
     }
@@ -218,11 +220,16 @@ impl Controller {
             value = value.round();
         }
         row.value = value;
+        let editor = plugin.editor;
         let command = match at {
             PluginAt::Lane { inst, slot } => GraphCommand::SetParameter { inst, slot, param_index: param, value },
             PluginAt::Bus { group, index } => GraphCommand::SetGroupParameter { group, index, param_index: param, value },
         };
         let _ = self.cmd_tx.send(command);
+        // (An open window of the plugin shows it: step 112.)
+        if let Some(editor) = editor {
+            self.tell_window(editor, param, value);
+        }
         Ok(Event::ParamSet { node, param, value })
     }
 
@@ -1430,6 +1437,8 @@ impl Controller {
                 mirrored = mirror_values(&mut plugin.params, &values);
             }
         }
+        // (An open window of the plugin shows what the preset made of it: step 112.)
+        self.show_values_in_window(node);
         Ok(Event::PresetLoaded { node, preset: preset.name, values: mirrored })
     }
 
@@ -1513,7 +1522,7 @@ fn place_to_move_to(from: usize, places: usize, index: u32) -> Result<usize, Int
     Ok(to)
 }
 
-fn invalid(why: impl Into<String>) -> IntentError {
+pub(super) fn invalid(why: impl Into<String>) -> IntentError {
     IntentError::Invalid(why.into())
 }
 

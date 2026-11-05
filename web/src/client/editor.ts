@@ -39,6 +39,7 @@ const DOING: Record<Intent["type"], string> = {
   setGain: "set a level",
   setLimiter: "put the limiter in the sound or take it out",
   loadPreset: "load a preset",
+  openEditor: "open a plugin's own window",
   setModulatorField: "change a modulator's setting",
   setSteps: "change the steps of a step sequencer",
   setEdgeDepth: "change the depth of a cable",
@@ -250,6 +251,15 @@ export class Editor {
    */
   loadPreset(node: NodeId, preset: string): Promise<boolean> {
     return this.#attempt(`load ${this.#presetName(node, preset)} into ${this.#name(node)}`, { type: "loadPreset", node, preset });
+  }
+
+  /**
+   * Open the window of the plugin of the instrument or effect `node` (step 112): the face that the plugin draws for itself, in a window on the machine that runs Tang (not in the browser), which takes the keyboard from
+   * that machine's terminal; one that is open is brought to the front. What is done in it comes back as changes of the plugin's parameters, and the page shows them. True if it was opened (the page says why if it was
+   * not: the plugin has none, the machine has no screen, the scan of the installed plugins is still going).
+   */
+  openEditor(node: NodeId): Promise<boolean> {
+    return this.#attempt(`open the window of ${this.#name(node)}`, { type: "openEditor", node });
   }
 
   /**

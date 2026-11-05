@@ -97,6 +97,16 @@ export function paramCountOf(state: ClientState, id: NodeId): number {
   return (node?.kind === "instrument" || node?.kind === "effect" ? node.plugin?.params.length : undefined) ?? 0;
 }
 
+/**
+ * Whether the plugin of node `id` has a window of its own that the machine that runs Tang can open (step 112): the plugin says it has one (`hasEditor`, a VST3 plugin does) and the server says that its machine can
+ * show windows (`windows` among what its hello says it can do: a machine that has no screen cannot). False for every other node.
+ */
+export function hasWindowOf(state: ClientState, id: NodeId): boolean {
+  if (!state.hello?.features.includes("windows")) return false;
+  const node = nodeById(state, id);
+  return (node?.kind === "instrument" || node?.kind === "effect" ? node.plugin?.hasEditor : undefined) ?? false;
+}
+
 /** Whether two answers of `paramListOf` are the same list of the same plugin. */
 export function sameParamList(a: ParamList | null, b: ParamList | null): boolean {
   if (a === b) return true;

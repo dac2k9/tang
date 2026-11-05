@@ -304,6 +304,13 @@ pub enum Intent {
     /// more than one: `NotFound`), a name that is not one, a node that is a group, a group's bus effect, a modulator or a source (a module has none of those yet), a lane that has no instrument, none at all,
     /// and a program that has no library (`Io` for a write that fails).
     SaveSelectionAsModule { nodes: Vec<NodeId>, name: String },
+    /// Open the plugin's own window (step 112, "a button to open the official UI"): the face that the plugin draws for itself, in a window of Tang's own on the machine that runs it, which takes the keyboard from the program's
+    /// terminal; one that is open is brought to the front. `node` is a lane's instrument (the lane's node) or an effect, a bus effect included, and the values that the session has for the plugin's parameters are told to its controller
+    /// first, so that the window shows them. What a person does to the plugin's knobs in the window comes back as `SetParam` (a drag is one step of the history); a window is no change of the session: no step of the history, the
+    /// session is not marked, and a revision is used, as a save uses one (`EditorOpened`). Refused, with nothing opened, for a node that is not there, one that has no plugin (a group, a modulator, a source, a module, a lane that has
+    /// no instrument), a plugin that has no window of its own (the built-in ones, the CLAP and LV2 plugins: only VST3 so far), a machine that has no screen to open one on, a plugin scan that is still going (the windows' events are not turned
+    /// while it is: f179) and a plugin whose window did not open, each in its own words.
+    OpenEditor { node: NodeId },
     /// Put back what the last step that can be undone did: a parameter, a gain, a modulator's setting, a cable's depth, the keys
     /// of a lane, the place of a node, the knobs a node shows, a group's name, the scale or the lock of the piano, the place of
     /// an effect. A change that goes on (a knob that is dragged) is one step. What it does is told as the intents it is made of
@@ -616,6 +623,8 @@ pub enum Event {
     Saved { file: Option<String> },
     /// A module is written to the library under `name` (the name as `module::clean_name` made it): the session is as it was, and the catalog has the module.
     ModuleSaved { name: String },
+    /// The window of the plugin in `node` is open on the machine that runs Tang (`OpenEditor`): the session is as it was. A window that the person closes is not told: it is theirs.
+    EditorOpened { node: NodeId },
 }
 
 /// A parameter, by the plugin's own index, and the value it has.
@@ -880,6 +889,7 @@ mod tests {
             (Intent::Save, json!({"type": "save"})),
             (Intent::SaveAs { name: "copy".to_string() }, json!({"type": "saveAs", "name": "copy"})),
             (Intent::SaveModule { node: NodeId(4), name: "Space".to_string() }, json!({"type": "saveModule", "node": 4, "name": "Space"})),
+            (Intent::OpenEditor { node: NodeId(3) }, json!({"type": "openEditor", "node": 3})),
             (
                 Intent::SaveSelectionAsModule { nodes: vec![NodeId(4), NodeId(7)], name: "Space".to_string() },
                 json!({"type": "saveSelectionAsModule", "nodes": [4, 7], "name": "Space"}),
@@ -1020,6 +1030,7 @@ mod tests {
             (Event::Saved { file: Some("song.toml".to_string()) }, json!({"type": "saved", "file": "song.toml"})),
             (Event::Saved { file: None }, json!({"type": "saved", "file": null})),
             (Event::ModuleSaved { name: "Space".to_string() }, json!({"type": "moduleSaved", "name": "Space"})),
+            (Event::EditorOpened { node: NodeId(3) }, json!({"type": "editorOpened", "node": 3})),
         ]
     }
 

@@ -2,12 +2,13 @@ pub mod autodetect;
 pub mod builtin;
 pub mod chain;
 pub mod clap;
+// (A VST3 plugin is the only one that has a window of its own so far: a build without the format registers no editor, and the table and the way into it are not used.)
+#[cfg_attr(not(feature = "vst3"), allow(dead_code))]
+pub mod editors;
 #[cfg(feature = "lv2")]
 pub mod lv2;
 #[cfg(feature = "vst3")]
 pub mod vst3;
-
-use std::rc::Rc;
 
 #[derive(Clone, Default)]
 pub struct ParameterInfo {
@@ -92,12 +93,26 @@ pub struct SideInput {
     pub side: &'static str,
 }
 
-/// A plugin's own window (step 112): the face that a plugin draws for itself, where a person turns its knobs and picks its sounds. A plugin that has one is asked for it ([`Plugin::editor`]) on the thread that
-/// loaded it, before it goes to the audio thread, and the handle stays on that thread: it is an `Rc`, and a window is the main thread's.
+/// A plugin's own window (step 112): the face that a plugin draws for itself, where a person turns its knobs and picks its sounds. A plugin that has one makes its `Editor` when it is loaded and keeps it in the registry
+/// of the windows (`plugin::editors`) under an id that it gives out (`Plugin::editor_id`): the handle is the main thread's (it is an `Rc` there, and a window is not for any other thread), while the plugin goes
+/// to the audio thread and comes back.
 pub trait Editor {
     /// Open the window, on the main thread, and say why if it cannot be (there is no screen, or the plugin has no window of its own after all). `focus` is whether the window takes the keyboard from the program that has it
-    /// (`window::Spec::focus`).
+    /// (`window::Spec::focus`). One window at a time is the caller's business (the registry sees to it).
     fn open(&self, title: &str, focus: bool) -> Result<Box<dyn OpenEditor>, String>;
+
+    /// What the person has changed in the plugin's window since this was last asked (and what the plugin has changed of itself), as the plugin's own parameter index and the value in the units that the plugin's parameter
+    /// has (`ParameterInfo`), in the order it was done: the host applies them as it applies the change of any other front-end. They are taken, so that each is told once. A plugin that has no parameters in its window
+    /// says none, which is the default.
+    fn take_edits(&self) -> Vec<(u32, f32)> {
+        Vec::new()
+    }
+
+    /// Tell the plugin's controller the values that the session has for these parameters (the index and the value, as `take_edits` has them), so that a window that is open shows them and one that opens does. The
+    /// default is a plugin that has nothing to tell.
+    fn set_values(&self, values: &[(u32, f32)]) {
+        let _ = values;
+    }
 }
 
 /// A plugin's window while it is open. Dropping it closes it.
@@ -106,7 +121,11 @@ pub trait OpenEditor {
     /// turn of whatever pumps the window's events.
     fn poll(&mut self) -> bool;
 
+    /// Bring the window to the front again (a person who asks for a window that is open is shown it); `focus` is whether it takes the keyboard.
+    fn raise(&mut self, focus: bool);
+
     /// Close the window: the plugin's view is let go of first, as the plugin formats say. Closing a window that is closed is nothing.
+    #[cfg_attr(not(feature = "vst3"), allow(dead_code))]
     fn close(&mut self);
 
     /// The size of what is in the window, in points.
@@ -184,10 +203,10 @@ pub trait Plugin: Send {
         self.process(midi_events, audio_in, audio_out)
     }
 
-    /// The plugin's own window, if it has one (step 112): what a front-end opens for a person to use the plugin's own face. Asked on the thread that loaded the plugin, before the plugin goes to the audio thread; the handle
-    /// that comes back stays on that thread (`Rc`), and the window is closed before the plugin is let go of (a window that is open when the plugin is terminated is a view of an object that is gone). The default is a
-    /// plugin that has none.
-    fn editor(&self) -> Option<Rc<dyn Editor>> {
+    /// The id of the plugin's own window in the registry of the windows (`plugin::editors`), if it has one (step 112): what a front-end opens for a person to use the plugin's own face. The plugin registered its editor when
+    /// it was loaded, on the main thread, and forgets it when it is let go of, closing the window first (a window that is open when the plugin is terminated is a view of an object that is gone). The default is a plugin
+    /// that has none.
+    fn editor_id(&self) -> Option<editors::EditorId> {
         None
     }
 }

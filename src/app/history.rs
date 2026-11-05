@@ -404,7 +404,7 @@ impl Controller {
         let added = |label: String| Plan::Added { label, intent: intent.clone(), at: now };
         match intent {
             // (Done before `plan_history` is asked, by `apply`: they are no steps of the history.)
-            Intent::Save | Intent::SaveAs { .. } | Intent::SaveModule { .. } | Intent::SaveSelectionAsModule { .. } | Intent::Undo | Intent::Redo => Plan::Nothing,
+            Intent::Save | Intent::SaveAs { .. } | Intent::SaveModule { .. } | Intent::SaveSelectionAsModule { .. } | Intent::OpenEditor { .. } | Intent::Undo | Intent::Redo => Plan::Nothing,
             // A pattern is not put back by undo (what a recording took and what a clear took are not kept): these are no steps, and take nothing from the ones there are.
             Intent::SetRecording { .. } | Intent::ClearPattern { .. } | Intent::SetPatternField { .. } => Plan::Nothing,
             Intent::SetParam { node, param, .. } => match self.param_row(*node, *param) {

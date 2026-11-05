@@ -8,7 +8,7 @@ import type { Editor } from "../../client/editor";
 import { EVERY_NOTE, earItems } from "../../client/hears";
 import { noteFromItems, noteToItems, sourceChosen, sourceItems } from "../../client/noteItems";
 import { keptWords, removalWords } from "../../client/removal";
-import { chainLengthOf, chainPlaceOf, flagsOf, limiterOf, paramCountOf, presetsOf, removalOf } from "../../client/selectors";
+import { chainLengthOf, chainPlaceOf, flagsOf, hasWindowOf, limiterOf, paramCountOf, presetsOf, removalOf } from "../../client/selectors";
 import { sendItems, sendTarget } from "../../client/sends";
 import type { NodeId, NodeUi } from "../../protocol";
 import type { ContextItem } from "../../ui/ContextMenu";
@@ -34,6 +34,7 @@ export type MenuEditor = Pick<
   | "replaceInstrument"
   | "clearInstrument"
   | "loadPreset"
+  | "openEditor"
   | "addAudioCable"
   | "addNotesCable"
   | "setMute"
@@ -200,10 +201,22 @@ function presetMenu(deps: MenuDeps, node: NodeId): ContextItem[] {
   ];
 }
 
-/** The switches of a plugin's node that are the canvas's own: its panel of parameters and its scope. */
+/** The switches of a plugin's node that are the canvas's own: its panel of parameters and its scope; and, first, the plugin's own window (step 112), for a plugin that has one on a machine that can show it. */
 function viewItems(deps: MenuDeps, node: NodeId, scoped: boolean): ContextItem[] {
-  const { canvas, state } = deps;
+  const { canvas, editor, state } = deps;
   return [
+    ...(hasWindowOf(state, node)
+      ? [
+          {
+            id: "window",
+            label: "Open its own window",
+            title: "On the machine that runs Tang",
+            run: () => {
+              void editor.openEditor(node);
+            },
+          },
+        ]
+      : []),
     ...(paramCountOf(state, node) > 0
       ? [
           toggle("parameters", "Parameters…", canvas.inspecting(node), () => {

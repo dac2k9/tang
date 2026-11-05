@@ -91,6 +91,13 @@ describe("connecting", () => {
     expect(server.received).toEqual([{ type: "subscribe" }]);
   });
 
+  test("is told by the hello that the server's machine can show a plugin's own window, when it can (step 112)", async () => {
+    const server = new MockServer({ windows: true });
+    const client = connect(server);
+    await until(() => client.state.status === "open", "the session");
+    expect(client.state.hello?.features).toEqual(["notes", "telemetry", "windows"]);
+  });
+
   test("asks for its telemetry once the server has said hello", async () => {
     const server = new MockServer();
     await open(server, { telemetry: ["meters", "modulation"] });

@@ -1564,7 +1564,8 @@ impl State {
                 // (The tab shows what the controller says is unsaved, which is not the case now.)
                 | intent::Event::Saved { .. }
                 // (The library is not part of the session: the selectors read the catalog when they open.)
-                | intent::Event::ModuleSaved { .. } => {}
+                | intent::Event::ModuleSaved { .. }
+                | intent::Event::EditorOpened { .. } => {}
             }
         }
     }
@@ -1841,6 +1842,9 @@ const LIMIT_LIGHT_FROM: f32 = 0.1;
 /// light, the held notes).
 const TICK: Duration = Duration::from_millis(100);
 
+/// How long the loop waits between two turns of the plugins' windows while one is open (`Controller::pump_windows`, which itself waits for an event for a moment): short enough for a window that answers the mouse.
+const WINDOW_TURN: Duration = Duration::from_millis(1);
+
 /// Run the interface until the user quits: draw, then wait for `input` (the terminal's
 /// events, from a `TerminalReader`), the requests of the browsers if the session is
 /// served (`web`), or the tick; handle what came, and draw again. The events that are
@@ -1861,19 +1865,26 @@ where
 {
     let ticks = crossbeam_channel::tick(TICK);
     let mut web_requests = web.as_deref().map(Web::requests);
+    // Whether the frame is drawn before the loop waits again: not after a turn of the plugins' windows (below), which is no news for the screen.
+    let mut draw = true;
     loop {
-        tick(s);
-        if let Some(web) = web.as_deref_mut() {
-            web.refresh(&mut s.ctl);
-            s.web = Some(web.status());
-        }
+        if draw {
+            tick(s);
+            if let Some(web) = web.as_deref_mut() {
+                web.refresh(&mut s.ctl);
+                s.web = Some(web.status());
+            }
 
-        render(terminal, s)?;
+            render(terminal, s)?;
+        }
         if s.quit {
             break;
         }
 
         let requests = web_requests.clone().unwrap_or_else(crossbeam_channel::never);
+        // While a plugin's own window is open (step 112) its events are turned between the others, a few milliseconds apart; with none open, and while the plugin scan goes (f179), this never comes.
+        let windows = if s.ctl.windows_open() { crossbeam_channel::after(WINDOW_TURN) } else { crossbeam_channel::never() };
+        draw = true;
         crossbeam_channel::select! {
             recv(input) -> event => {
                 let Ok(event) = event else {
@@ -1895,6 +1906,14 @@ where
                 _ => web_requests = None,
             },
             recv(ticks) -> _ => {}
+            recv(windows) -> _ => {
+                // (What a knob in a window did is applied by the controller's `poll`, here and not only at the next tick, so that the sound follows the hand.)
+                s.ctl.pump_windows();
+                if s.ctl.poll().model_changed {
+                    s.rebuild_tree();
+                }
+                draw = false;
+            }
         }
     }
     Ok(())
@@ -2764,6 +2783,20 @@ fn handle_key(s: &mut State, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('g') if s.active_tab == TAB_SESSION && !s.focus_params => {
             if let Some(TreeAddress::Instrument(inst)) = s.selected_address().copied() {
                 s.open_group_assign(inst);
+            }
+        }
+
+        // 'u' (chain focus) — open the selected plugin's own window (`OpenEditor`, step 112): the face that the plugin draws for itself, in a window on this machine that takes the keyboard, no step of the history. A plugin that has
+        // none, a machine that has no screen and a scan that is still going are refused, and said in the log.
+        KeyCode::Char('u') if s.active_tab == TAB_SESSION && !s.focus_params => {
+            let node = match s.selected_address().copied() {
+                Some(TreeAddress::Instrument(inst)) => s.ctl.model.instruments.get(inst).map(|lane| lane.node),
+                Some(TreeAddress::Effect { inst, index }) => s.ctl.model.instruments.get(inst).and_then(|lane| lane.effects.get(index)).map(|slot| slot.node),
+                Some(TreeAddress::GroupEffect { group, index }) => s.ctl.model.groups.get(group).and_then(|bus| bus.effects.get(index)).map(|slot| slot.node),
+                _ => None,
+            };
+            if let Some(node) = node {
+                s.apply(Intent::OpenEditor { node });
             }
         }
 
@@ -4974,6 +5007,7 @@ fn build_help_lines(web: Option<&WebStatus>) -> Vec<String> {
         "  N          Add an effect that stands by itself (in a lane of its own; cables feed it), or a module of the library (a chain of effects, whole)".into(),
         "  K          Keep the chain of effects of the lane as a module (a popup asks for the name; `N` adds it, here or in another session)".into(),
         "  d          Delete selected".into(),
+        "  u          Open the plugin's own window (a VST3 plugin's face, on this machine; it takes the keyboard)".into(),
         "  m          Add a modulator that hears the lane or group the cursor is of (on a modulator: what it hears)".into(),
         "  F          Add a modulator that hears every note (its cables reach any plugin of the session)".into(),
         "  h          Choose whose notes a modulator hears (a lane's, a group's, or every note)".into(),

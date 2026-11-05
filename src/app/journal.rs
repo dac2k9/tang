@@ -238,7 +238,7 @@ impl Controller {
     /// of a plugin: an effect's outputs are the chain's, an instrument has some) says it does not.
     fn recover_plugin(
         &self,
-        slot: &PluginSlot,
+        slot: &mut PluginSlot,
         kept: Kept<Box<dyn Plugin>>,
         deadline: Instant,
         fits: fn(&dyn Plugin, &PluginSlot) -> Result<(), IntentError>,
@@ -259,7 +259,7 @@ impl Controller {
     /// The lane to put back: the very lane if the audio thread handed it back (it is waited for a moment, `recovery_wait`, if it has not yet), with its plugins loaded
     /// again, as `recover_plugin` loads one, if it gave them up (the history lets go of them, to save memory). Refused, with the reason, if the lane did not come or a
     /// plugin cannot be had.
-    fn recover_lane(&self, lane: &InstrumentNode, kept: Kept<KeptLane>, deadline: Instant) -> Result<KeptLane, IntentError> {
+    fn recover_lane(&self, lane: &mut InstrumentNode, kept: Kept<KeptLane>, deadline: Instant) -> Result<KeptLane, IntentError> {
         let handed_back = match kept {
             Kept::InHand(kept) => Some(kept),
             Kept::Asked(channel) => channel.recv_deadline(deadline).ok(),
@@ -269,7 +269,7 @@ impl Controller {
             return Err(IntentError::Invalid(format!("{} was not handed back by the audio thread", lane_words(lane))));
         };
         if handed_back.plugin_count() < plugins_of(lane) {
-            let instrument = match &lane.instrument {
+            let instrument = match &mut lane.instrument {
                 Some(slot) => {
                     let loaded = self.reload_plugin(slot)?;
                     has_audio_output(&*loaded)?;
@@ -279,7 +279,7 @@ impl Controller {
             };
             let effects = lane
                 .effects
-                .iter()
+                .iter_mut()
                 .map(|slot| {
                     let loaded = self.reload_plugin(slot)?;
                     outputs_fit_the_chain(&slot.name, loaded.audio_output_count())?;
@@ -293,7 +293,7 @@ impl Controller {
 
     /// The group to put back: the very group if the audio thread handed it back (it is waited for a moment, `recovery_wait`, if it has not yet), with its bus effects loaded again,
     /// as `recover_plugin` loads one, if it gave them up (the history lets go of them, to save memory). Refused, with the reason, if the group did not come or a plugin cannot be had.
-    fn recover_group(&self, index: usize, group: &GroupNode, kept: Kept<KeptGroup>, deadline: Instant) -> Result<KeptGroup, IntentError> {
+    fn recover_group(&self, index: usize, group: &mut GroupNode, kept: Kept<KeptGroup>, deadline: Instant) -> Result<KeptGroup, IntentError> {
         let handed_back = match kept {
             Kept::InHand(kept) => Some(kept),
             Kept::Asked(channel) => channel.recv_deadline(deadline).ok(),
@@ -305,7 +305,7 @@ impl Controller {
         if handed_back.plugin_count() < group.effects.len() {
             let effects = group
                 .effects
-                .iter()
+                .iter_mut()
                 .map(|slot| {
                     let loaded = self.reload_plugin(slot)?;
                     outputs_fit_the_chain(&slot.name, loaded.audio_output_count())?;
@@ -317,12 +317,14 @@ impl Controller {
         Ok(handed_back)
     }
 
-    /// The plugin of `slot`, loaded again from what it was loaded from, with the preset it had and then the values that the model has, which are the user's.
-    fn reload_plugin(&self, slot: &PluginSlot) -> Result<Box<dyn Plugin>, IntentError> {
+    /// The plugin of `slot`, loaded again from what it was loaded from, with the preset it had and then the values that the model has, which are the user's. The slot has the new plugin's window from then on (step 112: a
+    /// plugin that is loaded again is another instance, and has an editor of its own in the registry of the windows).
+    fn reload_plugin(&self, slot: &mut PluginSlot) -> Result<Box<dyn Plugin>, IntentError> {
         let mut loaded = plugin::load(&slot.id, self.sample_rate, self.max_block_size, &self.runtime).map_err(|e| {
             log::error!("Failed to load plugin '{}': {e}", slot.id);
             IntentError::Invalid(format!("{} could not be loaded", slot.name))
         })?;
+        slot.editor = loaded.editor_id();
         if let Some(preset) = slot.current_preset.as_ref().and_then(|name| slot.presets.iter().find(|preset| preset.name == *name)) {
             if let Err(e) = loaded.load_preset(&preset.id) {
                 log::warn!("{}: preset '{}' did not load again: {e}", slot.name, preset.name);

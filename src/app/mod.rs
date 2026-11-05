@@ -21,5 +21,6 @@ pub mod save;
 pub mod snapshot;
 pub mod sources;
 pub mod subscribers;
+pub mod windows;
 #[cfg(test)]
 pub mod testutil;

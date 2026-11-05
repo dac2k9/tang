@@ -187,6 +187,25 @@ describe("a saved event", () => {
   });
 });
 
+describe("an editor opened event (step 112)", () => {
+  const unsaved = { ...tracerSnapshot, meta: { ...tracerSnapshot.meta, dirty: true } };
+  const told: StampedEvent = { rev: 1, type: "editorOpened", node: 3 };
+
+  test("is a window on the server's machine and no change of the session: the revision goes on and nothing else does, as saved or as unsaved as it was", () => {
+    const after = applied(unsaved, told);
+    expect(after.rev).toBe(1);
+    expect(after.meta).toBe(unsaved.meta);
+    expect(after.graph).toBe(unsaved.graph);
+    const clean = applied(tracerSnapshot, told);
+    expect(clean.meta.dirty).toBe(false);
+    expect(clean.graph).toBe(tracerSnapshot.graph);
+  });
+
+  test("is an event like the others: one that skips a revision means events were missed", () => {
+    expect(applyEvent(tracerSnapshot, { ...told, rev: 5 })).toMatchObject({ ok: false });
+  });
+});
+
 describe("a module saved event", () => {
   const unsaved = { ...tracerSnapshot, meta: { ...tracerSnapshot.meta, dirty: true } };
   const told: StampedEvent = { rev: 1, type: "moduleSaved", name: "Space" };

@@ -103,6 +103,8 @@ pub struct Context {
     pub owner: Sender<OwnerRequest>,
     pub notes: NoteInput,
     pub limits: Limits,
+    /// Whether this machine can show a plugin's own window (`Config::windows`): said in the hello.
+    pub windows: bool,
 }
 
 pub struct Connection {
@@ -112,6 +114,7 @@ pub struct Connection {
     shared: Arc<Shared>,
     owner: Sender<OwnerRequest>,
     notes: NoteInput,
+    windows: bool,
     state: State,
     /// The notes this connection has started and not ended, one bit each.
     held: u128,
@@ -120,9 +123,9 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(id: ClientId, context: Context, now: Instant) -> Connection {
-        let Context { hub, policy, shared, owner, notes, limits } = context;
+        let Context { hub, policy, shared, owner, notes, limits, windows } = context;
         let state = if policy.needs_token() { State::Unauthorized } else { State::Open };
-        Connection { id, hub, policy, shared, owner, notes, state, held: 0, limiter: RateLimiter::new(limits, now) }
+        Connection { id, hub, policy, shared, owner, notes, windows, state, held: 0, limiter: RateLimiter::new(limits, now) }
     }
 
     /// Whether the connection may go on without the token: it has none to give, or it
@@ -136,7 +139,7 @@ impl Connection {
         self.reply(&ServerMessage::Hello {
             protocol: PROTOCOL,
             rev: self.shared.rev.load(Ordering::Relaxed),
-            features: vec!["notes".to_string(), "telemetry".to_string()],
+            features: ["notes", "telemetry"].into_iter().chain(self.windows.then_some("windows")).map(String::from).collect(),
             needs_token: self.policy.needs_token(),
         });
     }
@@ -317,7 +320,7 @@ mod tests {
         let notes = NoteInput::new(midi_tx, held.clone(), filter.clone());
         let t0 = Instant::now();
         let shared = Arc::new(Shared::new(7, SessionModel::default().telemetry_layout()));
-        let context = Context { hub: hub.clone(), policy: Arc::new(policy), shared, owner: owner_tx, notes, limits };
+        let context = Context { hub: hub.clone(), policy: Arc::new(policy), shared, owner: owner_tx, notes, limits, windows: false };
         let conn = Connection::new(id, context, t0);
         Rig { conn, id, out, owner, midi, hub, filter, held, t0 }
     }
@@ -375,6 +378,18 @@ mod tests {
         assert_eq!(
             rig.said(),
             [json!({"type": "hello", "protocol": PROTOCOL, "rev": 7, "features": ["notes", "telemetry"], "needsToken": false})]
+        );
+    }
+
+    #[test]
+    fn hello_says_windows_only_when_this_machine_can_show_a_plugins_own_window() {
+        let mut rig = rig();
+        rig.conn.windows = true;
+        rig.conn.open();
+        assert_eq!(
+            rig.said(),
+            [json!({"type": "hello", "protocol": PROTOCOL, "rev": 7, "features": ["notes", "telemetry", "windows"], "needsToken": false})],
+            "after the others, so that a client that reads the first two reads them as it did"
         );
     }
 
@@ -689,6 +704,7 @@ mod tests {
             owner: owner_tx,
             notes,
             limits: Limits::default(),
+            windows: false,
         };
         let mut conn = Connection::new(id, context, t0);
         conn.on_text(&json!({"type": "noteOn", "note": 60, "velocity": 100}).to_string(), t0);

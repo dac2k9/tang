@@ -8642,3 +8642,115 @@ mod modules {
         assert!(h.s.help_lines.iter().any(|line| line.trim_start().starts_with("N ") && line.contains("a module of the library")), "{:?}", h.s.help_lines);
     }
 }
+
+/// A plugin's own window from the terminal (step 112): `u` on a plugin that has one.
+mod plugin_windows {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::plugin::editors::{self, fakes::{FakeEditor, Log, said}};
+
+    #[test]
+    fn u_opens_the_window_of_the_plugin_under_the_cursor_leaves_the_session_as_it_was_and_does_nothing_for_a_plugin_that_has_none() {
+        let mut h = Harness::new(scene_split());
+        h.s.ctl.window_check = || Ok(());
+        assert!(h.s.ctl.model.instruments.len() >= 2, "two lanes");
+        // The first lane's instrument has a window of its own (a fake editor in the registry, which its plugin would have made); the second's has none.
+        let log = Log::default();
+        let alive = Arc::new(());
+        let id = editors::register(FakeEditor::new("Window", &log), &alive);
+        h.s.ctl.model.instruments[0].instrument.as_mut().expect("an instrument").editor = Some(id);
+
+        h.goto(TreeAddress::Instrument(1));
+        h.press(KeyCode::Char('u'));
+        assert!(!editors::any_open(), "the plugin under the cursor has no window of its own");
+
+        h.goto(TreeAddress::Instrument(0));
+        let rev = h.s.ctl.rev;
+        h.press(KeyCode::Char('u'));
+        assert!(editors::is_open(id), "the window of the plugin under the cursor is open");
+        assert_eq!(h.s.ctl.rev, rev + 1, "a revision is used, as a save uses one");
+        assert!(!h.s.ctl.dirty, "and the session has nothing unsaved for it");
+        assert!(said(&log).iter().any(|line| line.contains("open \"Oscillator\"")), "{:?}", said(&log));
+
+        // Asked again, the window is brought to the front, and not opened twice.
+        h.press(KeyCode::Char('u'));
+        assert_eq!(said(&log).iter().filter(|line| line.contains("open \"")).count(), 1, "{:?}", said(&log));
+        assert!(said(&log).iter().any(|line| line.contains("raise")), "{:?}", said(&log));
+    }
+
+    #[test]
+    fn u_does_nothing_on_a_node_that_is_not_a_plugin_and_in_the_parameter_pane() {
+        let mut h = Harness::new(scene_split());
+        h.s.ctl.window_check = || Ok(());
+        let log = Log::default();
+        let alive = Arc::new(());
+        let id = editors::register(FakeEditor::new("Window", &log), &alive);
+        h.s.ctl.model.instruments[0].instrument.as_mut().expect("an instrument").editor = Some(id);
+        h.goto(TreeAddress::FreeModulator { index: 0 });
+        h.press(KeyCode::Char('u'));
+        assert!(!editors::any_open(), "a modulator has no plugin");
+        // In the parameter pane the letter is not a chain key (the pane's own keys are another set).
+        h.goto(TreeAddress::Instrument(0));
+        h.press(KeyCode::Enter);
+        h.press(KeyCode::Char('u'));
+        assert!(!editors::any_open(), "the pane has the focus");
+    }
+
+    #[test]
+    fn u_opens_the_window_of_an_effect_in_a_lanes_chain_and_not_of_the_one_before_it() {
+        let mut h = Harness::new(scene_two_effects());
+        h.s.ctl.window_check = || Ok(());
+        let log = Log::default();
+        let alive = Arc::new(());
+        let id = editors::register(FakeEditor::new("Window", &log), &alive);
+        h.s.ctl.model.instruments[0].effects[1].editor = Some(id);
+        h.goto(TreeAddress::Effect { inst: 0, index: 0 });
+        h.press(KeyCode::Char('u'));
+        assert!(!editors::any_open(), "the filter has no window of its own");
+        h.goto(TreeAddress::Effect { inst: 0, index: 1 });
+        h.press(KeyCode::Char('u'));
+        assert!(editors::is_open(id), "the reverb's window is open");
+        assert!(said(&log).iter().any(|line| line.contains("open \"Reverb\"")), "{:?}", said(&log));
+    }
+
+    #[test]
+    fn u_opens_the_window_of_an_effect_on_a_groups_bus_and_not_of_the_one_before_it() {
+        let mut h = Harness::new(scene_bus_pair());
+        h.s.ctl.window_check = || Ok(());
+        let log = Log::default();
+        let alive = Arc::new(());
+        let id = editors::register(FakeEditor::new("Window", &log), &alive);
+        h.s.ctl.model.groups[0].effects[1].editor = Some(id);
+        h.goto(TreeAddress::GroupEffect { group: 0, index: 0 });
+        h.press(KeyCode::Char('u'));
+        assert!(!editors::any_open(), "the bus's filter has no window of its own");
+        h.goto(TreeAddress::GroupEffect { group: 0, index: 1 });
+        h.press(KeyCode::Char('u'));
+        assert!(editors::is_open(id), "the bus's reverb has its window open");
+        assert!(said(&log).iter().any(|line| line.contains("open \"Reverb\"")), "{:?}", said(&log));
+    }
+
+    #[test]
+    fn u_is_a_key_of_the_session_tab_and_does_nothing_in_the_others() {
+        let mut h = Harness::new(scene_split());
+        h.s.ctl.window_check = || Ok(());
+        let log = Log::default();
+        let alive = Arc::new(());
+        let id = editors::register(FakeEditor::new("Window", &log), &alive);
+        h.s.ctl.model.instruments[0].instrument.as_mut().expect("an instrument").editor = Some(id);
+        h.goto(TreeAddress::Instrument(0));
+        h.s.active_tab = TAB_PIANO;
+        h.press(KeyCode::Char('u'));
+        assert!(!editors::any_open(), "the piano tab has no such key");
+        h.s.active_tab = TAB_SESSION;
+        h.press(KeyCode::Char('u'));
+        assert!(editors::is_open(id), "the session tab has it");
+    }
+
+    #[test]
+    fn the_help_tab_says_what_u_does() {
+        let h = Harness::new(scene_split());
+        assert!(h.s.help_lines.iter().any(|line| line.trim_start().starts_with("u ") && line.contains("plugin's own window")), "{:?}", h.s.help_lines);
+    }
+}

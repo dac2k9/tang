@@ -20,8 +20,8 @@ export function applyEvent(snapshot: Snapshot, event: StampedEvent): Applied {
   if (event.rev !== snapshot.rev + 1) {
     return { ok: false, reason: `the session is at revision ${snapshot.rev} and the next event is ${event.rev}` };
   }
-  // A module that is saved is a file of the library and no change of the session: the session is as saved, or as unsaved, as it was.
-  if (event.type === "moduleSaved") return { ok: true, snapshot: { ...snapshot, rev: event.rev } };
+  // A module that is saved is a file of the library and no change of the session: the session is as saved, or as unsaved, as it was. Nor is a window of a plugin that is opened on the server's machine (step 112).
+  if (event.type === "moduleSaved" || event.type === "editorOpened") return { ok: true, snapshot: { ...snapshot, rev: event.rev } };
   // A save changes no node: the session is as it was, and nothing in it is unsaved now.
   if (event.type === "saved") return { ok: true, snapshot: { ...snapshot, rev: event.rev, meta: { ...snapshot.meta, dirty: false, file: event.file } } };
   // The piano's scale and lock are the session's, not a node's: no node changes.
@@ -44,7 +44,7 @@ function pianoAfter(piano: PianoMeta, event: Extract<StampedEvent, { type: "scal
 }
 
 /** The graph after the event, with only what it changed replaced; or the reason it cannot be. */
-function changeGraph(graph: Graph, event: Exclude<StampedEvent, { type: "saved" | "moduleSaved" | "scaleSet" | "lockedSet" | "bpmSet" }>): Graph | string {
+function changeGraph(graph: Graph, event: Exclude<StampedEvent, { type: "saved" | "moduleSaved" | "editorOpened" | "scaleSet" | "lockedSet" | "bpmSet" }>): Graph | string {
   if (event.type === "limiterSet") return withLimiter(graph, event.on);
   if (event.type === "edgeDepthSet") return withDepth(graph, event.edge, event.depth);
   if (event.type === "cableGainSet") return withCableGain(graph, event.edge, event.gain);
@@ -56,7 +56,7 @@ function changeGraph(graph: Graph, event: Exclude<StampedEvent, { type: "saved" 
 }
 
 /** The node the event is about, as it is after it; or the reason it cannot be. */
-function changeNode(node: Node, event: Exclude<StampedEvent, { type: "edgeDepthSet" | "cableGainSet" | "saved" | "moduleSaved" | "scaleSet" | "lockedSet" | "bpmSet" | "limiterSet" }>): Node | string {
+function changeNode(node: Node, event: Exclude<StampedEvent, { type: "edgeDepthSet" | "cableGainSet" | "saved" | "moduleSaved" | "editorOpened" | "scaleSet" | "lockedSet" | "bpmSet" | "limiterSet" }>): Node | string {
   switch (event.type) {
     case "paramSet": {
       const plugin = pluginOf(node);

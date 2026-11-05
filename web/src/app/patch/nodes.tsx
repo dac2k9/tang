@@ -11,7 +11,7 @@ import { keptWords, removalWords } from "../../client/removal";
 import { holdersOf } from "../../client/holders";
 import { inputsStoodFor } from "../../client/inputs";
 import { slotReader } from "../../client/readers";
-import { audibleAt, chainPlaceOf, envelopeStagesOf, nodeById, paramCountOf, presetsOf, removalOf, sameChainPlace, sameRemoval, sameStages } from "../../client/selectors";
+import { audibleAt, chainPlaceOf, envelopeStagesOf, hasWindowOf, nodeById, paramCountOf, presetsOf, removalOf, sameChainPlace, sameRemoval, sameStages } from "../../client/selectors";
 import { NAME_LIMIT } from "../../protocol";
 import type { ModulatorKind, Node, NodeId, Preset } from "../../protocol";
 import { formatValue } from "../../ui/Knob";
@@ -207,6 +207,35 @@ function ParamsButton({ node, name }: { node: NodeId; name: string }) {
       }}
     >
       ⚙
+    </button>
+  );
+}
+
+/** The `id` of the button that opens the plugin's own window of the node (step 112). */
+export const windowButtonId = (node: NodeId): string => `window-${String(node)}`;
+
+/**
+ * The button of an instrument or an effect that opens its plugin's own window (step 112, "a button to open the official UI"): the face that the plugin draws for itself, in a window on the machine that runs Tang,
+ * not in the browser, which takes the keyboard from that machine's terminal; pressed again, it brings the window to the front. Nothing for a plugin that has none (every plugin but a VST3 one), and nothing while the
+ * server's machine cannot show a window (it has no screen: a login over ssh, a container). What is done in the window comes back as changes of the plugin's parameters, which the knobs of the page show.
+ */
+function WindowButton({ node, name }: { node: NodeId; name: string }) {
+  const editor = useEditor();
+  const has = useClientState((state) => hasWindowOf(state, node));
+  if (!has) return null;
+  return (
+    <button
+      type="button"
+      id={windowButtonId(node)}
+      className="tang-menu-button tang-node__window nodrag nopan"
+      aria-label={`Open the window of ${name}`}
+      title={`Open the plugin's own window, on the machine that runs Tang`}
+      onClick={() => {
+        // (If it is refused the page says so: `Editor` puts the reason among the notices.)
+        void editor.openEditor(node);
+      }}
+    >
+      UI
     </button>
   );
 }
@@ -456,6 +485,7 @@ export function PluginNode({ data, type }: NodeProps<PatchNode>) {
           <span className="tang-node__actions">
             <MoveEffectButtons node={data.node} name={data.name} />
             <PresetMenu node={data.node} name={data.name} />
+            <WindowButton node={data.node} name={data.name} />
             <ParamsButton node={data.node} name={data.name} />
             <ScopeButton node={data.node} name={data.name} />
             {held?.first ? <AddModulatorMenu node={held.lane} name={data.name} /> : null}
@@ -465,6 +495,7 @@ export function PluginNode({ data, type }: NodeProps<PatchNode>) {
           <span className="tang-node__actions">
             <ChangeInstrumentMenu node={data.node} name={data.name} empty={data.format === null} />
             <PresetMenu node={data.node} name={data.name} />
+            <WindowButton node={data.node} name={data.name} />
             <ParamsButton node={data.node} name={data.name} />
             {silent ? null : <ScopeButton node={data.node} name={data.name} />}
             <AddEffectMenu node={data.node} name={data.name} />

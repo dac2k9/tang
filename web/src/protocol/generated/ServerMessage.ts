@@ -20,7 +20,7 @@ protocol: number,
  */
 rev: number, 
 /**
- * What the server can do: `notes`, `telemetry`.
+ * What the server can do: `notes`, `telemetry`, and `windows` when the machine that runs it can show a plugin's own window (step 112).
  */
 features: Array<string>, 
 /**

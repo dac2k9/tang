@@ -9,7 +9,7 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageFileType, NSEventMask, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSWindowAnimationBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
@@ -73,12 +73,19 @@ pub fn open(spec: &Spec) -> Result<Rc<dyn Window>, String> {
     };
     // Safety: the `Retained` is the window's owner, and `close` (the red button, or ours) must not give up a reference that is not a second one.
     unsafe { window.setReleasedWhenClosed(false) };
+    // (No zoom when it opens and no fade when it closes: a fade is finished by the turns of the loop that come after the close, and the one turn that `close` makes is not for that.)
+    window.setAnimationBehavior(NSWindowAnimationBehavior::None);
     window.setTitle(&NSString::from_str(spec.title));
     window.center();
-    // The window is made the key window of the program, whether or not the program is the active one: a plugin (an iPlug2 one, Gateway) makes no view in a window that has not been, and an empty window is what it
-    // is given otherwise. The program is made the active one only when `focus` says so, which is what leaves the keyboard where it was.
+    show(&window, &app, spec.focus);
+    Ok(Rc::new(MacWindow { window }))
+}
+
+/// Put the window in front. It is made the key window of the program, whether or not the program is the active one: a plugin (an iPlug2 one, Gateway) makes no view in a window that has not been, and an empty window is what it
+/// is given otherwise. The program is made the active one only when `focus` says so, which is what leaves the keyboard where it was.
+fn show(window: &NSWindow, app: &NSApplication, focus: bool) {
     window.makeKeyAndOrderFront(None);
-    if spec.focus {
+    if focus {
         // (Deprecated for `activate`, which a macOS before 14 does not have, and which is no more than the polite form of this.)
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
@@ -86,7 +93,6 @@ pub fn open(spec: &Spec) -> Result<Rc<dyn Window>, String> {
         // (The window of a program that is not the active one is in front of the other programs' only when it is told to be.)
         window.orderFrontRegardless();
     }
-    Ok(Rc::new(MacWindow { window }))
 }
 
 /// Let the windows have their events, for `limit` if there are none to have and a little longer if there are a lot: wait for an event and hand it to AppKit, until the time is up. The run loop's other sources
@@ -175,8 +181,15 @@ impl Window for MacWindow {
         self.window.isVisible()
     }
 
+    fn raise(&self, focus: bool) {
+        show(&self.window, &application(self.window.mtm()), focus);
+    }
+
     fn close(&self) {
         self.window.close();
+        // AppKit keeps what it tells the window server until its run loop turns, and the loops of the program turn it only while a window is open: without this turn the window of the last one to close would stay on the screen,
+        // shut and frozen, until the next one was opened. (No window is open while the scan of the installed plugins runs, which is when the loop must not be turned: f179.)
+        pump(Duration::from_millis(1));
     }
 
     fn describe(&self) -> String {

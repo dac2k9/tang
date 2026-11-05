@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::ffi::{c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use vst3::Steinberg::Vst::BusDirections_::{kInput, kOutput};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{
@@ -40,7 +40,7 @@ use vst3::Steinberg::{
 };
 use vst3::{Class, ComPtr, ComWrapper, Interface};
 
-use super::{Editor, ParameterInfo, Plugin, PluginInfo, Preset};
+use super::{ParameterInfo, Plugin, PluginInfo, Preset, editors};
 
 mod editor;
 
@@ -420,7 +420,14 @@ impl IHostApplicationTrait for TangHostApp {
     }
 }
 
-struct TangComponentHandler;
+/// How many edits of a plugin's parameters the handler keeps while nobody has taken them (`Editor::take_edits`): a program that has no controller to take them (the check of `tang window`) must not grow with every knob that is turned.
+const MAX_KEPT_EDITS: usize = 4096;
+
+/// The host's end of what a plugin's controller tells it (`IComponentHandler`): `performEdit` is what a knob that the person turns in the plugin's own window says (step 112, part B). The handler keeps it as the parameter's id and its
+/// normalized value for the main thread to take, since the plugin calls from the thread of its window (or, for the plugins that do, from another): nothing is converted or applied inside the plugin's call.
+struct TangComponentHandler {
+    edits: Arc<Mutex<Vec<(u32, f64)>>>,
+}
 
 impl Class for TangComponentHandler {
     type Interfaces = (IComponentHandler,);
@@ -433,9 +440,15 @@ impl IComponentHandlerTrait for TangComponentHandler {
 
     unsafe fn performEdit(
         &self,
-        _id: vst3::Steinberg::Vst::ParamID,
-        _value_normalized: vst3::Steinberg::Vst::ParamValue,
+        id: vst3::Steinberg::Vst::ParamID,
+        value_normalized: vst3::Steinberg::Vst::ParamValue,
     ) -> Steinberg::tresult {
+        if let Ok(mut edits) = self.edits.lock() {
+            if edits.len() == MAX_KEPT_EDITS {
+                edits.remove(0);
+            }
+            edits.push((id, value_normalized));
+        }
         kResultOk
     }
 
@@ -636,6 +649,10 @@ pub struct Vst3Plugin {
     // Connection points (for disconnect on Drop)
     comp_connection: Option<ComPtr<IConnectionPoint>>,
     ctrl_connection: Option<ComPtr<IConnectionPoint>>,
+    /// The plugin's own window in the registry of the windows (step 112; `plugin::editors`): made when the plugin is loaded, and forgotten, with its window closed, first thing when the plugin is let go of.
+    editor_id: editors::EditorId,
+    /// What the registry looks at to know that the plugin is still there (`editors::register`).
+    _alive: Arc<()>,
     // COM pointers into the loaded library — must drop before _module.
     // Rust drops fields in declaration order, so these must come before _module
     // to ensure Release() calls go through valid vtable pointers.
@@ -658,6 +675,8 @@ unsafe impl Send for Vst3Plugin {}
 
 impl Drop for Vst3Plugin {
     fn drop(&mut self) {
+        // The window first: a view of a plugin that is terminated is a view of nothing.
+        editors::forget(self.editor_id);
         unsafe {
             self.processor.setProcessing(0);
             self.component.setActive(0);
@@ -1025,8 +1044,8 @@ impl Plugin for Vst3Plugin {
 
     /// The plugin's own window (step 112; `editor.rs`). Every VST3 plugin is offered as having one: whether it has is only known when its controller is asked for a view, which is done when the window is opened, and a plugin
     /// that has none says so then.
-    fn editor(&self) -> Option<Rc<dyn Editor>> {
-        Some(Rc::new(editor::Vst3Editor::of(self.controller.clone(), self._module.clone())))
+    fn editor_id(&self) -> Option<editors::EditorId> {
+        Some(self.editor_id)
     }
 }
 
@@ -1136,7 +1155,8 @@ pub fn load(
     let (module, class_cid, name, is_instrument) = find_plugin(source)?;
 
     let host_app = ComWrapper::new(TangHostApp);
-    let handler = ComWrapper::new(TangComponentHandler);
+    let edits: Arc<Mutex<Vec<(u32, f64)>>> = Arc::default();
+    let handler = ComWrapper::new(TangComponentHandler { edits: edits.clone() });
 
     // Get host context as FUnknown pointer
     let host_unknown: ComPtr<FUnknown> = host_app
@@ -1510,6 +1530,14 @@ pub fn load(
         events: UnsafeCell::new(Vec::with_capacity(256)),
     });
 
+    // The plugin's own window, which the registry keeps for as long as the plugin is (the module is shared with the editor, so that no window outlives the library).
+    let module = Arc::new(module);
+    let alive = Arc::new(());
+    let editor_id = editors::register(
+        Rc::new(editor::Vst3Editor::of(controller.clone(), module.clone(), edits, &param_ids, &param_steps)),
+        &alive,
+    );
+
     Ok(Box::new(Vst3Plugin {
         name,
         is_instrument,
@@ -1519,7 +1547,7 @@ pub fn load(
         audio_in_bus_count: audio_in_bus_count.max(0) as usize,
         audio_out_bus_count: audio_out_bus_count.max(0) as usize,
         latency,
-        _module: Arc::new(module),
+        _module: module,
         component,
         processor,
         controller,
@@ -1547,6 +1575,8 @@ pub fn load(
         channel_notes: vec![Vec::new(); 16],
         comp_connection,
         ctrl_connection,
+        editor_id,
+        _alive: alive,
     }))
 }
 
@@ -1985,5 +2015,27 @@ mod tests {
             assert!((value - info.default).abs() < 1e-4, "{name}: read {value}, its default is {}", info.default);
         }
         assert!(volume.default != listed.iter().find(|p| p.name == "Dynamics").map_or(volume.default, |p| p.default), "the two have defaults of their own");
+    }
+
+    #[test]
+    fn a_knob_that_the_person_turns_in_the_plugins_window_is_kept_for_the_main_thread_and_not_without_end() {
+        let edits: Arc<Mutex<Vec<(u32, f64)>>> = Arc::default();
+        let handler = TangComponentHandler { edits: edits.clone() };
+        // Safety: the handler is an ordinary Rust object here, called as the plugin would call it: the knob is touched, turned, let go.
+        unsafe {
+            assert_eq!(handler.beginEdit(5), kResultOk);
+            assert_eq!(handler.performEdit(5, 0.25), kResultOk);
+            assert_eq!(handler.performEdit(6, 0.5), kResultOk);
+            assert_eq!(handler.endEdit(5), kResultOk);
+        }
+        assert_eq!(*edits.lock().unwrap(), [(5, 0.25), (6, 0.5)], "what the plugin said, with its ids and in its order, for the main thread to take");
+        // Nobody takes them (a program with no controller): the newest are kept, and the oldest go.
+        for n in 0..MAX_KEPT_EDITS + 10 {
+            // Safety: as above.
+            unsafe { handler.performEdit(9, n as f64) };
+        }
+        let kept = edits.lock().unwrap();
+        assert_eq!(kept.len(), MAX_KEPT_EDITS);
+        assert_eq!((kept.first(), kept.last()), (Some(&(9, 10.0)), Some(&(9, (MAX_KEPT_EDITS + 9) as f64))));
     }
 }

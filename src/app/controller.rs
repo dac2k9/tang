@@ -297,6 +297,10 @@ pub struct Controller {
     pub(super) clock: Box<dyn Fn() -> Instant + Send>,
     /// Which nodes are watched, and by whom, and the ring each has (`app::probes`).
     pub(super) probes: super::probes::Probes,
+    /// Which plugin's window the change that is being applied came from (step 112; `app::windows`), so that the window is not told back the value it has just made, in the middle of a drag.
+    pub(super) editing_from: Option<crate::plugin::editors::EditorId>,
+    /// Whether this machine can show a plugin's window, and why it cannot if it cannot (`window::available`; a test gives its own).
+    pub window_check: fn() -> Result<(), String>,
 }
 
 impl Controller {
@@ -358,6 +362,8 @@ impl Controller {
             taken_last: Journal::default(),
             clock: Box::new(Instant::now),
             probes: super::probes::Probes::default(),
+            editing_from: None,
+            window_check: crate::window::available,
         };
         // (A lane that cables of notes end at hears the sources they start at: the audio thread is told, as it is when a device is plugged in.)
         controller.sync_lane_sources();
@@ -1247,6 +1253,9 @@ impl Controller {
 
     pub(super) fn poll_at(&mut self, now: Instant) -> Polled {
         self.reap();
+        // The plugins' own windows (step 112): what a knob in one of them did is applied as the change of any front-end is, and a window whose plugin has left the session is closed.
+        self.apply_window_edits();
+        self.close_windows_of_plugins_that_are_gone();
         if now.duration_since(self.last_device_poll) >= DEVICE_POLL_INTERVAL {
             self.last_device_poll = now;
             if let Some(changes) = self.devices.as_mut().map(|devices| devices.poll_new_devices()) {

@@ -9,9 +9,10 @@
 
 use std::any::Any;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
 use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait as _, ViewType};
@@ -20,7 +21,7 @@ use vst3::Steinberg::{
 };
 use vst3::{Class, ComPtr, ComRef, ComWrapper};
 
-use super::Vst3Module;
+use super::{Vst3Module, normalized_to_value, value_to_normalized};
 use crate::plugin::{Editor, OpenEditor};
 use crate::window::{self, Opener, Spec, Window};
 
@@ -38,18 +39,75 @@ const MAX_SIDE: i32 = 16_384;
 /// The size of a window for a plugin that does not say how big its view is.
 const DEFAULT_SIZE: (i32, i32) = (640, 480);
 
-/// A plugin's window, ready to be opened: what makes its view, and what has to stay loaded for as long as a view of it may be.
+/// A parameter's id and its normalized value as the index that the session knows the parameter by and the value in its units; none for a parameter that the session does not list (a hidden one, a placeholder).
+type ToValue = Box<dyn Fn(u32, f64) -> Option<(u32, f32)>>;
+
+/// What an editor asks the plugin's controller for the parameters, in both directions: the plugin's own, and in a test a fake.
+struct Parameters {
+    to_value: ToValue,
+    /// The controller, told of the value that the session has for the parameter at an index.
+    set_value: Box<dyn Fn(u32, f32)>,
+}
+
+/// What the plugin's parameter `id` says when its window turns it to `normalized`, as the session has it: the index that the session knows the parameter by (`index_of`: the plugin's parameter ids, by the index that they are
+/// listed at) and its value in the session's units (`steps` of each parameter: a list says its step, a number what `to_plain`, the plugin's own conversion of a normalized value, says). None for a parameter that the session does not
+/// list (a hidden one, a placeholder), which the plugin is not asked about.
+fn edit_to_value(index_of: &HashMap<u32, usize>, steps: &[u32], id: u32, normalized: f64, to_plain: impl FnOnce(f64) -> f64) -> Option<(u32, f32)> {
+    let index = *index_of.get(&id)?;
+    Some((index as u32, normalized_to_value(steps[index], normalized, to_plain)))
+}
+
+/// What to tell the plugin's controller when the session's parameter at `index` has the value `value`: the plugin's parameter id and its normalized value (a list's step, or what `to_normalized`, the plugin's own conversion of a
+/// plain value for the parameter with that id, says). None for an index that the plugin has no parameter at.
+fn value_to_edit(ids: &[u32], steps: &[u32], index: u32, value: f32, to_normalized: impl FnOnce(u32, f64) -> f64) -> Option<(u32, f64)> {
+    let (&id, &steps) = (ids.get(index as usize)?, steps.get(index as usize)?);
+    Some((id, value_to_normalized(steps, value, |plain| to_normalized(id, plain))))
+}
+
+/// A plugin's window, ready to be opened: what makes its view, what it says of the parameters, and what has to stay loaded for as long as a view of it may be.
 pub(super) struct Vst3Editor {
     /// Makes the plugin's view (`IEditController::createView`), each time a window is opened: a view is made for a window, and let go of with it.
     make_view: Box<dyn Fn() -> Option<ComPtr<IPlugView>>>,
+    parameters: Parameters,
+    /// What the plugin's handler was told by `performEdit` (the parameter's id and its normalized value) since it was last taken (`Editor::take_edits`).
+    edits: Arc<Mutex<Vec<(u32, f64)>>>,
     /// Whatever has to be alive for as long as a view of the plugin may be: the library, for a plugin that is loaded. Last, so that it goes after what came out of the library.
     _keep: Box<dyn Any>,
 }
 
 impl Vst3Editor {
-    /// The editor of a plugin that is loaded: its controller makes the views, and the module stays loaded for as long as the editor is held. The editor has to be let go of, and its window closed, before the plugin is
-    /// terminated (`Vst3Plugin`'s `Drop` terminates the controller): a view of a terminated plugin is a view of nothing.
-    pub(super) fn of(controller: ComPtr<IEditController>, module: Arc<Vst3Module>) -> Self {
+    /// The editor of a plugin that is loaded: its controller makes the views and converts the parameters, `edits` is what its handler keeps, and the module stays loaded for as long as the editor is held. `param_ids` and
+    /// `param_steps` are the plugin's listed parameters, by the index that the session knows them by. The editor has to be let go of, and its window closed, before the plugin is terminated (`Vst3Plugin`'s `Drop` does it
+    /// first, by the registry): a view of a terminated plugin is a view of nothing.
+    pub(super) fn of(
+        controller: ComPtr<IEditController>,
+        module: Arc<Vst3Module>,
+        edits: Arc<Mutex<Vec<(u32, f64)>>>,
+        param_ids: &[u32],
+        param_steps: &[u32],
+    ) -> Self {
+        let ids = param_ids.to_vec();
+        let steps = param_steps.to_vec();
+        let by_id: HashMap<u32, usize> = ids.iter().enumerate().map(|(index, &id)| (id, index)).collect();
+        let to_value = {
+            let controller = controller.clone();
+            let steps = steps.clone();
+            move |id: u32, normalized: f64| {
+                // Safety: the controller is alive (see above) and is asked on the main thread, outside of the plugin's own call.
+                edit_to_value(&by_id, &steps, id, normalized, |normalized| unsafe { controller.normalizedParamToPlain(id, normalized) })
+            }
+        };
+        let set_value = {
+            let controller = controller.clone();
+            move |index: u32, value: f32| {
+                // Safety: as above.
+                let told = value_to_edit(&ids, &steps, index, value, |id, plain| unsafe { controller.plainParamToNormalized(id, plain) });
+                if let Some((id, normalized)) = told {
+                    // Safety: as above.
+                    unsafe { controller.setParamNormalized(id, normalized) };
+                }
+            }
+        };
         Self::new(
             Box::new(move || {
                 // Safety: the controller is alive (see above) and is asked for its view on the main thread, as the format says.
@@ -57,12 +115,14 @@ impl Vst3Editor {
                 // Safety: `createView` hands over one reference of the view it made, or none.
                 unsafe { ComPtr::from_raw(view) }
             }),
+            Parameters { to_value: Box::new(to_value), set_value: Box::new(set_value) },
+            edits,
             Box::new(module),
         )
     }
 
-    fn new(make_view: Box<dyn Fn() -> Option<ComPtr<IPlugView>>>, keep: Box<dyn Any>) -> Self {
-        Vst3Editor { make_view, _keep: keep }
+    fn new(make_view: Box<dyn Fn() -> Option<ComPtr<IPlugView>>>, parameters: Parameters, edits: Arc<Mutex<Vec<(u32, f64)>>>, keep: Box<dyn Any>) -> Self {
+        Vst3Editor { make_view, parameters, edits, _keep: keep }
     }
 
     /// `open`, with the window made by `open_window` (`window::open`, and in a test a window that is on no screen).
@@ -121,6 +181,21 @@ impl Vst3Editor {
 impl Editor for Vst3Editor {
     fn open(&self, title: &str, focus: bool) -> Result<Box<dyn OpenEditor>, String> {
         self.open_in(title, focus, &window::open)
+    }
+
+    fn take_edits(&self) -> Vec<(u32, f32)> {
+        // (Taken out of the lock before anything is converted: the plugin's handler must not wait for a call into its controller.)
+        let taken = match self.edits.lock() {
+            Ok(mut edits) => std::mem::take(&mut *edits),
+            Err(_) => return Vec::new(),
+        };
+        taken.into_iter().filter_map(|(id, normalized)| (self.parameters.to_value)(id, normalized)).collect()
+    }
+
+    fn set_values(&self, values: &[(u32, f32)]) {
+        for &(index, value) in values {
+            (self.parameters.set_value)(index, value);
+        }
     }
 }
 
@@ -221,6 +296,12 @@ impl OpenEditor for OpenVst3Editor {
         true
     }
 
+    fn raise(&mut self, focus: bool) {
+        if !self.closed {
+            self.shared.window.raise(focus);
+        }
+    }
+
     fn close(&mut self) {
         if std::mem::replace(&mut self.closed, true) {
             return;
@@ -291,6 +372,9 @@ mod tests {
         }
         fn is_open(&self) -> bool {
             self.open.get()
+        }
+        fn raise(&self, focus: bool) {
+            self.log.borrow_mut().push(format!("window.raise({focus})"));
         }
         fn close(&self) {
             self.log.borrow_mut().push("window.close".to_string());
@@ -426,6 +510,8 @@ mod tests {
         view: ComWrapper<FakeView>,
         window: Rc<FakeWindow>,
         editor: Vst3Editor,
+        /// What the plugin's handler has kept (`Vst3Editor::edits`).
+        edits: Arc<Mutex<Vec<(u32, f64)>>>,
     }
 
     fn setup(configure: impl FnOnce(&mut FakeView)) -> Setup {
@@ -435,8 +521,15 @@ mod tests {
         let view = ComWrapper::new(view);
         let window = Rc::new(FakeWindow { log: log.clone(), size: Cell::new((0, 0)), open: Cell::new(true), content: 0 });
         let handed_out = view.clone();
-        let editor = Vst3Editor::new(Box::new(move || handed_out.to_com_ptr::<IPlugView>()), Box::new(()));
-        Setup { log, view, window, editor }
+        // (The controller's own: parameter 7 is the session's parameter 2, a tenth of a hundred times its normalized value; the others are not listed.)
+        let told = log.clone();
+        let parameters = Parameters {
+            to_value: Box::new(|id, normalized| (id == 7).then_some((2, normalized as f32 * 100.0))),
+            set_value: Box::new(move |index, value| told.borrow_mut().push(format!("controller.set({index}, {value})"))),
+        };
+        let edits = Arc::new(Mutex::new(Vec::new()));
+        let editor = Vst3Editor::new(Box::new(move || handed_out.to_com_ptr::<IPlugView>()), parameters, edits.clone(), Box::new(()));
+        Setup { log, view, window, editor, edits }
     }
 
     impl Setup {
@@ -508,7 +601,8 @@ mod tests {
     #[test]
     fn a_plugin_that_has_no_view_says_so_and_no_window_is_made() {
         let log: Log = Rc::default();
-        let editor = Vst3Editor::new(Box::new(|| None), Box::new(()));
+        let parameters = Parameters { to_value: Box::new(|_, _| None), set_value: Box::new(|_, _| {}) };
+        let editor = Vst3Editor::new(Box::new(|| None), parameters, Arc::default(), Box::new(()));
         let refused = |_: &Spec| -> Result<Rc<dyn Window>, String> {
             log.borrow_mut().push("window.open".to_string());
             Err("no".to_string())
@@ -716,10 +810,71 @@ mod tests {
     }
 
     #[test]
+    fn asking_for_a_window_that_is_open_brings_it_to_the_front_and_one_that_is_closed_is_left_alone() {
+        let setup = setup(|_| {});
+        let mut editor = setup.open().expect("opens");
+        setup.log.borrow_mut().clear();
+        editor.raise(true);
+        editor.raise(false);
+        assert_eq!(said(&setup.log), ["window.raise(true)", "window.raise(false)"], "with or without the keyboard, as it is asked");
+        editor.close();
+        setup.log.borrow_mut().clear();
+        editor.raise(true);
+        assert!(said(&setup.log).is_empty(), "{:?}", said(&setup.log));
+    }
+
+    #[test]
+    fn what_a_knob_in_the_window_says_is_taken_once_as_the_sessions_index_and_value_and_what_it_does_not_list_is_left_out() {
+        let setup = setup(|_| {});
+        assert!(setup.editor.take_edits().is_empty(), "nothing has been said");
+        setup.edits.lock().unwrap().extend([(7, 0.5), (99, 0.1), (7, 0.25)]);
+        assert_eq!(setup.editor.take_edits(), [(2, 50.0), (2, 25.0)], "in the order it was said, in the session's index and units; the parameter that is not listed is left out");
+        assert!(setup.editor.take_edits().is_empty(), "each is told once");
+    }
+
+    #[test]
+    fn the_values_that_the_session_has_are_told_to_the_controller_one_by_one() {
+        let setup = setup(|_| {});
+        setup.editor.set_values(&[(1, 0.5), (3, 0.75)]);
+        setup.editor.set_values(&[]);
+        assert_eq!(said(&setup.log), ["controller.set(1, 0.5)", "controller.set(3, 0.75)"]);
+    }
+
+    #[test]
     fn what_is_in_the_window_can_be_had_as_a_picture_and_as_text() {
         let setup = setup(|_| {});
         let editor = setup.open().expect("opens");
         assert_eq!(editor.snapshot_png(), Some(vec![1, 2, 3]));
         assert_eq!(editor.describe(), "a fake window\n");
     }
+    #[test]
+    fn what_a_window_says_of_a_parameter_is_the_sessions_parameter_at_its_index_and_the_value_in_the_sessions_units() {
+        let index_of: HashMap<u32, usize> = [(10, 0), (20, 1), (30, 2)].into();
+        let steps = [0, 3, 0];
+        // A number is what the plugin's own conversion says, and the index is where the parameter is listed, not its id.
+        assert_eq!(edit_to_value(&index_of, &steps, 30, 0.25, |normalized| normalized * 8.0), Some((2, 2.0)));
+        assert_eq!(edit_to_value(&index_of, &steps, 10, 1.0, |normalized| normalized), Some((0, 1.0)));
+        // A list is its nearest step, whatever the plugin's conversion would say: 0.7 of 3 steps is the second.
+        assert_eq!(edit_to_value(&index_of, &steps, 20, 0.7, |_| unreachable!("a list is not converted by the plugin")), Some((1, 2.0)));
+        // A parameter that the session does not list is let go of, and the plugin is not asked about it.
+        assert_eq!(edit_to_value(&index_of, &steps, 99, 0.5, |_| unreachable!("a parameter that is not listed")), None);
+    }
+
+    #[test]
+    fn what_the_session_has_for_a_parameter_is_told_to_the_plugin_by_the_parameters_id_and_its_normalized_value() {
+        let ids = [10, 20, 30];
+        let steps = [0, 3, 0];
+        // A number is converted by the plugin, for the parameter with that id.
+        let by_id = |expected: u32| move |id: u32, plain: f64| {
+            assert_eq!(id, expected, "the plugin is asked about the parameter that was meant");
+            plain / 8.0
+        };
+        assert_eq!(value_to_edit(&ids, &steps, 2, 4.0, by_id(30)), Some((30, 0.5)));
+        assert_eq!(value_to_edit(&ids, &steps, 0, 1.0, by_id(10)), Some((10, 0.125)));
+        // A list is told as its step of the steps, which the plugin is not asked for: 2 of 3.
+        assert_eq!(value_to_edit(&ids, &steps, 1, 2.0, |_, _| unreachable!("a list is not converted by the plugin")), Some((20, 2.0 / 3.0)));
+        // An index that the plugin has no parameter at is nothing, and the plugin is not asked.
+        assert_eq!(value_to_edit(&ids, &steps, 3, 1.0, |_, _| unreachable!("no such parameter")), None);
+    }
+
 }

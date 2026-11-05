@@ -2323,3 +2323,99 @@ async fn a_control_that_learns_is_bound_to_the_controller_that_is_moved_and_driv
     let saved = std::fs::read_to_string(&file).unwrap();
     assert!(saved.contains("type = \"midi\"") && saved.contains("midi_cc = 74"), "{saved}");
 }
+
+/// How many windows of the process `pid` are on the screen, from the window server's list (what a program that has windows shows every other one: the owner and the size need no permission).
+#[cfg(target_os = "macos")]
+fn windows_on_screen(pid: u32) -> usize {
+    let script = format!(
+        "ObjC.import('CoreGraphics'); ObjC.import('Foundation'); \
+         const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0))); \
+         String(list.filter(w => w.kCGWindowOwnerPID == {pid}).length);"
+    );
+    let output = Command::new("osascript").args(["-l", "JavaScript", "-e", &script]).output().expect("osascript runs");
+    String::from_utf8_lossy(&output.stdout).trim().parse().unwrap_or_else(|_| panic!("osascript said {output:?}"))
+}
+
+/// Wait until `expected` windows of the program are on the screen.
+#[cfg(target_os = "macos")]
+fn wait_for_windows(tang: &Tang, expected: usize, what: &str) {
+    let pid = tang.child.0.id();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = windows_on_screen(pid);
+        if seen == expected {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what}: {seen} window(s) on the screen, and {expected} expected\n{}", tang.log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A plugin's own window, through the whole program (step 112, part B): the hello says that the machine can show windows and the plugin that it has one, a request opens it, and it leaves the screen with its plugin, when the
+/// instrument is taken out of the lane, and is there again for the plugin that an undo brings back. *What found it:* the window of a plugin that was taken out was closed by the controller and stayed on the screen, shut and
+/// frozen, since nothing turned the loop that makes AppKit tell the window server once the last window was closed (`window::macos`, `close`). For a person at a Mac that has a VST3 plugin installed, since a window is not for a
+/// machine that has no screen and no plugin; the window takes the keyboard from the terminal for a few seconds. `cargo test --features web --test serve -- --ignored`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "opens a plugin's window on the screen for a few seconds, and takes the keyboard: cargo test --features web --test serve -- --ignored"]
+async fn a_plugins_own_window_opens_through_the_server_and_leaves_the_screen_with_its_plugin() {
+    let mut bundles: Vec<_> = std::fs::read_dir("/Library/Audio/Plug-Ins/VST3")
+        .map(|entries| entries.filter_map(Result::ok).map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|ext| ext == "vst3")).collect())
+        .unwrap_or_default();
+    bundles.sort();
+    let Some(bundle) = bundles.first() else {
+        eprintln!("skipped: no VST3 plugin is installed");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("window.toml");
+    std::fs::write(&file, format!("[[instrument]]\nplugin = {:?}\n", bundle.to_string_lossy())).unwrap();
+    let tang = Tang::start_on(&file);
+    let mut client = connect(&tang).await;
+    let hello = next_json(&mut client).await;
+    if !hello["features"].as_array().unwrap().iter().any(|feature| feature == "windows") {
+        eprintln!("skipped: the server says that this machine cannot show a window: {hello}");
+        return;
+    }
+    tell(&mut client, json!({"type": "subscribe"})).await;
+    let snapshot = next_json(&mut client).await;
+    let node = snapshot["snapshot"]["graph"]["nodes"].as_array().unwrap().iter().find(|node| node["plugin"]["hasEditor"] == true).unwrap_or_else(|| panic!("the plugin does not say that it has a window: {snapshot}"))["id"].as_u64().unwrap();
+    let mut req = 0;
+    let mut ask = async |intent: Value| {
+        req += 1;
+        tell(&mut client, json!({"type": "request", "reqId": req, "intent": intent})).await;
+        answer(&mut client, req).await
+    };
+
+    assert_eq!(windows_on_screen(tang.child.0.id()), 0, "nothing is open until it is asked for");
+    // (A window waits for the scan of the installed plugins, which has only just begun: that is said, and it is asked for again.)
+    let scan_over = Instant::now() + Duration::from_secs(60);
+    loop {
+        let opened = ask(json!({"type": "openEditor", "node": node})).await;
+        if opened["type"] == "ack" {
+            break;
+        }
+        let why = opened["error"]["message"].as_str().unwrap_or_default();
+        assert!(why.contains("still being looked for") && Instant::now() < scan_over, "{opened}\n{}", tang.log());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    wait_for_windows(&tang, 1, "the window that was asked for");
+    // Asked for again, the one that is open is brought to the front: there is still one.
+    assert_eq!(ask(json!({"type": "openEditor", "node": node})).await["type"], "ack");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_windows(&tang, 1, "the window that was asked for twice");
+
+    // The instrument is taken out of its lane: the window goes with the plugin.
+    assert_eq!(ask(json!({"type": "clearInstrument", "node": node})).await["type"], "ack");
+    wait_for_windows(&tang, 0, "the window of a plugin that left the session");
+    let refused = ask(json!({"type": "openEditor", "node": node})).await;
+    assert_eq!(refused["type"], "rejected", "{refused}");
+
+    // An undo brings the plugin back, shut: a window is opened again by asking, for the plugin that is there now.
+    assert_eq!(ask(json!({"type": "undo"})).await["type"], "ack");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(windows_on_screen(tang.child.0.id()), 0, "the plugin is back, and its window is not");
+    assert_eq!(ask(json!({"type": "openEditor", "node": node})).await["type"], "ack");
+    wait_for_windows(&tang, 1, "the window of the plugin that an undo brought back");
+    assert!(!tang.log().contains("let go of on a thread that is not the main one"), "{}", tang.log());
+}

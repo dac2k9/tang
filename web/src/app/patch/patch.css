@@ -277,6 +277,14 @@
   letter-spacing: 0.02em;
 }
 
+/* (The one that opens the plugin's own window, on the machine that runs Tang: two letters, like the one that puts an effect in the chain.) */
+.tang-menu-button.tang-node__window {
+  min-width: 26px;
+  font-family: var(--tang-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
 /* (The one that opens the parameters in the panel: a glyph too.) */
 .tang-menu-button.tang-node__params {
   min-width: 26px;

@@ -971,6 +971,13 @@ impl SessionModel {
         }
     }
 
+    /// The node of the plugin whose window is `editor` in the registry of the windows (`PluginSlot::editor`, step 112), if the session has it: a lane's instrument, an effect of a chain or of a bus.
+    pub fn node_of_editor(&self, editor: crate::plugin::editors::EditorId) -> Option<NodeId> {
+        let lanes = self.instruments.iter().flat_map(|lane| lane.instrument.iter().chain(&lane.effects));
+        let buses = self.groups.iter().flat_map(|group| &group.effects);
+        lanes.chain(buses).find(|slot| slot.editor == Some(editor)).map(|slot| slot.node)
+    }
+
     /// The cables that go when cable `edge` is taken out: it, and then, in turn, those that drive the
     /// depth of one that goes (which may be one that is there already: they can drive each other's).
     /// `None` if there is no such cable.
@@ -1450,6 +1457,9 @@ pub struct PluginSlot {
     /// Whether the plugin does anything with the notes it is given (`Plugin::takes_notes`, step 99c): `false` for an audio input, whose lane then has no key range, no pattern and no input of events
     /// (the graph says so, and a cable of notes is refused at it). Read from the plugin when it is loaded; it goes where the plugin goes.
     pub takes_notes: bool,
+    /// The plugin's own window in the registry of the windows (`plugin::editors`, step 112), if it has one: read from the plugin when it is loaded, as `takes_notes` is, and it goes where the plugin goes. The wire says only whether
+    /// there is one (`graph::Plugin::has_editor`); the controller opens the window by this id (`Intent::OpenEditor`).
+    pub editor: Option<crate::plugin::editors::EditorId>,
     /// The parameters (`ParamSlot::index`) a front-end shows as knobs on the plugin's node, in the order they were pinned; none pinned
     /// is the first few (`docs/web-ui.md` §4.4). The engine and the TUI do not use it; a session file keeps it as `pinned`, by name.
     pub pinned: Vec<u32>,

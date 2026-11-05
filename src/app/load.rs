@@ -119,6 +119,7 @@ pub fn fresh_slot(plugin: &mut dyn plugin::Plugin, id: &str, node: NodeId) -> Pl
     );
     slot.side = plugin.side_input();
     slot.takes_notes = plugin.takes_notes();
+    slot.editor = plugin.editor_id();
     slot
 }
 
@@ -168,6 +169,7 @@ fn plugin_slot(
         fed: true,
         side: None,
         takes_notes: true,
+        editor: None,
         pinned: Vec::new(),
     }
 }
@@ -261,6 +263,7 @@ pub fn load_session(
             let effect_source = session::resolve_plugin_path(&effect_config.plugin, session_dir);
             let mut effect = plugin::load(&effect_source, sample_rate, max_block_size, runtime)?;
             let side = effect.side_input();
+            let editor = effect.editor_id();
             outputs_fit_the_chain(effect.name(), effect.audio_output_count())
                 .map_err(|refusal| anyhow::anyhow!("group[{g_idx}].effect[{fx_idx}]: {refusal}"))?;
             if let Some(ref preset_name) = effect_config.preset {
@@ -307,6 +310,7 @@ pub fn load_session(
             slot.pin_names(&effect_config.pinned);
             slot.fed = effect_config.feed.is_fed();
             slot.side = side;
+            slot.editor = editor;
             group_effects.push(slot);
             group_bus_params.push(params.for_targets());
         }
@@ -386,6 +390,7 @@ pub fn load_session(
 
             let name = instrument.name().to_string();
             let takes_notes = instrument.takes_notes();
+            let editor = instrument.editor_id();
             let inst_buf = (0..instrument.audio_output_count())
                 .map(|_| Vec::new())
                 .collect();
@@ -438,6 +443,7 @@ pub fn load_session(
             );
             slot.pin_names(&plug_config.pinned);
             slot.takes_notes = takes_notes;
+            slot.editor = editor;
             Some(slot)
         } else {
             chain_params.push(Vec::new());
@@ -451,6 +457,7 @@ pub fn load_session(
             progress(Progress::Loading(&effect_config.plugin));
             let mut effect = plugin::load(&effect_source, sample_rate, max_block_size, runtime)?;
             let side = effect.side_input();
+            let editor = effect.editor_id();
             loaded_slots += 1;
             progress(Progress::Loaded { done: loaded_slots });
             // (The audio thread turns away an effect that has other outputs than the chain has channels, and the model would keep it: the session is refused.)
@@ -526,6 +533,7 @@ pub fn load_session(
             slot.pin_names(&effect_config.pinned);
             slot.fed = effect_config.feed.is_fed();
             slot.side = side;
+            slot.editor = editor;
             effects.push(slot);
         }
 

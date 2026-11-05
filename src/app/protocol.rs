@@ -65,7 +65,7 @@ pub enum ServerMessage {
         protocol: u32,
         /// The session's revision now.
         rev: u64,
-        /// What the server can do: `notes`, `telemetry`.
+        /// What the server can do: `notes`, `telemetry`, and `windows` when the machine that runs it can show a plugin's own window (step 112).
         features: Vec<String>,
         /// The next message must be `Auth`.
         needs_token: bool,

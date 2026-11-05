@@ -188,6 +188,11 @@ pub struct Plugin {
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     #[cfg_attr(feature = "web", ts(as = "Option<bool>", optional))]
     pub takes_notes: bool,
+    /// Whether the plugin has a window of its own that the machine that runs Tang can open (`PluginSlot::editor`, step 112): a front-end shows a button for it. Left out of the wire when there is none (every plugin but a VST3 one),
+    /// so that a front-end reads an absent one as false and no other plugin's node is the JSON that it was.
+    #[serde(default, skip_serializing_if = "is_no")]
+    #[cfg_attr(feature = "web", ts(as = "Option<bool>", optional))]
+    pub has_editor: bool,
 }
 
 /// What a plugin that does not say that it takes no notes does (`Plugin::takes_notes`): the serde default of that field.
@@ -198,6 +203,11 @@ fn yes() -> bool {
 /// Whether `value` is true, for a field that is left out of the wire while it is (`Plugin::takes_notes`).
 fn is_yes(value: &bool) -> bool {
     *value
+}
+
+/// Whether `value` is false, for a field that is left out of the wire while it is (`Plugin::has_editor`).
+fn is_no(value: &bool) -> bool {
+    !*value
 }
 
 /// A parameter of a plugin, with the value the user set (modulation is not in it:
@@ -680,6 +690,7 @@ fn plugin(slot: &PluginSlot) -> Plugin {
         current_preset: slot.current_preset.clone(),
         pinned: slot.pinned.clone(),
         takes_notes: slot.takes_notes,
+        has_editor: slot.editor.is_some(),
     }
 }
 
@@ -746,6 +757,20 @@ mod tests {
 
     fn cable_edge(from: Endpoint, to: Endpoint, id: u32, gain: f32) -> Edge {
         Edge { from, to, kind: EdgeKind::Cable { id: EdgeId(id), gain } }
+    }
+
+    #[test]
+    fn a_plugin_that_has_a_window_of_its_own_says_so_and_one_that_has_none_leaves_it_out_of_the_json() {
+        use crate::plugin::editors::fakes::{FakeEditor, Log};
+        let mut model = load("[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument.effect]]\nplugin = \"builtin:reverb\"\n").model;
+        let alive = std::sync::Arc::new(());
+        let id = crate::plugin::editors::register(FakeEditor::new("Window", &Log::default()), &alive);
+        model.instruments[0].effects[0].editor = Some(id);
+        let (osc, reverb) = (model.instruments[0].node, model.instruments[0].effects[0].node);
+        let json = serde_json::to_value(model.graph()).unwrap();
+        let plugin_of = |node: NodeId| json["nodes"].as_array().unwrap().iter().find(|n| n["id"] == json!(node)).unwrap_or_else(|| panic!("no node {node:?}"))["plugin"].clone();
+        assert_eq!(plugin_of(reverb)["hasEditor"], json!(true), "{}", plugin_of(reverb));
+        assert!(plugin_of(osc).get("hasEditor").is_none(), "left out while it is false: {}", plugin_of(osc));
     }
 
     #[test]
@@ -1856,8 +1881,8 @@ depth = 0.2
     #[test]
     fn an_effect_that_has_a_second_input_says_what_it_calls_its_inputs_and_the_others_say_nothing_on_the_wire() {
         let (sided, plain) = (
-            NodeKind::Effect { plugin: Plugin { id: "builtin:math".to_string(), format: "Built-in".to_string(), is_instrument: false, params: vec![], presets: vec![], current_preset: None, pinned: vec![], takes_notes: true }, mix: 1.0, feed: Feed::Chain, side: Some(SideInfo { main: "A".to_string(), side: "B".to_string() }) },
-            NodeKind::Effect { plugin: Plugin { id: "builtin:filter".to_string(), format: "Built-in".to_string(), is_instrument: false, params: vec![], presets: vec![], current_preset: None, pinned: vec![], takes_notes: true }, mix: 1.0, feed: Feed::Chain, side: None },
+            NodeKind::Effect { plugin: Plugin { id: "builtin:math".to_string(), format: "Built-in".to_string(), is_instrument: false, params: vec![], presets: vec![], current_preset: None, pinned: vec![], takes_notes: true, has_editor: false }, mix: 1.0, feed: Feed::Chain, side: Some(SideInfo { main: "A".to_string(), side: "B".to_string() }) },
+            NodeKind::Effect { plugin: Plugin { id: "builtin:filter".to_string(), format: "Built-in".to_string(), is_instrument: false, params: vec![], presets: vec![], current_preset: None, pinned: vec![], takes_notes: true, has_editor: false }, mix: 1.0, feed: Feed::Chain, side: None },
         );
         assert_eq!(serde_json::to_value(&sided).unwrap()["side"], json!({"main": "A", "side": "B"}));
         assert!(serde_json::to_value(&plain).unwrap().get("side").is_none(), "an effect with one input has no key for it: the older nodes are the same JSON");
@@ -1911,6 +1936,7 @@ depth = 0.2
                     is_instrument: false,
                     pinned: vec![2],
                     takes_notes: true,
+                    has_editor: false,
                     params: vec![Param {
                         index: 2,
                         name: "decay".to_string(),

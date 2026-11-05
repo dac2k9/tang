@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 
-import type { Edge, Node, Port } from "../protocol";
+import type { Edge, Node, Port, Snapshot } from "../protocol";
 import { Client } from "./connection";
 import { MASTER, groupsFixture, macrosFixture, movesFixture, nodeNamed, reachFixture, tracerSnapshot } from "./fixtures";
 import { MockServer } from "./mock";
@@ -978,6 +978,96 @@ describe("loading a preset", () => {
     client.stop();
     expect(await editor.loadPreset(LANE_REVERB, "plate")).toBe(false);
     expect(said(notices)).toEqual(["Could not load Vintage Plate into Reverb 2: Not connected to the server."]);
+  });
+});
+
+describe("opening a plugin's own window (step 112)", () => {
+  /** The tracer, with the oscillator's plugin saying that it has a window of its own (the filter's does not). */
+  const windowed = (): Snapshot => {
+    const copy = structuredClone(tracerSnapshot);
+    const found = copy.graph.nodes.find((n) => n.id === oscillator.id);
+    if (found?.kind !== "instrument" || !found.plugin) throw new Error("the oscillator has a plugin");
+    found.plugin.hasEditor = true;
+    return copy;
+  };
+
+  test("resolves true for a plugin that has one, on a machine that can show it: the session is as it was but for its revision, the page says nothing and the history has no step", async () => {
+    const snapshot = windowed();
+    const { client, notices, editor } = await open({ snapshot, windows: true });
+    expect(await editor.openEditor(oscillator.id)).toBe(true);
+    expect(said(notices)).toEqual([]);
+    expect(client.state.snapshot?.graph).toEqual(snapshot.graph);
+    expect(client.state.snapshot?.rev).toBe(snapshot.rev + 1);
+    expect(client.state.snapshot?.meta.dirty).toBe(snapshot.meta.dirty);
+    expect(client.state.history).toEqual({ undo: null, redo: null });
+  });
+
+  test("is refused, in the controller's words, for a plugin that has no window, a machine that has no screen, a lane that has no plugin, a node that has none and one that is not there", async () => {
+    const withWindow = await open({ snapshot: windowed(), windows: true });
+    expect(await withWindow.editor.openEditor(filter.id)).toBe(false);
+    expect(await withWindow.editor.openEditor(lfo.id)).toBe(false);
+    expect(await withWindow.editor.openEditor(9999)).toBe(false);
+    expect(said(withWindow.notices)).toEqual([
+      "Could not open the window of Filter: Filter has no window of its own",
+      "Could not open the window of LFO: that node has no plugin",
+      "Could not open the window of that node: there is no node 9999",
+    ]);
+    const noScreen = await open({ snapshot: windowed() });
+    expect(await noScreen.editor.openEditor(oscillator.id)).toBe(false);
+    expect(said(noScreen.notices)).toEqual(["Could not open the window of Oscillator: this session has no screen to open a window on (a login over ssh, a container, CI)"]);
+    expect(noScreen.client.state.snapshot?.rev, "a refusal uses no revision").toBe(windowed().rev);
+  });
+
+  test("is refused for the master, which is not a node that a plugin is in, and for a lane that has no plugin", async () => {
+    const empty = windowed();
+    const lane = empty.graph.nodes.find((n) => n.id === oscillator.id);
+    if (lane?.kind !== "instrument") throw new Error("the oscillator is a lane");
+    lane.plugin = null;
+    const { editor, notices } = await open({ snapshot: empty, windows: true });
+    expect(await editor.openEditor(MASTER)).toBe(false);
+    expect(await editor.openEditor(oscillator.id)).toBe(false);
+    // (A lane that has no instrument is called after what it has left: its filter.)
+    expect(said(notices)).toEqual([`Could not open the window of Master: there is no node ${String(MASTER)}`, "Could not open the window of Filter: that instrument has no plugin"]);
+  });
+
+  test("is told to every client as the event that says which node's window opened", async () => {
+    const server = new MockServer({ snapshot: windowed(), windows: true });
+    const heard: { type: string; event?: unknown }[] = [];
+    const client = new Client({
+      transport: () => {
+        const inner = server.transport();
+        return {
+          connect: (events) => {
+            inner.connect({
+              ...events,
+              text: (text) => {
+                heard.push(JSON.parse(text) as { type: string; event?: unknown });
+                events.text(text);
+              },
+            });
+          },
+          send: (text) => {
+            inner.send(text);
+          },
+          close: () => {
+            inner.close();
+          },
+        };
+      },
+      reconnectDelay: () => 5,
+    });
+    clients.push(client);
+    client.start();
+    await until(() => client.state.status === "open", "the session");
+    expect(await new Editor(client, new Notices(), new Reveals()).openEditor(oscillator.id)).toBe(true);
+    expect(heard.filter((message) => message.type === "event").map((message) => message.event)).toEqual([{ rev: windowed().rev + 1, type: "editorOpened", node: oscillator.id }]);
+  });
+
+  test("with no connection says so", async () => {
+    const { client, notices, editor } = await open({ snapshot: windowed(), windows: true });
+    client.stop();
+    expect(await editor.openEditor(oscillator.id)).toBe(false);
+    expect(said(notices)).toEqual(["Could not open the window of Oscillator: Not connected to the server."]);
   });
 });
 

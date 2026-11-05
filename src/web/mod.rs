@@ -61,6 +61,8 @@ impl Shared {
 pub(crate) fn config_for(bind: SocketAddr, origins: &[String]) -> Config {
     let mut config = Config::new(bind);
     config.extra_origins = origins.to_vec();
+    // (A page shows the button that opens a plugin's own window only on a machine that can show one.)
+    config.windows = crate::window::available().is_ok();
     if !bind.ip().is_loopback() {
         config.token = Some(Token::generate());
     }

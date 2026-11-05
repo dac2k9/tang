@@ -41,6 +41,7 @@ function recorder(): { editor: MenuEditor; asked: Ask[] } {
     replaceInstrument: done("replaceInstrument"),
     clearInstrument: done("clearInstrument"),
     loadPreset: done("loadPreset"),
+    openEditor: done("openEditor"),
     addAudioCable: done("addAudioCable"),
     addNotesCable: done("addNotesCable"),
     setMute: done("setMute"),
@@ -837,5 +838,48 @@ describe("the menus of a module that is a box, and of the lanes of one that is o
     const { deps } = rig(snapshot);
     const tagged = nodeMenu(deps, 3, dataOf(at(3), { module: { node: 1, name: "Voice" } }));
     expect(idsOf(tagged)[0]).toBe("close-module");
+  });
+});
+
+describe("the menu of a plugin that has a window of its own (step 112)", () => {
+  const shows = { protocol: 1, rev: 0, features: ["notes", "telemetry", "windows"], needsToken: false };
+  /** The session with the oscillator's plugin saying that it has a window of its own (the delay's does not). */
+  const windowed = (): Snapshot => {
+    const copy = structuredClone(session);
+    for (const candidate of copy.graph.nodes) {
+      if (candidate.name === "Oscillator" && candidate.kind === "instrument" && candidate.plugin) candidate.plugin.hasEditor = true;
+    }
+    return copy;
+  };
+
+  test("has it first, on a machine that can show a window, and asks the editor for the plugin's window", () => {
+    const snapshot = windowed();
+    const { deps, asked } = rig(snapshot, { state: { hello: shows } });
+    const items = nodeMenu(deps, oscillator.id, dataOf(oscillator));
+    expect(idsOf(items).slice(0, 3)).toEqual(["instrument", "window", "parameters"]);
+    expect(find(items, "window")).toMatchObject({ label: "Open its own window", title: "On the machine that runs Tang" });
+    choose(items, "window");
+    expect(asked).toEqual([["openEditor", oscillator.id]]);
+  });
+
+  test("has none for a machine that cannot show one, and none for a plugin that says it has no window", () => {
+    const noScreen = rig(windowed(), { state: { hello: { ...shows, features: ["notes", "telemetry"] } } });
+    expect(idsOf(nodeMenu(noScreen.deps, oscillator.id, dataOf(oscillator)))).not.toContain("window");
+    const noHello = rig(windowed());
+    expect(idsOf(nodeMenu(noHello.deps, oscillator.id, dataOf(oscillator)))).not.toContain("window");
+    const none = rig(session, { state: { hello: shows } });
+    expect(idsOf(nodeMenu(none.deps, oscillator.id, dataOf(oscillator)))).not.toContain("window");
+  });
+
+  test("is in the menu of an effect too, before its panel", () => {
+    const snapshot = structuredClone(session);
+    const delay = snapshot.graph.nodes.find((candidate) => candidate.name === "Delay" && candidate.kind === "effect");
+    if (delay?.kind !== "effect") throw new Error("no delay");
+    delay.plugin.hasEditor = true;
+    const { deps } = rig(snapshot, { state: { hello: shows } });
+    const items = nodeMenu(deps, delay.id, dataOf(delay));
+    const ids = idsOf(items);
+    expect(ids).toContain("window");
+    expect(ids.indexOf("window")).toBeLessThan(ids.indexOf("parameters"));
   });
 });

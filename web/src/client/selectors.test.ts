@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import type { ClientState } from "./connection";
 import { MASTER, audioCablesFixture, groupsFixture, movesFixture, nodeNamed, reachFixture, tracerSnapshot } from "./fixtures";
-import { audibleAt, cableDepthOf, cableGainOf, cableSourceOf, chainLengthOf, chainPlaceOf, envelopeStagesOf, flagsOf, gainOf, groupChoicesOf, hasPins, isKnob, limiterOf, modulatorFieldOf, nodeById, paramCountOf, paramListOf, paramOf, patternOf, presetsOf, rangeOf, removalOf, sameChainPlace, sameFlags, sameGroupChoices, sameParamList, sameRemoval, sameStages, stepsOf } from "./selectors";
+import { audibleAt, cableDepthOf, cableGainOf, cableSourceOf, chainLengthOf, chainPlaceOf, envelopeStagesOf, flagsOf, gainOf, groupChoicesOf, hasPins, hasWindowOf, isKnob, limiterOf, modulatorFieldOf, nodeById, paramCountOf, paramListOf, paramOf, patternOf, presetsOf, rangeOf, removalOf, sameChainPlace, sameFlags, sameGroupChoices, sameParamList, sameRemoval, sameStages, stepsOf } from "./selectors";
 import type { Node, Snapshot } from "../protocol";
 import type { Removal } from "./selectors";
 
@@ -369,6 +369,38 @@ describe("counting the parameters of a plugin", () => {
     expect(paramCountOf(reach, MASTER)).toBe(0);
     expect(paramCountOf(reach, 424242)).toBe(0);
     expect(paramCountOf(stateOf(null), filter.id)).toBe(0);
+  });
+});
+
+describe("whether a plugin has a window of its own that can be opened (step 112)", () => {
+  const shows = { protocol: 1, rev: 0, features: ["notes", "telemetry", "windows"], needsToken: false };
+  /** The tracer with the oscillator's plugin saying that it has a window of its own (the filter's does not); and what the server's hello says. */
+  const windowed = (hello: ClientState["hello"], also: readonly number[] = []): ClientState => {
+    const copy = structuredClone(tracerSnapshot);
+    for (const found of copy.graph.nodes) {
+      if ((found.kind === "instrument" || found.kind === "effect") && found.plugin && (found.id === oscillator.id || also.includes(found.id))) found.plugin.hasEditor = true;
+    }
+    return { ...stateOf(copy), hello };
+  };
+
+  test("is so for an instrument or an effect whose plugin says so, on a server whose machine can show a window", () => {
+    const on = windowed(shows, [filter.id]);
+    expect(hasWindowOf(on, oscillator.id)).toBe(true);
+    expect(hasWindowOf(on, filter.id)).toBe(true);
+  });
+
+  test("is not so for a plugin that says it has none, nor for a node that has no plugin, a node that is not there or before there is a session", () => {
+    const on = windowed(shows);
+    expect(hasWindowOf(on, filter.id)).toBe(false);
+    expect(hasWindowOf(on, lfo.id)).toBe(false);
+    expect(hasWindowOf(on, MASTER)).toBe(false);
+    expect(hasWindowOf(on, 424242)).toBe(false);
+    expect(hasWindowOf({ ...stateOf(null), hello: shows }, oscillator.id)).toBe(false);
+  });
+
+  test("is not so on a server whose machine cannot show a window, or before it has said hello, whatever the plugin says", () => {
+    expect(hasWindowOf(windowed({ ...shows, features: ["notes", "telemetry"] }), oscillator.id)).toBe(false);
+    expect(hasWindowOf(windowed(null), oscillator.id)).toBe(false);
   });
 });
 

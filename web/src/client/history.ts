@@ -316,6 +316,7 @@ export function planOf(snapshot: Snapshot, intent: Intent, now: number, catalog:
     case "saveAs":
     case "saveModule":
     case "saveSelectionAsModule":
+    case "openEditor":
     case "undo":
     case "redo":
       return "nothing";

@@ -78,6 +78,8 @@ pub struct Config {
     /// How long a stopping server waits for its connections to end before it drops them.
     pub stop_grace: Duration,
     pub limits: Limits,
+    /// Whether this machine can show a plugin's own window (step 112): the clients are told so in the hello (`windows`), and a page shows the button that opens one only then.
+    pub windows: bool,
 }
 
 impl Config {
@@ -93,6 +95,7 @@ impl Config {
             telemetry_period: Duration::from_millis(33),
             stop_grace: STOP_GRACE,
             limits: Limits::default(),
+            windows: false,
         }
     }
 }
@@ -119,6 +122,7 @@ struct App {
     owner: crossbeam_channel::Sender<OwnerRequest>,
     notes: NoteInput,
     limits: Limits,
+    windows: bool,
     auth_timeout: Duration,
     write_timeout: Duration,
     /// One permit per connection, held by its task: how many there can be, and when
@@ -158,7 +162,7 @@ impl Server {
     /// address cannot be listened on.
     pub fn start(config: Config, parts: Parts) -> anyhow::Result<Server> {
         let listener = listen(&config)?;
-        let Config { token, extra_origins, max_clients, auth_timeout, write_timeout, telemetry_period, stop_grace, limits, .. } = config;
+        let Config { token, extra_origins, max_clients, auth_timeout, write_timeout, telemetry_period, stop_grace, limits, windows, .. } = config;
         listener.set_nonblocking(true).context("cannot make the listener non-blocking")?;
         let addr = listener.local_addr().context("cannot tell where the server listens")?;
         // The port may have been left to the system, and the policy has to know it.
@@ -185,6 +189,7 @@ impl Server {
             owner: parts.owner,
             notes: parts.notes,
             limits,
+            windows,
             auth_timeout,
             write_timeout,
             seats: Arc::new(Semaphore::new(seat_count as usize)),
@@ -347,6 +352,7 @@ async fn serve_socket(app: Arc<App>, mut socket: WebSocket, _seat: OwnedSemaphor
         owner: app.owner.clone(),
         notes: app.notes.clone(),
         limits: app.limits,
+        windows: app.windows,
     };
     // (A connection that is dropped is closed, so the notes it holds end on every path out of here.)
     let mut conn = Connection::new(id, context, Instant::now());

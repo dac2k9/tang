@@ -27,4 +27,9 @@ pinned: Array<number>,
  * Whether the plugin does anything with the notes it is given (`Plugin::takes_notes`, step 99c): an audio input does not, and its lane has no key range, no pattern and no input of events. Left out of the wire when it
  * does (every other plugin does), so that a front-end reads an absent one as true.
  */
-takesNotes?: boolean, };
+takesNotes?: boolean, 
+/**
+ * Whether the plugin has a window of its own that the machine that runs Tang can open (`PluginSlot::editor`, step 112): a front-end shows a button for it. Left out of the wire when there is none (every plugin but a VST3 one),
+ * so that a front-end reads an absent one as false and no other plugin's node is the JSON that it was.
+ */
+hasEditor?: boolean, };
