@@ -21,6 +21,7 @@ tang enumerate midi              # list available MIDI input devices
 tang enumerate audio             # list available audio output and input devices
 tang describe <plugin>           # show plugin details
 tang listen [input]              # listen to an audio input for a few seconds and say what it hears (plays nothing)
+tang window <plugin>             # open a plugin's own window by itself, for a check (macOS, VST3; plays nothing)
 ```
 
 ## Flags
@@ -80,6 +81,8 @@ one of `plugins`, `builtins`, `midi`, or `audio`.
 **describe** `<plugin>` — prints plugin info (type, latency, the names of the two audio inputs of an effect that has two, parameters, each of which that has an effect only sometimes says when, presets) and exits.
 
 **listen** `[input] [--seconds N]` — opens an audio input (the system's default, or the one that has `input` in its name: `tang enumerate audio` lists them), **plays nothing**, listens for N seconds (3) and says what it hears: the frames that arrive, the level every half second and the loudest sample. It is the one thing that tells a microphone that Tang does not hear from one that the system does not give it (`input.rs`, `probe`): an input that gives only exact zeros, which a microphone does not (a room has a noise floor), is said so with the likely cause. On macOS that is the permission, which belongs to the terminal that runs Tang, and a refused one is answered with silence and no error; the advice names the terminal (`__CFBundleIdentifier` and `TERM_PROGRAM`, which the programs that a terminal starts inherit) and the command that asks again (`tccutil reset Microphone <id>`). Status 1 for an input that cannot be opened and for one that gives silence. `cargo test --bin tang the_real_input -- --ignored --nocapture` is the same from the test program (an ignored test, for a person who has a microphone).
+
+**window** `<plugin> [--seconds N] [--snapshot FILE] [--no-focus] [--tree]` (step 112) — loads the plugin as `describe` does, **plays nothing**, opens the plugin's own window (the face that it draws for itself: a VST3 plugin's editor, on macOS only so far) and keeps it open for N seconds, or until the person closes it. `--snapshot` writes what is in the window as a PNG a moment before it closes (a plugin that draws with the graphics card gives a blank picture), `--tree` prints the views that the plugin made in it (for a window that stays empty), `--no-focus` leaves the keyboard with the terminal. Status 1, with the reason, for a plugin that has no window, a machine that has no screen (a login over ssh, CI) and a window that did not attach. The window opens on the machine that runs Tang. See "A plugin's own window" in `docs/reference/plugins.md`; `cargo test --test cli -- --ignored` opens the first installed VST3 plugin for a second (for a person at a Mac).
 
 **play** `<session.toml>` — loads a session and plays it in the terminal.
 No editing, no TUI. Accepts input from any connected MIDI device, and the
@@ -303,7 +306,7 @@ This file is the front door: what every session needs (usage, flags, subcommands
 | `docs/reference/inputs-and-midi.md` | sources of notes and cables of notes, MIDI routing, the virtual piano, the audio input (the microphone), the audio host | Sources of notes and cables of notes; The audio input; MIDI routing; Virtual piano; Audio host selection |
 | `docs/reference/engine.md` | the threads and the exit, the master limiter and volume, latency, the kernel of the patch graph (the signal chain is in `CLAUDE.md`) | The master limiter and volume; Latency; Architecture; The kernel |
 | `docs/reference/oracle.md` | what renders are held to, the corpus, the edits, the benchmark | The oracle |
-| `docs/reference/plugins.md` | plugin formats, the built-in plugins, how plugin I/O is handled, a parameter that has an effect only sometimes | A parameter that has an effect only sometimes; Plugin compatibility; Built-in plugins; Plugin I/O handling |
+| `docs/reference/plugins.md` | plugin formats, a plugin's own window (the editor of a VST3 plugin in a window of the program's own, and `tang window`), the built-in plugins, how plugin I/O is handled, a parameter that has an effect only sometimes | A parameter that has an effect only sometimes; A plugin's own window; Plugin compatibility; Built-in plugins; Plugin I/O handling |
 | `docs/reference/terminal-ui.md` | the tabs, the Session tab and its popups, the Piano, Scope and Patch tabs, logging, the TUI's tests | TUI; Splash screen; Tabs; Global keybindings; Session tab; Chain; Parameters; Plugin selector popup; Preset selector popup; Value entry popup; Range entry popup; Rename group popup; Save As popup; Modulation target selector popup; Modulate popup; Piano tab; Scope tab; Patch tab; Help tab; Dirty indicator; Logging; TUI framework; TUI tests |
 | `docs/reference/controller.md` | intents, events, the history (undo and redo), snapshots, telemetry | Session state |
 | `docs/reference/web-page.md` | the browser front-end: the protocol, the server, every step of the page | Web UI |
