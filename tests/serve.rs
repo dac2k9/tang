@@ -446,6 +446,21 @@ async fn a_session_named_by_a_relative_path_is_saved_to_that_file_wherever_the_p
     assert_eq!(std::fs::canonicalize(&said).unwrap(), std::fs::canonicalize(here.join("jam.toml")).unwrap(), "it is the file that was asked for:\n{}", tang.log());
 }
 
+#[tokio::test]
+async fn a_session_that_has_more_lanes_than_the_command_channel_holds_is_loaded() {
+    // The loader sends the audio thread a few commands for each lane, through a channel that holds 64, and the audio thread took none of them until the load was over: a session of more than sixteen lanes
+    // that have an effect each never finished loading (the program waited for room in the channel for ever, and said nothing).
+    const LANES: usize = 40;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("many.toml");
+    std::fs::write(&file, "[[instrument]]\nplugin = \"builtin:osc\"\n\n[[instrument.effect]]\nplugin = \"builtin:filter\"\n\n".repeat(LANES)).unwrap();
+    let tang = Tang::start_on(&file);
+    let (_client, _, snapshot) = listening(&tang).await;
+    let nodes = snapshot["snapshot"]["graph"]["nodes"].as_array().unwrap();
+    let count = |kind: &str| nodes.iter().filter(|node| node["kind"] == kind).count();
+    assert_eq!((count("instrument"), count("effect")), (LANES, LANES), "{}", tang.log());
+}
+
 /// The master's peak a moment after `wait` has passed, as the frames say (the frames are read all the while).
 async fn peak_after(client: &mut Client, at: usize, wait: Duration) -> f32 {
     let deadline = Instant::now() + wait;

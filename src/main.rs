@@ -513,7 +513,9 @@ fn run_session(
     };
     log::info!("MIDI inputs connected: {}", midi_mgr.connection_count());
 
-    // Build audio engine (not playing yet — will start after initial commands are queued)
+    // Build the audio engine and start it, before the session is loaded: the loader sends the audio thread a few commands for each lane, through a channel that holds 64, and the audio
+    // thread is what takes them out. (Until the engine was started after the load, a session of more than sixteen lanes with an effect each waited for room in the channel for ever.) The
+    // lanes appear in the graph as they are loaded; with no notes yet, it is silence all the while.
     if let Some(sp) = &splash {
         sp.status("Starting audio engine…");
     }
@@ -525,6 +527,7 @@ fn run_session(
         sample_rate,
         buffer_size,
     )?;
+    engine.play()?;
 
     // Load the session: plugins into the audio thread, the model for the front-end.
     let model = app::load::load_session(
@@ -545,9 +548,6 @@ fn run_session(
             }
         },
     )?;
-
-    // All initial commands queued — now start the audio stream
-    engine.play()?;
 
     // Loading done: stop the splash (restores the terminal) and re-enable
     // logging before the TUI applies its own suppression logic.
