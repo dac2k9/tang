@@ -363,6 +363,25 @@ ui = { x = 376, y = 0 }
   loader resolves the names (`PluginSlot::pin_names`) and the saver writes them (`pinned_names`). At most 64 can be pinned to a node
   (`MAX_PINNED`).
 
+### A plugin's own state (`state`, step 112 part C)
+
+```toml
+[[instrument]]
+plugin = "/Library/Audio/Plug-Ins/VST3/Gateway.vst3"
+state = "VFYzUwGXAAAAFgAAACMjI05ldXJhbEFtcE1vZGVsZXIjIyM..."   # base64, written by Tang: never by hand
+preset = "Clean"            # still applied after the state, with the values below
+[instrument.params]
+Input = 20.0
+```
+
+A key of the plugin's table (the `[[instrument]]`, an `[[instrument.effect]]` or a `[[group.effect]]`, and a module's file), beside `preset` and `pinned`: the bytes that the plugin gave when it was asked for its state (`Editor::state`), the sound that was picked in its own window, say. Only a VST3 plugin has one so far.
+
+- **Order.** The plugin is given it as soon as it is loaded: load, then `state`, then `preset`, then `params`; a preset or a value that a file names is what was changed after the state. A plugin that does not take it (the state of another version) is logged and starts as the preset and values say; the session still has the state and writes it again.
+- **When it is written.** For a plugin that has a state already, or whose window has been opened in the session; a plugin that has neither has no `state` and is not asked. It is read from the plugin when its window is closed, when the session is saved and when a module is saved (`Controller::keep_the_states`). A file from before there was a state has none, and a session is written without one for a plugin that has none.
+- **What it is.** Base64 of a blob that Tang makes (`TV3S`, a version, the component's state and the controller's, each after its length): the bytes in it are the plugin's own and are never read. A plugin's state can be large (a ROLI player's is some hundreds of kilobytes): at most 32 MiB (`MAX_STATE_BYTES`) is kept.
+- **Read leniently**, as a place is: a `state` that is not text, is not base64 or is more than the limit is left out and logged (the rest of the session loads, and the next save has no state for that plugin); an empty one is none. The spaces round the text are not part of it.
+- In the model it is `PluginSlot::state`; the writer is `to_save` (`state` of `SaveInstrument` and `SaveEffect`), the reader `lenient_state` and `decode_state` in `session.rs`. See "A plugin's own window" in `plugins.md`.
+
 ### Tempo
 
 ```toml
