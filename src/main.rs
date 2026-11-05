@@ -18,6 +18,7 @@ mod oracle;
 mod piano;
 mod piano_filter;
 mod plugin;
+mod probe;
 mod scale;
 mod session;
 mod source;
@@ -26,6 +27,9 @@ mod tty;
 mod tui;
 #[cfg(feature = "web")]
 mod web;
+// A window is opened by the editor of a plugin format, and VST3 is the one that has an editor so far: a build without it has nothing that opens one.
+#[cfg_attr(not(feature = "vst3"), allow(dead_code, unused_imports))]
+mod window;
 
 use std::io::Write;
 use std::path::Path;
@@ -209,6 +213,10 @@ fn run() -> anyhow::Result<()> {
         Some(Command::Listen { device, seconds }) => {
             env_logger::init();
             plugin::builtin::listen_to_the_input(device.as_deref(), seconds, sample_rate)
+        }
+        Some(Command::Window { plugin: source, seconds, snapshot, no_focus, tree }) => {
+            env_logger::init();
+            probe::window(&source, probe::WindowOptions { seconds, snapshot: snapshot.as_deref(), focus: !no_focus, tree }, sample_rate)
         }
         Some(Command::Play { session: play_session }) => {
             run_session(play_session, audio_device, jack, midi_device, buffer_size, sample_rate, debug, Mode::Play)

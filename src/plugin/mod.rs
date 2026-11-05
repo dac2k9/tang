@@ -7,6 +7,8 @@ pub mod lv2;
 #[cfg(feature = "vst3")]
 pub mod vst3;
 
+use std::rc::Rc;
+
 #[derive(Clone, Default)]
 pub struct ParameterInfo {
     pub index: u32,
@@ -90,6 +92,33 @@ pub struct SideInput {
     pub side: &'static str,
 }
 
+/// A plugin's own window (step 112): the face that a plugin draws for itself, where a person turns its knobs and picks its sounds. A plugin that has one is asked for it ([`Plugin::editor`]) on the thread that
+/// loaded it, before it goes to the audio thread, and the handle stays on that thread: it is an `Rc`, and a window is the main thread's.
+pub trait Editor {
+    /// Open the window, on the main thread, and say why if it cannot be (there is no screen, or the plugin has no window of its own after all). `focus` is whether the window takes the keyboard from the program that has it
+    /// (`window::Spec::focus`).
+    fn open(&self, title: &str, focus: bool) -> Result<Box<dyn OpenEditor>, String>;
+}
+
+/// A plugin's window while it is open. Dropping it closes it.
+pub trait OpenEditor {
+    /// See to the window (tell the plugin that the person has made it another size) and say whether it is still there: false once the person has closed it, and the plugin's view has been let go of by then. Called on every
+    /// turn of whatever pumps the window's events.
+    fn poll(&mut self) -> bool;
+
+    /// Close the window: the plugin's view is let go of first, as the plugin formats say. Closing a window that is closed is nothing.
+    fn close(&mut self);
+
+    /// The size of what is in the window, in points.
+    fn size(&self) -> (i32, i32);
+
+    /// What is in the window, as a PNG, if that can be had (`window::Window::snapshot_png`).
+    fn snapshot_png(&self) -> Option<Vec<u8>>;
+
+    /// The views that are in the window, as text (`window::Window::describe`).
+    fn describe(&self) -> String;
+}
+
 /// A loaded plugin instance ready to process audio.
 pub trait Plugin: Send {
     fn name(&self) -> &str;
@@ -153,6 +182,13 @@ pub trait Plugin: Send {
     ) -> anyhow::Result<()> {
         let _ = side;
         self.process(midi_events, audio_in, audio_out)
+    }
+
+    /// The plugin's own window, if it has one (step 112): what a front-end opens for a person to use the plugin's own face. Asked on the thread that loaded the plugin, before the plugin goes to the audio thread; the handle
+    /// that comes back stays on that thread (`Rc`), and the window is closed before the plugin is let go of (a window that is open when the plugin is terminated is a view of an object that is gone). The default is a
+    /// plugin that has none.
+    fn editor(&self) -> Option<Rc<dyn Editor>> {
+        None
     }
 }
 

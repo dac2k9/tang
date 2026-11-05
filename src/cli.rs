@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -116,6 +117,27 @@ pub enum Command {
         /// How many seconds to listen
         #[arg(long, default_value_t = 3.0)]
         seconds: f32,
+    },
+    /// Open a plugin's own window by itself and play nothing: a check that the window works and what it looks like (`--snapshot` writes what is in it as a picture, for a person who cannot see the screen)
+    Window {
+        /// Plugin source (vst3:<name>, or the path of a .vst3 bundle: a path loads only that plugin)
+        plugin: String,
+
+        /// Close the window after this many seconds; without it the window stays until it is closed
+        #[arg(long)]
+        seconds: Option<f32>,
+
+        /// Write what is in the window, as a PNG, a moment before it is closed
+        #[arg(long, value_name = "FILE")]
+        snapshot: Option<PathBuf>,
+
+        /// Do not take the keyboard from the terminal when the window opens
+        #[arg(long)]
+        no_focus: bool,
+
+        /// Print the views that the plugin has made in the window, a moment before it is closed (for a plugin whose window stays empty)
+        #[arg(long)]
+        tree: bool,
     },
     /// Load a session and play via MIDI input with virtual piano (no TUI)
     Play {
@@ -272,6 +294,22 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["tang", "--web", "x.toml"]).unwrap().check().is_ok());
         assert!(Cli::try_parse_from(["tang", "play", "x.toml"]).unwrap().check().is_ok());
+    }
+
+    #[test]
+    fn the_window_check_takes_a_plugin_and_says_how_long_and_where_to_write_what_it_sees() {
+        let Command::Window { plugin, seconds, snapshot, no_focus, tree } = Cli::try_parse_from(["tang", "window", "vst3:Pianoteq"]).unwrap().command.unwrap() else {
+            panic!("not window")
+        };
+        assert_eq!((plugin.as_str(), seconds, snapshot, no_focus, tree), ("vst3:Pianoteq", None, None, false, false), "open until it is closed, the keyboard taken, nothing written");
+
+        let args = ["tang", "window", "x.vst3", "--seconds", "2.5", "--snapshot", "x.png", "--no-focus", "--tree"];
+        let Command::Window { seconds, snapshot, no_focus, tree, .. } = Cli::try_parse_from(args).unwrap().command.unwrap() else { panic!("not window") };
+        assert_eq!((seconds, snapshot.as_deref(), no_focus, tree), (Some(2.5), Some(std::path::Path::new("x.png")), true, true));
+
+        assert!(Cli::try_parse_from(["tang", "window"]).is_err(), "a plugin is needed");
+        // The flags that every command has are the same here, written where they are written.
+        assert!(Cli::try_parse_from(["tang", "window", "x.vst3", "--sample-rate", "44100"]).is_ok());
     }
 
     #[test]

@@ -8,6 +8,8 @@ use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::ffi::{c_char, c_void};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 
 use vst3::Steinberg::Vst::BusDirections_::{kInput, kOutput};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{
@@ -38,7 +40,9 @@ use vst3::Steinberg::{
 };
 use vst3::{Class, ComPtr, ComWrapper, Interface};
 
-use super::{ParameterInfo, Plugin, PluginInfo, Preset};
+use super::{Editor, ParameterInfo, Plugin, PluginInfo, Preset};
+
+mod editor;
 
 // ---------------------------------------------------------------------------
 // String helpers
@@ -385,6 +389,11 @@ impl Drop for Vst3Module {
     }
 }
 
+// Safety: a module is shared (`Arc`) between a plugin and the editor of its window to keep the library loaded for as long as either is, and nobody calls into it from two threads: the factory is used by `load`, on the
+// thread that loads, and what a shared module does is be dropped, by whichever of the two is the last, on the thread that drops it (as a plugin's module always was).
+unsafe impl Send for Vst3Module {}
+unsafe impl Sync for Vst3Module {}
+
 // ---------------------------------------------------------------------------
 // Host COM objects
 // ---------------------------------------------------------------------------
@@ -637,7 +646,8 @@ pub struct Vst3Plugin {
     _host_app: ComWrapper<TangHostApp>,
     // SAFETY: _module must be the last field. It unloads the shared library on
     // drop, so all ComPtrs referencing objects from the library must drop first.
-    _module: Vst3Module,
+    // (Shared with the plugin's editor, which a window of the plugin holds, so that no window outlives the library; the last of the two to go unloads it.)
+    _module: Arc<Vst3Module>,
 }
 
 // Safety: Same justification as CLAP — the plugin is created, activated, and
@@ -1011,6 +1021,12 @@ impl Plugin for Vst3Plugin {
 
         log::info!("VST3: loaded preset {id}");
         Ok(())
+    }
+
+    /// The plugin's own window (step 112; `editor.rs`). Every VST3 plugin is offered as having one: whether it has is only known when its controller is asked for a view, which is done when the window is opened, and a plugin
+    /// that has none says so then.
+    fn editor(&self) -> Option<Rc<dyn Editor>> {
+        Some(Rc::new(editor::Vst3Editor::of(self.controller.clone(), self._module.clone())))
     }
 }
 
@@ -1503,7 +1519,7 @@ pub fn load(
         audio_in_bus_count: audio_in_bus_count.max(0) as usize,
         audio_out_bus_count: audio_out_bus_count.max(0) as usize,
         latency,
-        _module: module,
+        _module: Arc::new(module),
         component,
         processor,
         controller,
