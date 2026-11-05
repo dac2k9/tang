@@ -31,15 +31,28 @@ fn soft_clip(x: f32) -> f32 {
     }
 }
 
+/// `load_with`, for a program that has a sound card: what the tests load the built-in plugins with.
+#[cfg(test)]
+pub fn load(
+    source: &str,
+    sample_rate: f32,
+    max_block_size: usize,
+) -> anyhow::Result<Box<dyn Plugin>> {
+    load_with(source, sample_rate, max_block_size, None)
+}
+
 /// Load a built-in plugin by source string (e.g. `"builtin:osc"`).
 ///
 /// `osc` is the unified oscillator (pick the waveform via its `waveform`
 /// parameter). `sine`/`triangle`/`square` are retained as load-only aliases
 /// that start the oscillator on that waveform, so older sessions keep working.
-pub fn load(
+///
+/// Inside a host that Tang is a plugin of (step 113) the audio input that is made plays what the host gives it to hear (`host_input`) and opens no sound card; with none it opens the system's input.
+pub fn load_with(
     source: &str,
     sample_rate: f32,
     _max_block_size: usize,
+    host_input: Option<&std::sync::Arc<HostInput>>,
 ) -> anyhow::Result<Box<dyn Plugin>> {
     let name = source.strip_prefix("builtin:").unwrap_or(source);
     match name {
@@ -53,7 +66,10 @@ pub fn load(
         "delay" => Ok(Box::new(Delay::new(sample_rate))),
         "drive" => Ok(Box::new(Drive::new(sample_rate))),
         "math" => Ok(Box::new(Math::new(sample_rate))),
-        "input" => Ok(Box::new(AudioInput::new(sample_rate))),
+        "input" => Ok(Box::new(match host_input {
+            Some(feed) => AudioInput::with_host(sample_rate, feed.clone()),
+            None => AudioInput::new(sample_rate),
+        })),
         // Only in the tests: an effect with one audio output, which the chains (stereo) have no place for.
         #[cfg(test)]
         "mono-effect" => Ok(Box::new(crate::app::testutil::MonoEffect)),
@@ -65,7 +81,7 @@ pub fn load(
     }
 }
 
-pub use input::{probe as listen_to_the_input, use_test_tone};
+pub use input::{HostInput, probe as listen_to_the_input, use_test_tone};
 
 /// Return enumeration info for all built-in plugins.
 pub fn enumerate_plugins() -> Vec<PluginInfo> {

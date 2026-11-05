@@ -15,6 +15,9 @@
 //! *Where the sound comes from in tests and in CI.* Under `--audio-device none` and in the tests there is no device: the plugin plays a quiet sine of 220 Hz (`TONE_HZ`, `TONE_LEVEL`) instead,
 //! so that what a cable does to what the input puts out can be heard by the oracle, the tests and a browser test of the real program.
 //!
+//! *Where the sound comes from in a host.* Tang inside a DAW (step 113) opens no sound card: the plugin plays what the host gives it to hear, the audio that comes into the plugin's own `process` (`HostInput`, which the host's thread fills in
+//! just before the engine renders the block, and the plugin reads in it), or silence for a plugin that has no audio input.
+//!
 //! The parameters are `gain` (0 to 4, linear), `pan` (a balance: the centre leaves both sides as they are) and `device` (a choice: the system's default input, or one of the inputs that the
 //! system had when the plugin was made, by its place in that list: a session that is opened on another machine, with other inputs, has what is at that place there).
 
@@ -39,6 +42,9 @@ const GAIN_MAX: f32 = 4.0;
 
 /// The name of the choice of the system's default input, the first of the `device` parameter's labels.
 const DEFAULT_DEVICE: &str = "Default input";
+
+/// The name of the one input that an audio input made for a host has.
+const HOST_INPUT: &str = "Host input";
 
 /// How long a change of gain or pan is gone through, in seconds.
 const SMOOTH_SEC: f32 = 0.005;
@@ -149,6 +155,58 @@ impl RingReader {
             self.running = false;
         }
         frames - take
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What a host gives to hear
+// ---------------------------------------------------------------------------
+
+/// The audio that comes into a host's `process` for the block that is being rendered (step 113): the host's thread puts it here (`put`) just before it has the engine render the block, and the audio input that was made for the host plays it (`take`) in that
+/// block. Both are the thread that renders (the audio input is run by the engine, which the host's thread calls), so there is no waiting: every cell is an atomic only so that the audio input, which is `Send`, can be given the handle that the host's thread has.
+pub struct HostInput {
+    /// The left side of the block, then the right.
+    cells: Box<[AtomicU32]>,
+    /// How many frames each side has room for.
+    capacity: usize,
+    /// How many frames were put for the block that is being rendered: none if nothing was.
+    frames: std::sync::atomic::AtomicUsize,
+}
+
+impl HostInput {
+    /// A feed for blocks of up to `max_frames` frames.
+    pub fn new(max_frames: usize) -> Self {
+        HostInput { cells: (0..2 * max_frames).map(|_| AtomicU32::new(0)).collect(), capacity: max_frames, frames: std::sync::atomic::AtomicUsize::new(0) }
+    }
+
+    /// The audio of the block: its left and right sides (a host that gives one channel has it for both). Frames beyond what the feed has room for are left out.
+    pub fn put(&self, left: &[f32], right: &[f32]) {
+        let frames = left.len().min(right.len()).min(self.capacity);
+        for (cell, sample) in self.cells[..frames].iter().zip(left) {
+            cell.store(sample.to_bits(), Ordering::Relaxed);
+        }
+        for (cell, sample) in self.cells[self.capacity..self.capacity + frames].iter().zip(right) {
+            cell.store(sample.to_bits(), Ordering::Relaxed);
+        }
+        self.frames.store(frames, Ordering::Release);
+    }
+
+    /// No audio comes in for the next block: it is silence.
+    pub fn clear(&self) {
+        self.frames.store(0, Ordering::Release);
+    }
+
+    /// Fill `left` and `right` with what was put for this block, and the rest of them (all of them, if nothing was) with silence.
+    fn take(&self, left: &mut [f32], right: &mut [f32]) {
+        let frames = self.frames.load(Ordering::Acquire).min(left.len()).min(right.len());
+        for (sample, cell) in left.iter_mut().zip(&self.cells[..frames]) {
+            *sample = f32::from_bits(cell.load(Ordering::Relaxed));
+        }
+        for (sample, cell) in right.iter_mut().zip(&self.cells[self.capacity..self.capacity + frames]) {
+            *sample = f32::from_bits(cell.load(Ordering::Relaxed));
+        }
+        left[frames..].fill(0.0);
+        right[frames..].fill(0.0);
     }
 }
 
@@ -556,6 +614,8 @@ enum Source {
     Tone { phase: f64 },
     /// What the sound card hears, from the ring that the capture thread fills (no thread in a test that fills the ring itself).
     Device { reader: RingReader, capture: Option<Capture> },
+    /// What the host that Tang is inside of gives it to hear in each block.
+    Host(Arc<HostInput>),
 }
 
 pub struct AudioInput {
@@ -584,6 +644,11 @@ impl AudioInput {
         Self::with_source(sample_rate, Source::Device { reader: RingReader::new(ring), capture: Some(capture) }, device_names())
     }
 
+    /// An input that plays what a host gives it to hear: no sound card is opened.
+    pub fn with_host(sample_rate: f32, feed: Arc<HostInput>) -> Self {
+        Self::with_source(sample_rate, Source::Host(feed), Vec::new())
+    }
+
     fn with_source(sample_rate: f32, source: Source, devices: Vec<String>) -> Self {
         AudioInput { sample_rate, source, gain: 1.0, pan: 0.0, device: 0, devices, gain_now: 1.0, pan_now: 0.0, started: false }
     }
@@ -596,7 +661,8 @@ impl AudioInput {
 
     /// The labels of the `device` parameter: the default input, and the inputs that the system had.
     fn labels(&self) -> Vec<String> {
-        std::iter::once(DEFAULT_DEVICE.to_string()).chain(self.devices.iter().cloned()).collect()
+        let first = if matches!(self.source, Source::Host(_)) { HOST_INPUT } else { DEFAULT_DEVICE };
+        std::iter::once(first.to_string()).chain(self.devices.iter().cloned()).collect()
     }
 
     fn device_called(&self, place: u32) -> Option<String> {
@@ -657,6 +723,7 @@ impl Plugin for AudioInput {
                 }
                 reader.pull(left, right);
             }
+            Source::Host(feed) => feed.take(left, right),
         }
         self.started = true;
         // Gain and balance, gone to over a few milliseconds so that a modulator that sets them a block at a time does not crackle.

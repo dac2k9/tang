@@ -1234,6 +1234,18 @@ impl Controller {
         Ok(())
     }
 
+    /// The session as the text of a session file, as `save_to` would write it, for a host that keeps it in a project of its own (Tang as a plugin, step 113). What is in the plugins that a person has looked into is read first,
+    /// as for a save.
+    pub fn session_text(&mut self) -> anyhow::Result<String> {
+        self.keep_the_states();
+        let (instruments, groups, cables, sources) = to_save(&self.model);
+        let piano = PianoConfig {
+            scale: Some(self.piano_filter.scale().short()),
+            locked: matches!(self.piano_filter.mode(), PianoMode::Locked),
+        };
+        session::to_toml(&instruments, &groups, &cables, &sources, Some(&piano), self.model.master_ui(), self.model.bpm_to_save())
+    }
+
     /// Have `poll` look for newly connected devices through `watcher`.
     pub fn watch_devices(&mut self, watcher: Box<dyn DeviceWatcher>) {
         self.devices = Some(watcher);

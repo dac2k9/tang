@@ -261,6 +261,8 @@ pub struct Runtime {
     /// plugins shouldn't pay at startup.
     #[cfg(feature = "lv2")]
     lv2: Option<(std::sync::OnceLock<lv2::Lv2Runtime>, usize)>,
+    /// What the audio input plays when Tang is inside a host (step 113): the audio that comes into the host's `process`. None for a program that has a sound card, where the audio input opens one.
+    host_input: Option<std::sync::Arc<builtin::HostInput>>,
 }
 
 impl Runtime {
@@ -268,7 +270,14 @@ impl Runtime {
     pub fn with_lv2(max_block_size: usize) -> Self {
         Self {
             lv2: Some((std::sync::OnceLock::new(), max_block_size)),
+            host_input: None,
         }
+    }
+
+    /// Plugins that are loaded with this runtime hear what `host_input` is given: the audio input that is made plays it and opens no sound card.
+    pub fn with_host_input(mut self, host_input: std::sync::Arc<builtin::HostInput>) -> Self {
+        self.host_input = Some(host_input);
+        self
     }
 
     #[cfg(feature = "lv2")]
@@ -286,7 +295,7 @@ pub fn load(
     source: &str,
     sample_rate: f32,
     max_block_size: usize,
-    _runtime: &Runtime,
+    runtime: &Runtime,
 ) -> anyhow::Result<Box<dyn Plugin>> {
     // (A test can have a plugin of its own for a name: `fake::install`.)
     #[cfg(test)]
@@ -294,7 +303,7 @@ pub fn load(
         return Ok(loaded);
     }
     if source.starts_with("builtin:") {
-        return builtin::load(source, sample_rate, max_block_size);
+        return builtin::load_with(source, sample_rate, max_block_size, runtime.host_input.as_ref());
     }
 
     let (plugin_type, resolved) = autodetect::resolve(source)?;
@@ -304,7 +313,7 @@ pub fn load(
             &resolved,
             sample_rate,
             max_block_size,
-            _runtime.lv2(),
+            runtime.lv2(),
         ),
         PluginType::Clap => clap::load(&resolved, sample_rate, max_block_size),
         #[cfg(feature = "vst3")]

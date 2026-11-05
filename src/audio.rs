@@ -24,6 +24,10 @@ pub trait Engine: Send {
     /// with its frame in this one and the source it came from. What the controller has sent since the last block (commands, plugins coming and going) is taken first.
     fn process(&mut self, midi_events: Events<'_>, out: &mut [Vec<f32>]) -> anyhow::Result<()>;
 
+    /// What the engine does while nothing asks it for sound (a host that has stopped calling it: the plugin that Tang is in a DAW is switched off, or its audio is stopped): take what the controller has sent (the commands,
+    /// the plugins that come and go), so that the channel they are sent through does not fill up and the controller wait for room in it, and render nothing. The default is an engine that has nothing to take.
+    fn idle(&mut self) {}
+
     /// What the lanes, the groups and the audio cables are, for the oracle to hold to the model (the ids that the engine has for them are the model's): `None` for an engine that has no such
     /// things to say.
     #[cfg(test)]
@@ -39,6 +43,10 @@ impl Engine for AudioGraph {
 
     fn process(&mut self, midi_events: Events<'_>, out: &mut [Vec<f32>]) -> anyhow::Result<()> {
         AudioGraph::process_events(self, midi_events, out)
+    }
+
+    fn idle(&mut self) {
+        self.drain_commands();
     }
 
     #[cfg(test)]
@@ -59,6 +67,10 @@ impl<E: Engine + ?Sized> Engine for Box<E> {
 
     fn process(&mut self, midi_events: Events<'_>, out: &mut [Vec<f32>]) -> anyhow::Result<()> {
         (**self).process(midi_events, out)
+    }
+
+    fn idle(&mut self) {
+        (**self).idle()
     }
 }
 
@@ -289,6 +301,8 @@ pub(crate) struct Renderer {
     /// One buffer per channel, a block long.
     channel_bufs: Vec<Vec<f32>>,
     num_channels: usize,
+    /// How many blocks a host has had of `render_planar`, for the log.
+    planar_blocks: u64,
 }
 
 impl Renderer {
@@ -302,6 +316,7 @@ impl Renderer {
             midi_sources: Vec::with_capacity(MIDI_CHANNEL_CAPACITY),
             channel_bufs: (0..num_channels).map(|_| vec![0.0f32; buffer_size]).collect(),
             num_channels,
+            planar_blocks: 0,
         }
     }
 
@@ -321,33 +336,9 @@ impl Renderer {
     /// `render`, with the floating point unit as it is.
     fn render_block(&mut self, data: &mut [f32], cb_num: u64) {
         let num_channels = self.num_channels;
-
-        // Drain all pending MIDI events (reuse the pre-allocated vecs)
-        self.midi_events.clear();
-        self.midi_sources.clear();
-        while let Ok(event) = self.midi_rx.try_recv() {
-            self.midi_events.push((event.frame, event.bytes));
-            self.midi_sources.push(event.source);
-        }
-
-        if !self.midi_events.is_empty() {
-            log::debug!(
-                "Audio cb #{cb_num}: processing {} MIDI event(s) into {} frames",
-                self.midi_events.len(),
-                data.len() / num_channels
-            );
-        }
-
         let frames = data.len() / num_channels;
 
-        // Resize and zero pre-allocated per-channel buffers
-        for buf in self.channel_bufs.iter_mut() {
-            buf.resize(frames, 0.0);
-            buf.fill(0.0);
-        }
-
-        if let Err(e) = self.graph.process(Events::new(&self.midi_events, &self.midi_sources), &mut self.channel_bufs) {
-            log::error!("Audio graph process error: {e}");
+        if !self.render_to_buffers(frames, &[], cb_num) {
             data.fill(0.0);
             return;
         }
@@ -365,6 +356,67 @@ impl Renderer {
             let peak = data.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
             log::debug!("Audio cb #{cb_num}: output peak = {peak:.6}");
         }
+    }
+
+    /// The first half of a block: take the MIDI that has arrived (what the keys and the devices have sent since the last block, which is at the start of this one) and add the events that a host sends with the block (`host`, each at its own frame), and have the engine
+    /// render `frames` frames into the buffers of the channels. False if the engine failed, which has been logged: the buffers are not to be used then.
+    fn render_to_buffers(&mut self, frames: usize, host: &[MidiEvent], cb_num: u64) -> bool {
+        // Drain all pending MIDI events (reuse the pre-allocated vecs)
+        self.midi_events.clear();
+        self.midi_sources.clear();
+        while let Ok(event) = self.midi_rx.try_recv() {
+            self.midi_events.push((event.frame, event.bytes));
+            self.midi_sources.push(event.source);
+        }
+        // (A host can send more in one block than the channel holds: none is dropped, since a note that ends is one of them.)
+        for event in host {
+            self.midi_events.push((event.frame, event.bytes));
+            self.midi_sources.push(event.source);
+        }
+
+        if !self.midi_events.is_empty() {
+            log::debug!("Audio cb #{cb_num}: processing {} MIDI event(s) into {frames} frames", self.midi_events.len());
+        }
+
+        // Resize and zero pre-allocated per-channel buffers
+        for buf in self.channel_bufs.iter_mut() {
+            buf.resize(frames, 0.0);
+            buf.fill(0.0);
+        }
+
+        if let Err(e) = self.graph.process(Events::new(&self.midi_events, &self.midi_sources), &mut self.channel_bufs) {
+            log::error!("Audio graph process error: {e}");
+            return false;
+        }
+        true
+    }
+
+    /// A block for a host that gives a buffer for each channel (a plugin's `process`) and its own events: `out` has the buffers, whose length is the length of the block, and `host` the events of the block, each at its own frame, in order. The channels of the
+    /// engine are copied into the buffers (a host that gives more channels than the engine has gets the last one again, one that gives fewer gets the first ones); silence if the engine fails.
+    pub(crate) fn render_planar(&mut self, host: &[MidiEvent], out: &mut [&mut [f32]]) {
+        let _no_denormals = NoDenormals::new();
+        let frames = out.first().map_or(0, |channel| channel.len());
+        let cb_num = self.planar_blocks;
+        self.planar_blocks += 1;
+        if !self.render_to_buffers(frames, host, cb_num) {
+            for channel in out.iter_mut() {
+                channel.fill(0.0);
+            }
+            return;
+        }
+        let last = self.num_channels.saturating_sub(1);
+        for (c, channel) in out.iter_mut().enumerate() {
+            let rendered = &self.channel_bufs[c.min(last)];
+            let len = channel.len().min(rendered.len());
+            channel[..len].copy_from_slice(&rendered[..len]);
+            channel[len..].fill(0.0);
+        }
+    }
+
+    /// What the renderer does while nothing asks it for a block (`Engine::idle`): the notes that arrive are not kept for the block that comes later, and the engine takes what the controller has sent.
+    pub(crate) fn idle(&mut self) {
+        while self.midi_rx.try_recv().is_ok() {}
+        self.graph.idle();
     }
 }
 

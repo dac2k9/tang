@@ -9,6 +9,7 @@ mod audio;
 mod chord;
 mod cli;
 mod config;
+pub mod embed;
 mod enumerate;
 mod held_notes;
 mod ids;
@@ -322,22 +323,20 @@ fn dirs_config_sessions() -> anyhow::Result<std::path::PathBuf> {
 }
 
 fn dirs_config() -> anyhow::Result<std::path::PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            return Ok(Path::new(&home).join(".config").join("tang"));
+    config_dir_from(&|name| std::env::var_os(name), cfg!(target_os = "macos")).ok_or_else(|| anyhow::anyhow!("could not determine config directory"))
+}
+
+/// Where the config directory is (`~/.config/tang`), given the environment (`var`) and whether this is macOS (which does not look at `XDG_CONFIG_HOME`). An empty variable is not set. A program that a DAW runs has no
+/// `HOME` on Windows (only a shell that a person starts sets one), and the home there is `USERPROFILE`.
+fn config_dir_from(var: &dyn Fn(&str) -> Option<std::ffi::OsString>, macos: bool) -> Option<std::path::PathBuf> {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    if !macos {
+        if let Some(config) = set("XDG_CONFIG_HOME") {
+            return Some(Path::new(&config).join("tang"));
         }
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
-            return Ok(Path::new(&config).join("tang"));
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            return Ok(Path::new(&home).join(".config").join("tang"));
-        }
-    }
-    anyhow::bail!("could not determine config directory")
+    let home = set("HOME").or_else(|| set("USERPROFILE"))?;
+    Some(Path::new(&home).join(".config").join("tang"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -602,3 +601,36 @@ fn run_session(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    /// The config directory for an environment of these variables.
+    fn dir(vars: &[(&str, &str)], macos: bool) -> Option<std::path::PathBuf> {
+        config_dir_from(&|name| vars.iter().find(|(known, _)| *known == name).map(|(_, value)| OsString::from(value)), macos)
+    }
+
+    #[test]
+    fn the_config_directory_is_under_xdg_config_home_if_it_is_set_and_else_under_the_home() {
+        assert_eq!(dir(&[("XDG_CONFIG_HOME", "/x/config"), ("HOME", "/home/me")], false), Some("/x/config/tang".into()));
+        assert_eq!(dir(&[("HOME", "/home/me")], false), Some("/home/me/.config/tang".into()));
+        assert_eq!(dir(&[("XDG_CONFIG_HOME", "/x/config"), ("HOME", "/home/me")], true), Some("/home/me/.config/tang".into()), "macOS does not look at XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn a_program_that_has_no_home_has_the_one_that_windows_gives_it() {
+        assert_eq!(dir(&[("USERPROFILE", "C:/Users/me")], false), Some("C:/Users/me/.config/tang".into()));
+        assert_eq!(dir(&[("HOME", "/home/me"), ("USERPROFILE", "C:/Users/me")], false), Some("/home/me/.config/tang".into()), "a HOME that is set is the one");
+        assert_eq!(dir(&[("USERPROFILE", "C:/Users/me")], true), Some("C:/Users/me/.config/tang".into()));
+    }
+
+    #[test]
+    fn a_variable_that_is_empty_is_not_set_and_none_at_all_is_no_directory() {
+        assert_eq!(dir(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/me")], false), Some("/home/me/.config/tang".into()));
+        assert_eq!(dir(&[("HOME", ""), ("USERPROFILE", "C:/Users/me")], false), Some("C:/Users/me/.config/tang".into()));
+        assert_eq!(dir(&[("HOME", ""), ("USERPROFILE", "")], false), None);
+        assert_eq!(dir(&[], false), None);
+    }
+}
