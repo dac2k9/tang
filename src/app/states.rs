@@ -73,9 +73,13 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
-    use crate::app::intent::Intent;
+    use crate::app::intent::{Applied, Intent};
     use crate::app::model::NodePath;
+    use crate::app::snapshot::Snapshot;
+    use crate::app::subscribers::EventSink;
     use crate::app::testutil::{self, StubEngine};
     use crate::plugin::fake::{self, Sink};
     use crate::plugin::PluginInfo;
@@ -233,6 +237,70 @@ mod tests {
         sink.lock().unwrap().clear();
         kept.save().expect("saved");
         assert_eq!(said(&sink), ["state asked"]);
+    }
+
+    /// A client that keeps the snapshots that it is told to start again from.
+    #[derive(Clone, Default)]
+    struct Resynced(Arc<Mutex<Vec<Snapshot>>>);
+
+    impl EventSink for Resynced {
+        fn applied(&mut self, _: &Applied) {}
+
+        fn resync(&mut self, snapshot: &Snapshot) {
+            self.0.lock().unwrap().push(snapshot.clone());
+        }
+    }
+
+    #[test]
+    fn the_clients_are_told_when_what_a_save_read_back_is_a_change_that_they_can_see_and_not_when_nothing_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Sink::default();
+        let synth = fake::install("fake:synth", "Synth", &sink);
+        let _verb = fake::install("fake:verb", "Verb", &sink);
+        let (_engine, mut ctl) = controller(LANE);
+        ctl.session_path = Some(dir.path().join("s.toml"));
+        let heard = Resynced::default();
+        ctl.subscribe(Box::new(heard.clone()));
+        let lane = node(&ctl, NodePath::Instrument(0));
+        // The plugin's state and one of its values are not what they were when the session was loaded.
+        synth.state.replace(Some(vec![9, 9]));
+        synth.values.replace(vec![(0, 0.9)]);
+        ctl.save().expect("saved");
+        let snapshots = heard.0.lock().unwrap().clone();
+        assert_eq!(snapshots.len(), 1, "told once");
+        let json = serde_json::to_value(&snapshots[0]).unwrap();
+        let plugin = json["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == serde_json::json!(lane)).unwrap()["plugin"].clone();
+        assert_eq!(plugin["params"][0]["value"].as_f64().map(|v| (v * 10.0).round()), Some(9.0), "with the value that was read back: {plugin}");
+        // Nothing has changed since: a second save tells nobody.
+        ctl.save().expect("saved again");
+        assert_eq!(heard.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_selection_saved_as_a_module_keeps_the_state_of_an_instrument_and_an_effect_as_they_are_and_gives_both_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Sink::default();
+        let synth = fake::install("fake:synth", "Synth", &sink);
+        let verb = fake::install("fake:verb", "Verb", &sink);
+        let (_engine, mut ctl) = controller(LANE);
+        ctl.modules_dir = Some(dir.path().to_path_buf());
+        let entry = |id: &str, name: &str, is_instrument: bool| PluginInfo { name: name.to_string(), id: id.to_string(), is_instrument, param_count: 2, preset_count: 1, path: String::new(), scan_ms: 0 };
+        ctl.catalog.add(vec![entry("fake:synth", "Synth", true), entry("fake:verb", "Verb", false)]);
+        let (lane, effect) = (node(&ctl, NodePath::Instrument(0)), node(&ctl, NodePath::Effect { inst: 0, index: 0 }));
+        synth.state.replace(Some(vec![8]));
+        verb.state.replace(Some(vec![9]));
+        ctl.apply(Intent::SaveSelectionAsModule { nodes: vec![lane, effect], name: "Both".to_string() }).expect("saved");
+        let text = std::fs::read_to_string(dir.path().join("Both.toml")).unwrap();
+        for line in ["state = \"CA==\"", "state = \"CQ==\""] {
+            assert_eq!(text.lines().filter(|l| *l == line).count(), 1, "{line} in\n{text}");
+        }
+        // Added, each plugin has its own state before anything else is done to it, in the order of the module (and the instrument's preset comes after both), and each slot has it.
+        sink.lock().unwrap().clear();
+        ctl.apply(Intent::AddFreeEffect { plugin: "module:Both".to_string() }).expect("added");
+        assert_eq!(said(&sink), ["set_state [8]", "set_state [9]", "load_preset big"]);
+        let added = ctl.model.instruments.len() - 1;
+        assert_eq!(state_of(&ctl, NodePath::Instrument(added)), Some(vec![8]));
+        assert_eq!(state_of(&ctl, NodePath::Effect { inst: added, index: 0 }), Some(vec![9]));
     }
 
     #[test]
