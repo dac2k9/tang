@@ -15,13 +15,13 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
-use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait as _, ViewType};
+use vst3::Steinberg::Vst::{IComponent, IComponentTrait as _, IEditController, IEditControllerTrait as _, ViewType};
 use vst3::Steinberg::{
     IPlugFrame, IPlugFrameTrait, IPlugView, IPlugViewTrait as _, ViewRect, kInvalidArgument, kResultFalse, kResultOk, kResultTrue, tresult,
 };
 use vst3::{Class, ComPtr, ComRef, ComWrapper};
 
-use super::{Vst3Module, normalized_to_value, value_to_normalized};
+use super::{Vst3Module, normalized_to_value, state, value_to_normalized};
 use crate::plugin::{Editor, OpenEditor};
 use crate::window::{self, Opener, Spec, Window};
 
@@ -42,11 +42,20 @@ const DEFAULT_SIZE: (i32, i32) = (640, 480);
 /// A parameter's id and its normalized value as the index that the session knows the parameter by and the value in its units; none for a parameter that the session does not list (a hidden one, a placeholder).
 type ToValue = Box<dyn Fn(u32, f64) -> Option<(u32, f32)>>;
 
+/// Gives a plugin a state that `Editor::state` made (`state::restore`): the reason in words if it does not take it.
+type GiveState = Box<dyn Fn(&[u8]) -> Result<(), String>>;
+
 /// What an editor asks the plugin's controller for the parameters, in both directions: the plugin's own, and in a test a fake.
 struct Parameters {
     to_value: ToValue,
     /// The controller, told of the value that the session has for the parameter at an index.
     set_value: Box<dyn Fn(u32, f32)>,
+    /// What the parameters are now, as the session has them: the plugin may have changed some itself (a state that it was given, a window that was used).
+    values: Box<dyn Fn() -> Vec<(u32, f32)>>,
+    /// The plugin's state, as one blob (`state::capture`); none for a plugin that has none.
+    state: Box<dyn Fn() -> Option<Vec<u8>>>,
+    /// Give the plugin a state that `state` made (`state::restore`).
+    set_state: GiveState,
 }
 
 /// What the plugin's parameter `id` says when its window turns it to `normalized`, as the session has it: the index that the session knows the parameter by (`index_of`: the plugin's parameter ids, by the index that they are
@@ -80,7 +89,9 @@ impl Vst3Editor {
     /// `param_steps` are the plugin's listed parameters, by the index that the session knows them by. The editor has to be let go of, and its window closed, before the plugin is terminated (`Vst3Plugin`'s `Drop` does it
     /// first, by the registry): a view of a terminated plugin is a view of nothing.
     pub(super) fn of(
+        component: ComPtr<IComponent>,
         controller: ComPtr<IEditController>,
+        separate_controller: bool,
         module: Arc<Vst3Module>,
         edits: Arc<Mutex<Vec<(u32, f64)>>>,
         param_ids: &[u32],
@@ -92,9 +103,45 @@ impl Vst3Editor {
         let to_value = {
             let controller = controller.clone();
             let steps = steps.clone();
+            let by_id = by_id.clone();
             move |id: u32, normalized: f64| {
                 // Safety: the controller is alive (see above) and is asked on the main thread, outside of the plugin's own call.
                 edit_to_value(&by_id, &steps, id, normalized, |normalized| unsafe { controller.normalizedParamToPlain(id, normalized) })
+            }
+        };
+        let values = {
+            let controller = controller.clone();
+            let steps = steps.clone();
+            let listed = ids.clone();
+            move || -> Vec<(u32, f32)> {
+                listed
+                    .iter()
+                    .filter_map(|&id| {
+                        // Safety: as above.
+                        let normalized = unsafe { controller.getParamNormalized(id) };
+                        // Safety: as above.
+                        edit_to_value(&by_id, &steps, id, normalized, |normalized| unsafe { controller.normalizedParamToPlain(id, normalized) })
+                    })
+                    .collect()
+            }
+        };
+        let state = {
+            let (component, controller) = (component.clone(), controller.clone());
+            // Safety: the component and the controller are alive and are asked on the main thread, as the format says a state is.
+            move || state::capture(|stream| unsafe { component.getState(stream) }, |stream| unsafe { controller.getState(stream) })
+        };
+        let set_state = {
+            let (component, controller) = (component.clone(), controller.clone());
+            move |blob: &[u8]| {
+                state::restore(
+                    blob,
+                    // Safety: as above.
+                    |stream| unsafe { component.setState(stream) },
+                    // (A controller that is the component has had it already.)
+                    |stream| if separate_controller { unsafe { controller.setComponentState(stream) } } else { kResultOk },
+                    // Safety: as above.
+                    |stream| unsafe { controller.setState(stream) },
+                )
             }
         };
         let set_value = {
@@ -115,7 +162,7 @@ impl Vst3Editor {
                 // Safety: `createView` hands over one reference of the view it made, or none.
                 unsafe { ComPtr::from_raw(view) }
             }),
-            Parameters { to_value: Box::new(to_value), set_value: Box::new(set_value) },
+            Parameters { to_value: Box::new(to_value), set_value: Box::new(set_value), values: Box::new(values), state: Box::new(state), set_state: Box::new(set_state) },
             edits,
             Box::new(module),
         )
@@ -196,6 +243,18 @@ impl Editor for Vst3Editor {
         for &(index, value) in values {
             (self.parameters.set_value)(index, value);
         }
+    }
+
+    fn state(&self) -> Option<Vec<u8>> {
+        (self.parameters.state)()
+    }
+
+    fn set_state(&self, state: &[u8]) -> Result<(), String> {
+        (self.parameters.set_state)(state)
+    }
+
+    fn values(&self) -> Vec<(u32, f32)> {
+        (self.parameters.values)()
     }
 }
 
@@ -526,6 +585,9 @@ mod tests {
         let parameters = Parameters {
             to_value: Box::new(|id, normalized| (id == 7).then_some((2, normalized as f32 * 100.0))),
             set_value: Box::new(move |index, value| told.borrow_mut().push(format!("controller.set({index}, {value})"))),
+            values: Box::new(|| vec![(2, 12.5), (3, 0.25)]),
+            state: Box::new(|| Some(vec![4, 5, 6])),
+            set_state: Box::new(|state| if state.is_empty() { Err("an empty state".to_string()) } else { Ok(()) }),
         };
         let edits = Arc::new(Mutex::new(Vec::new()));
         let editor = Vst3Editor::new(Box::new(move || handed_out.to_com_ptr::<IPlugView>()), parameters, edits.clone(), Box::new(()));
@@ -601,7 +663,7 @@ mod tests {
     #[test]
     fn a_plugin_that_has_no_view_says_so_and_no_window_is_made() {
         let log: Log = Rc::default();
-        let parameters = Parameters { to_value: Box::new(|_, _| None), set_value: Box::new(|_, _| {}) };
+        let parameters = Parameters { to_value: Box::new(|_, _| None), set_value: Box::new(|_, _| {}), values: Box::new(Vec::new), state: Box::new(|| None), set_state: Box::new(|_| Ok(())) };
         let editor = Vst3Editor::new(Box::new(|| None), parameters, Arc::default(), Box::new(()));
         let refused = |_: &Spec| -> Result<Rc<dyn Window>, String> {
             log.borrow_mut().push("window.open".to_string());
@@ -847,6 +909,15 @@ mod tests {
         assert_eq!(editor.snapshot_png(), Some(vec![1, 2, 3]));
         assert_eq!(editor.describe(), "a fake window\n");
     }
+    #[test]
+    fn the_plugins_state_and_the_values_it_has_now_are_asked_of_what_the_editor_was_made_of() {
+        let Setup { editor, .. } = setup(|_| {});
+        assert_eq!(editor.state(), Some(vec![4, 5, 6]));
+        assert_eq!(editor.values(), [(2, 12.5), (3, 0.25)]);
+        assert_eq!(editor.set_state(&[1]), Ok(()));
+        assert_eq!(editor.set_state(&[]), Err("an empty state".to_string()), "what the plugin says is what the caller is told");
+    }
+
     #[test]
     fn what_a_window_says_of_a_parameter_is_the_sessions_parameter_at_its_index_and_the_value_in_the_sessions_units() {
         let index_of: HashMap<u32, usize> = [(10, 0), (20, 1), (30, 2)].into();

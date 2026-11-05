@@ -117,6 +117,37 @@ fn node_ui_of(value: toml::Value) -> Option<NodeUi> {
     }
 }
 
+/// A `state`, read leniently like a place: the base64 text of the bytes that a plugin gave (`Plugin::state`, step 112 part C). A state that is not text, is not base64 or is more than a session keeps is not worth refusing
+/// the session for: the plugin starts as its preset and parameters say, and the state is left out (and logged).
+fn lenient_state<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error> {
+    Ok(match toml::Value::deserialize(deserializer)? {
+        toml::Value::String(text) => decode_state(&text, crate::plugin::MAX_STATE_BYTES).unwrap_or_else(|why| {
+            log::warn!("ignoring a plugin's `state` that {why}");
+            None
+        }),
+        other => {
+            log::warn!("ignoring a `state` that is not text: {other}");
+            None
+        }
+    })
+}
+
+/// The bytes that base64 text says, none for an empty one (an empty state is no state); why not, in words, for text that is not base64 and for more than `max` bytes.
+fn decode_state(text: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(text.trim()).map_err(|error| format!("is not base64: {error}"))?;
+    if bytes.len() > max {
+        return Err(format!("is {} bytes, and a session keeps {max} at most", bytes.len()));
+    }
+    Ok((!bytes.is_empty()).then_some(bytes))
+}
+
+/// The text of a plugin's state, as a session file keeps it.
+fn encode_state(state: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(state)
+}
+
 /// A `pinned` list, read leniently like a place: which parameters a front-end shows as knobs is not worth refusing a session for,
 /// so what is not a list is left out (and logged), and so is whatever in a list is not a name.
 fn lenient_names<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
@@ -612,6 +643,9 @@ pub struct PluginConfig {
     /// the TUI do not use them, and they are kept when a session is saved.
     #[serde(default, deserialize_with = "lenient_names")]
     pub pinned: Vec<String>,
+    /// The plugin's state, as it gave it (`state = "<base64>"`: step 112, part C): the sound that was picked in its own window, say. It is given back to the plugin as soon as it is loaded, before its preset and its parameters.
+    #[serde(default, deserialize_with = "lenient_state")]
+    pub state: Option<Vec<u8>>,
 }
 
 fn default_volume() -> f64 {
@@ -635,6 +669,9 @@ pub struct EffectConfig {
     /// The parameters a front-end shows as knobs on the effect's node, by name, in order.
     #[serde(default, deserialize_with = "lenient_names")]
     pub pinned: Vec<String>,
+    /// The plugin's state, as for an instrument.
+    #[serde(default, deserialize_with = "lenient_state")]
+    pub state: Option<Vec<u8>>,
     /// Where the effect is drawn.
     #[serde(default, deserialize_with = "lenient_ui")]
     pub ui: Option<NodeUi>,
@@ -766,6 +803,8 @@ struct InstrumentSlotRaw {
     params: HashMap<String, f64>,
     #[serde(default, deserialize_with = "lenient_names")]
     pinned: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_state")]
+    state: Option<Vec<u8>>,
     #[serde(default, rename = "modulator")]
     modulators: Vec<ModulatorConfig>,
     // Slot-level fields.
@@ -1022,6 +1061,7 @@ pub fn parse_raw(content: &str) -> anyhow::Result<SessionConfig> {
             remap: slot.remap,
             params: slot.params,
             pinned: slot.pinned,
+            state: slot.state,
         });
         // Drop out-of-range group references defensively.
         let group = slot.group.filter(|&g| g < groups.len());
@@ -1527,6 +1567,8 @@ pub struct SaveInstrument {
     pub params: Vec<(String, f32)>,
     /// The parameters a front-end shows as knobs on the node, by name, in order.
     pub pinned: Vec<String>,
+    /// The plugin's state, as it gave it (written as `state`, base64), if it has one.
+    pub state: Option<Vec<u8>>,
     pub pitch_bend_range: f64,
     pub remap: HashMap<String, RemapTarget>,
 }
@@ -1541,6 +1583,8 @@ pub struct SaveEffect {
     pub params: Vec<(String, f32)>,
     /// The parameters a front-end shows as knobs on the node, by name, in order.
     pub pinned: Vec<String>,
+    /// The plugin's state, as for an instrument.
+    pub state: Option<Vec<u8>>,
     /// Where the effect is drawn.
     pub ui: Option<NodeUi>,
 }
@@ -1722,6 +1766,8 @@ struct InstrumentSlotOut {
     preset: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pinned: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     params: BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "is_default_pitch_bend_range_opt")]
@@ -1873,6 +1919,8 @@ struct EffectOut {
     preset: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pinned: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     params: BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2035,6 +2083,7 @@ fn effect_to_out(fx: &SaveEffect) -> EffectOut {
         feed: fx.feed,
         preset: fx.preset.clone(),
         pinned: fx.pinned.clone(),
+        state: fx.state.as_deref().map(encode_state),
         params: fx.params.iter().map(|(k, v)| (k.clone(), clean_f64(*v))).collect(),
         ui: fx.ui.map(NodeUiOut::from),
     }
@@ -2112,6 +2161,7 @@ pub fn to_toml(
                     volume,
                     preset,
                     pinned: slot.instrument.as_ref().map(|inst| inst.pinned.clone()).unwrap_or_default(),
+                    state: slot.instrument.as_ref().and_then(|inst| inst.state.as_deref()).map(encode_state),
                     params,
                     pitch_bend_range,
                     remap,
@@ -2977,7 +3027,7 @@ range = "C4-C8"
                 transpose: 0,
                 group: None,
                 instrument: Some(SaveInstrument {
-                    pinned: vec![],
+                    pinned: vec![], state: None,
                     plugin: "builtin:sine".into(),
                     volume: 0.8,
                     preset: None,
@@ -2986,7 +3036,7 @@ range = "C4-C8"
                     remap: HashMap::new(),
                 }),
                 effects: vec![SaveEffect {
-                    pinned: vec![],
+                    pinned: vec![], state: None,
                     plugin: "builtin:sine".into(),
                     mix: 0.5,
                     feed: Feed::Chain,
@@ -3005,7 +3055,7 @@ range = "C4-C8"
                 transpose: 0,
                 group: None,
                 instrument: Some(SaveInstrument {
-                    pinned: vec![],
+                    pinned: vec![], state: None,
                     plugin: "builtin:sine".into(),
                     volume: 1.0,
                     preset: None,
@@ -3046,7 +3096,7 @@ range = "C4-C8"
             transpose: 0,
             group: None,
             instrument: Some(SaveInstrument {
-                pinned: vec![],
+                pinned: vec![], state: None,
                 plugin: "builtin:sine".into(),
                 volume: 1.0,
                 preset: Some("Lead".into()),
@@ -3055,7 +3105,7 @@ range = "C4-C8"
                 remap: HashMap::new(),
             }),
             effects: vec![SaveEffect {
-                pinned: vec![],
+                pinned: vec![], state: None,
                 plugin: "builtin:reverb".into(),
                 mix: 0.4,
                 feed: Feed::Chain,
@@ -3180,7 +3230,7 @@ range = "C4-C8"
             transpose: 0,
             group,
             instrument: Some(SaveInstrument {
-                pinned: vec![],
+                pinned: vec![], state: None,
                 plugin: "builtin:osc".into(),
                 volume: 1.0,
                 preset: None,
@@ -3201,7 +3251,7 @@ range = "C4-C8"
             volume: 0.5,
             pan: -0.5,
             effects: vec![SaveEffect {
-                pinned: vec![],
+                pinned: vec![], state: None,
                 plugin: "builtin:reverb".into(),
                 mix: 1.0,
                 feed: Feed::Chain,
@@ -3257,7 +3307,7 @@ range = "C4-C8"
             transpose: 0,
             group: None,
             instrument: Some(SaveInstrument {
-                pinned: vec![],
+                pinned: vec![], state: None,
                 plugin: "builtin:sine".into(),
                 volume: 1.0,
                 preset: None,
@@ -3362,7 +3412,7 @@ plugin = "builtin:osc"
 
     /// An effect with nothing set, for the tests of what is written for one thing.
     fn bare_effect(plugin: &str) -> SaveEffect {
-        SaveEffect { plugin: plugin.into(), mix: 1.0, feed: Feed::Chain, preset: None, params: vec![], pinned: vec![], ui: None }
+        SaveEffect { plugin: plugin.into(), mix: 1.0, feed: Feed::Chain, preset: None, params: vec![], pinned: vec![], state: None, ui: None }
     }
 
     /// A lane with an effect and a modulator, each with this position, for the tests of what is written.
@@ -3373,8 +3423,8 @@ plugin = "builtin:osc"
             range: None,
             transpose: 0,
             group: None,
-            instrument: Some(SaveInstrument { pinned: vec![], plugin: "builtin:osc".into(), volume: 1.0, preset: None, params: vec![], pitch_bend_range: 2.0, remap: HashMap::new() }),
-            effects: vec![SaveEffect { pinned: vec![], plugin: "builtin:filter".into(), mix: 1.0, feed: Feed::Chain, preset: None, params: vec![], ui }],
+            instrument: Some(SaveInstrument { pinned: vec![], state: None, plugin: "builtin:osc".into(), volume: 1.0, preset: None, params: vec![], pitch_bend_range: 2.0, remap: HashMap::new() }),
+            effects: vec![SaveEffect { pinned: vec![], state: None, plugin: "builtin:filter".into(), mix: 1.0, feed: Feed::Chain, preset: None, params: vec![], ui }],
             pattern: None,
             ui,
             route: Route::Out,
@@ -3403,7 +3453,7 @@ plugin = "builtin:osc"
             name: None,
             volume: 1.0,
             pan: 0.0,
-            effects: vec![SaveEffect { pinned: vec![], plugin: "builtin:reverb".into(), mix: 1.0, feed: Feed::Chain, preset: None, params: vec![], ui: at(1100.0, 40.0) }],
+            effects: vec![SaveEffect { pinned: vec![], state: None, plugin: "builtin:reverb".into(), mix: 1.0, feed: Feed::Chain, preset: None, params: vec![], ui: at(1100.0, 40.0) }],
             ui: at(800.0, 40.0),
             route: Route::Out,
         };
@@ -3493,6 +3543,68 @@ plugin = "builtin:osc"
     }
 
     #[test]
+    fn a_plugins_state_is_written_as_base64_on_the_plugin_it_is_for_and_read_back_and_none_is_written_for_none() {
+        let mut lane = placed_lane(None);
+        lane.instrument.as_mut().unwrap().state = Some(vec![1, 2, 3]);
+        lane.effects[0].state = Some(vec![250, 251, 252, 253]);
+        let group = SaveGroup {
+            muted: false,
+            solo: false,
+            name: None,
+            volume: 1.0,
+            pan: 0.0,
+            effects: vec![SaveEffect { state: Some(b"bus".to_vec()), ..bare_effect("builtin:reverb") }],
+            ui: None,
+            route: Route::Out,
+        };
+        let text = to_toml(&[lane], &[group], &[], &Default::default(), None, None, None).unwrap();
+        for line in [r#"state = "AQID""#, r#"state = "+vv8/Q==""#, r#"state = "YnVz""#] {
+            assert_eq!(text.lines().filter(|l| *l == line).count(), 1, "{line} in\n{text}");
+        }
+        assert_eq!(text.lines().filter(|l| l.starts_with("state")).count(), 3, "{text}");
+        // And what is written is read back, on the same plugins.
+        let config = parse(&text).unwrap();
+        assert_eq!(config.instruments[0].instrument.as_ref().unwrap().state, Some(vec![1, 2, 3]));
+        assert_eq!(config.instruments[0].effects[0].state, Some(vec![250, 251, 252, 253]));
+        assert_eq!(config.groups[0].effects[0].state, Some(b"bus".to_vec()));
+        // A plugin that has none has no line: a file is as it always was, and one from before there was a state has none.
+        let plain = to_toml(&[placed_lane(None)], &[], &[], &Default::default(), None, None, None).unwrap();
+        assert!(!plain.contains("state"), "{plain}");
+        let old = parse("[[instrument]]\nplugin = \"builtin:osc\"\n[[instrument.effect]]\nplugin = \"builtin:filter\"\n").unwrap();
+        assert!(old.instruments[0].instrument.as_ref().unwrap().state.is_none() && old.instruments[0].effects[0].state.is_none());
+    }
+
+    #[test]
+    fn a_state_that_is_not_base64_or_not_text_is_left_out_where_it_is_wrong_and_the_rest_of_the_session_loads() {
+        let osc = "[[instrument]]\nplugin = \"builtin:osc\"\n";
+        let cases: [(&str, Option<Vec<u8>>); 8] = [
+            ("state = \"AQID\"", Some(vec![1, 2, 3])),
+            ("state = \"  AQID \"", Some(vec![1, 2, 3])),
+            ("state = \"\"", None),
+            ("state = \"not base64!\"", None),
+            ("state = \"AQI\"", None),
+            ("state = 5", None),
+            ("state = [\"AQID\"]", None),
+            ("state = true", None),
+        ];
+        for (text, expected) in cases {
+            let config = parse(&format!("{osc}{text}\n")).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!((config.instruments.len(), config.instruments[0].instrument.as_ref().unwrap().state.clone()), (1, expected), "{text}");
+        }
+        let config = parse(&format!("{osc}[[instrument.effect]]\nplugin = \"builtin:filter\"\nstate = \"???\"\n")).unwrap();
+        assert_eq!((config.instruments.len(), config.instruments[0].effects[0].state.clone()), (1, None));
+    }
+
+    #[test]
+    fn a_state_of_as_many_bytes_as_a_session_keeps_is_read_and_one_more_is_not() {
+        assert_eq!(decode_state("AQID", 3), Ok(Some(vec![1, 2, 3])), "all that is kept");
+        let why = decode_state("AQID", 2).expect_err("one too many");
+        assert!(why.contains("is 3 bytes") && why.contains("2 at most"), "{why}");
+        assert_eq!(decode_state("", 0), Ok(None), "nothing is no state");
+        assert!(decode_state("%%%", 10).expect_err("not base64").contains("is not base64"));
+    }
+
+    #[test]
     fn a_place_is_kept_to_a_tenth_of_a_pixel_half_away_from_zero_and_within_the_limits_of_the_canvas() {
         let tidy = |x: f32, y: f32| NodeUi { x, y }.tidy().map(|ui| (ui.x, ui.y));
         assert_eq!(tidy(376.382, -40.04), Some((376.4, -40.0)));
@@ -3539,7 +3651,7 @@ plugin = "builtin:osc"
             transpose: 0,
             group: None,
             instrument: Some(SaveInstrument {
-                pinned: vec![],
+                pinned: vec![], state: None,
                 plugin: "builtin:sine".into(),
                 volume: 1.0,
                 preset: None,
@@ -3594,7 +3706,7 @@ plugin = "builtin:osc"
             transpose: 0,
             group: None,
             instrument: Some(SaveInstrument {
-                pinned: vec![],
+                pinned: vec![], state: None,
                 plugin: "builtin:sine".into(),
                 volume: 1.0,
                 preset: None,
@@ -3675,7 +3787,7 @@ plugin = "builtin:osc"
                 transpose: 0,
                 group: None,
                 instrument: Some(SaveInstrument {
-                    pinned: vec![],
+                    pinned: vec![], state: None,
                     plugin: "builtin:sine".into(),
                     volume: 1.0,
                     preset: None,
@@ -4042,7 +4154,7 @@ to = "instrument[1]"
             transpose: 0,
             group: None,
             instrument: Some(SaveInstrument {
-                pinned: vec![],
+                pinned: vec![], state: None,
                 plugin: "builtin:sine".into(),
                 volume: 1.0,
                 preset: None,

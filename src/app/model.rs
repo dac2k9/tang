@@ -1463,6 +1463,10 @@ pub struct PluginSlot {
     /// The parameters (`ParamSlot::index`) a front-end shows as knobs on the plugin's node, in the order they were pinned; none pinned
     /// is the first few (`docs/web-ui.md` §4.4). The engine and the TUI do not use it; a session file keeps it as `pinned`, by name.
     pub pinned: Vec<u32>,
+    /// The plugin's state, as it last gave it (step 112, part C): bytes that only the plugin reads, of what a person did in its own window that is not a parameter (the sound that was picked in it). Read from the session file when
+    /// the plugin is loaded and given back to it then, and read from the plugin again (`Controller::keep_the_states`) when its window is closed and when the session is saved, for a plugin that has one or whose window has been
+    /// opened; the session file keeps it as `state`. No step of the history has it: an Undo does not take back what was picked in a window.
+    pub state: Option<Vec<u8>>,
 }
 
 impl PluginSlot {

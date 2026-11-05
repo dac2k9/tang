@@ -1,3 +1,6 @@
+/// How much state a plugin may give (`Editor::state`), and a session keep: a plugin that gives more is wrong, or keeps a sample library in its state, and a session file is not the place for that.
+pub const MAX_STATE_BYTES: usize = 32 * 1024 * 1024;
+
 pub mod autodetect;
 pub mod builtin;
 pub mod chain;
@@ -5,6 +8,8 @@ pub mod clap;
 // (A VST3 plugin is the only one that has a window of its own so far: a build without the format registers no editor, and the table and the way into it are not used.)
 #[cfg_attr(not(feature = "vst3"), allow(dead_code))]
 pub mod editors;
+#[cfg(test)]
+pub mod fake;
 #[cfg(feature = "lv2")]
 pub mod lv2;
 #[cfg(feature = "vst3")]
@@ -112,6 +117,24 @@ pub trait Editor {
     /// default is a plugin that has nothing to tell.
     fn set_values(&self, values: &[(u32, f32)]) {
         let _ = values;
+    }
+
+    /// The plugin's state (step 112, part C): bytes that only the plugin reads, of what it is that is not a parameter (the sound that a person picked in its window, a model that it loaded), which a session keeps so that the plugin
+    /// comes back as it was. None for a plugin that has none to give. Asked on the main thread, while the plugin may be playing (the formats say that it may be).
+    fn state(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Give the plugin a state that `state` made, before it plays or after, and say why in words if it does not take it. The default is a plugin that keeps none.
+    fn set_state(&self, state: &[u8]) -> Result<(), String> {
+        let _ = state;
+        Err("this plugin keeps no state".to_string())
+    }
+
+    /// What the plugin's parameters are now, as `take_edits` has them (the index and the value): a plugin that was given a state, or whose window has been used, may have changed some of them itself, and the session reads them
+    /// back so that what it shows is what the plugin has. The default is none.
+    fn values(&self) -> Vec<(u32, f32)> {
+        Vec::new()
     }
 }
 
@@ -265,6 +288,11 @@ pub fn load(
     max_block_size: usize,
     _runtime: &Runtime,
 ) -> anyhow::Result<Box<dyn Plugin>> {
+    // (A test can have a plugin of its own for a name: `fake::install`.)
+    #[cfg(test)]
+    if let Some(loaded) = fake::load(source) {
+        return Ok(loaded);
+    }
     if source.starts_with("builtin:") {
         return builtin::load(source, sample_rate, max_block_size);
     }

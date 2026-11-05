@@ -47,6 +47,7 @@ pub fn to_save(model: &SessionModel) -> (Vec<SaveInstrumentSlot>, Vec<SaveGroup>
                 preset: inst.current_preset.clone(),
                 params: overrides(&inst.params),
                 pinned: inst.pinned_names(),
+                state: inst.state.clone(),
                 pitch_bend_range: lane.pitch_bend_range,
                 remap: lane.remap.clone(),
             }),
@@ -182,7 +183,7 @@ fn overrides(params: &[ParamSlot]) -> Vec<(String, f32)> {
 /// The instrument of a lane as a module keeps it (step 105): the plugin with its preset, the values that are not its own and the knobs pinned to its node, and the lane's volume. What is the lane's note remap, and
 /// the bend range that goes with it, is of the keyboard that plays it and not of the sound: a module has the defaults.
 pub(super) fn instrument_to_save(lane: &InstrumentNode, plugin: &PluginSlot) -> SaveInstrument {
-    SaveInstrument { plugin: plugin.id.clone(), volume: lane.volume, preset: plugin.current_preset.clone(), params: overrides(&plugin.params), pinned: plugin.pinned_names(), pitch_bend_range: 2.0, remap: HashMap::new() }
+    SaveInstrument { plugin: plugin.id.clone(), volume: lane.volume, preset: plugin.current_preset.clone(), params: overrides(&plugin.params), pinned: plugin.pinned_names(), state: plugin.state.clone(), pitch_bend_range: 2.0, remap: HashMap::new() }
 }
 
 pub(super) fn effect_to_save(fx: &PluginSlot, ui: &BTreeMap<NodeId, NodeUi>) -> SaveEffect {
@@ -193,6 +194,7 @@ pub(super) fn effect_to_save(fx: &PluginSlot, ui: &BTreeMap<NodeId, NodeUi>) -> 
         preset: fx.current_preset.clone(),
         params: overrides(&fx.params),
         pinned: fx.pinned_names(),
+        state: fx.state.clone(),
         ui: ui.get(&fx.node).copied(),
     }
 }

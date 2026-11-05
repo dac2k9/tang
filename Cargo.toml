@@ -19,6 +19,7 @@ view = { path = "view" }
 kernel = { path = "kernel" }
 livi = { version = "0.7", optional = true }
 cpal = "0.15"
+base64 = "0.22"
 midir = "0.10"
 crossbeam-channel = "0.5"
 clap = { version = "4", features = ["derive"] }

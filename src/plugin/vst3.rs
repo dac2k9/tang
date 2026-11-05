@@ -43,6 +43,7 @@ use vst3::{Class, ComPtr, ComWrapper, Interface};
 use super::{ParameterInfo, Plugin, PluginInfo, Preset, editors};
 
 mod editor;
+mod state;
 
 // ---------------------------------------------------------------------------
 // String helpers
@@ -1534,7 +1535,7 @@ pub fn load(
     let module = Arc::new(module);
     let alive = Arc::new(());
     let editor_id = editors::register(
-        Rc::new(editor::Vst3Editor::of(controller.clone(), module.clone(), edits, &param_ids, &param_steps)),
+        Rc::new(editor::Vst3Editor::of(component.clone(), controller.clone(), separate_controller, module.clone(), edits, &param_ids, &param_steps)),
         &alive,
     );
 

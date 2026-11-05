@@ -325,6 +325,8 @@ impl Controller {
             IntentError::Invalid(format!("{} could not be loaded", slot.name))
         })?;
         slot.editor = loaded.editor_id();
+        // (The state that the session has for it, before its preset and its values: as when the session was loaded.)
+        super::load::restore_state(loaded.as_ref(), slot.state.as_deref());
         if let Some(preset) = slot.current_preset.as_ref().and_then(|name| slot.presets.iter().find(|preset| preset.name == *name)) {
             if let Err(e) = loaded.load_preset(&preset.id) {
                 log::warn!("{}: preset '{}' did not load again: {e}", slot.name, preset.name);

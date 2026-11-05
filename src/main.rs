@@ -306,6 +306,7 @@ fn default_session() -> anyhow::Result<(session::SessionConfig, std::path::PathB
                 remap: Default::default(),
                 params: Default::default(),
                 pinned: Vec::new(),
+                state: None,
             }),
             effects: vec![],
             modulators: vec![],

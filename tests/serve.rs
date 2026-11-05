@@ -2419,3 +2419,88 @@ async fn a_plugins_own_window_opens_through_the_server_and_leaves_the_screen_wit
     wait_for_windows(&tang, 1, "the window of the plugin that an undo brought back");
     assert!(!tang.log().contains("let go of on a thread that is not the main one"), "{}", tang.log());
 }
+
+/// The `state` of the first instrument of a session file, as the text that the file keeps it as (base64).
+#[cfg(target_os = "macos")]
+fn state_in(file: &std::path::Path) -> Option<String> {
+    let table: toml::Table = std::fs::read_to_string(file).unwrap().parse().unwrap();
+    table["instrument"][0].get("state").and_then(toml::Value::as_str).map(String::from)
+}
+
+/// A plugin's state, through the whole program (step 112, part C): what is in a plugin that is not in the file's values is in the file as its `state`, and is what brings a value back when the file has no values.
+/// A window of the plugin is opened (a plugin that has none and has not been looked into is not asked for its state), one of its parameters is set, and the session is saved; the file is then made to have no `params`; a second
+/// program that is started on it has the parameter as it was set, which only the state can have given it, and saves the same state again. For a person at a Mac that has a VST3 plugin installed (the first, by name; one whose
+/// state has its parameters in it, as most do): the window takes the keyboard from the terminal for a few seconds. `cargo test --features web --test serve -- --ignored`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "opens a plugin's window on the screen for a few seconds, and takes the keyboard: cargo test --features web --test serve -- --ignored"]
+async fn a_plugins_state_is_kept_in_the_file_and_brings_a_value_back_when_the_file_has_no_values() {
+    let mut bundles: Vec<_> = std::fs::read_dir("/Library/Audio/Plug-Ins/VST3")
+        .map(|entries| entries.filter_map(Result::ok).map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|ext| ext == "vst3")).collect())
+        .unwrap_or_default();
+    bundles.sort();
+    let Some(bundle) = bundles.first() else {
+        eprintln!("skipped: no VST3 plugin is installed");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("first.toml"), dir.path().join("second.toml"));
+    std::fs::write(&first, format!("[[instrument]]\nplugin = {:?}\n", bundle.to_string_lossy())).unwrap();
+
+    // The first program: the window is opened, a parameter is set, and the session is saved.
+    let tang = Tang::start_on(&first);
+    let mut client = connect(&tang).await;
+    let hello = next_json(&mut client).await;
+    if !hello["features"].as_array().unwrap().iter().any(|feature| feature == "windows") {
+        eprintln!("skipped: the server says that this machine cannot show a window: {hello}");
+        return;
+    }
+    tell(&mut client, json!({"type": "subscribe"})).await;
+    let snapshot = next_json(&mut client).await;
+    let node = snapshot["snapshot"]["graph"]["nodes"].as_array().unwrap().iter().find(|node| node["plugin"]["hasEditor"] == true).unwrap_or_else(|| panic!("the plugin does not say that it has a window: {snapshot}"));
+    let (id, params) = (node["id"].as_u64().unwrap(), node["plugin"]["params"].as_array().unwrap());
+    // (The parameters that can be turned up: those with room above their values. A plugin keeps some of them out of its state, a bypass often, so all are turned up.)
+    let turned_up: Vec<(u64, f64)> = params.iter().filter(|p| p["max"].as_f64() > p["value"].as_f64() && p["min"].as_f64() < p["max"].as_f64()).map(|p| (p["index"].as_u64().unwrap(), p["max"].as_f64().unwrap())).collect();
+    assert!(!turned_up.is_empty(), "a parameter to turn up");
+    let mut req = 0;
+    let mut ask = async |intent: Value| {
+        req += 1;
+        tell(&mut client, json!({"type": "request", "reqId": req, "intent": intent})).await;
+        answer(&mut client, req).await
+    };
+    let scan_over = Instant::now() + Duration::from_secs(60);
+    loop {
+        let opened = ask(json!({"type": "openEditor", "node": id})).await;
+        if opened["type"] == "ack" {
+            break;
+        }
+        assert!(opened["error"]["message"].as_str().unwrap_or_default().contains("still being looked for") && Instant::now() < scan_over, "{opened}\n{}", tang.log());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    for &(index, max) in &turned_up {
+        assert_eq!(ask(json!({"type": "setParam", "node": id, "param": index, "value": max})).await["type"], "ack");
+    }
+    assert_eq!(ask(json!({"type": "save"})).await["type"], "ack");
+    let state = state_in(&first).unwrap_or_else(|| panic!("the file has no state:\n{}", std::fs::read_to_string(&first).unwrap()));
+    assert!(!state.is_empty());
+
+    // The file, with no values in it: only the state can say what the parameter is.
+    let mut table: toml::Table = std::fs::read_to_string(&first).unwrap().parse().unwrap();
+    assert!(table["instrument"][0].as_table_mut().unwrap().remove("params").is_some(), "the file has the value that was set");
+    std::fs::write(&second, table.to_string()).unwrap();
+
+    // The second program is started on it: the parameters are as they were set, and the state that it saves is the same.
+    let again = Tang::start_on(&second);
+    let mut client = connect(&again).await;
+    next_json(&mut client).await;
+    tell(&mut client, json!({"type": "subscribe"})).await;
+    let snapshot = next_json(&mut client).await;
+    let node = snapshot["snapshot"]["graph"]["nodes"].as_array().unwrap().iter().find(|node| node["plugin"]["hasEditor"] == true).expect("the plugin");
+    let value_of = |index: u64| node["plugin"]["params"].as_array().unwrap().iter().find(|p| p["index"].as_u64() == Some(index)).unwrap()["value"].as_f64().unwrap();
+    let back = turned_up.iter().filter(|&&(index, max)| value_of(index) == max).count();
+    assert!(back > 0, "none of the {} parameters that were turned up is as it was set, with nothing in the file but the state\n{}", turned_up.len(), again.log());
+    assert!(!again.log().contains("was not taken"), "{}", again.log());
+    tell(&mut client, json!({"type": "request", "reqId": 1, "intent": {"type": "save"}})).await;
+    assert_eq!(answer(&mut client, 1).await["type"], "ack");
+    assert_eq!(state_in(&second), Some(state), "the state that was given back is the state that is saved");
+}

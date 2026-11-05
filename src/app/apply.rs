@@ -204,7 +204,7 @@ impl Controller {
         Ok(applied)
     }
 
-    fn set_param(&mut self, node: NodeId, param: u32, value: f32) -> Result<Event, IntentError> {
+    pub(super) fn set_param(&mut self, node: NodeId, param: u32, value: f32) -> Result<Event, IntentError> {
         let at = self.locate_plugin(node)?;
         let plugin = self.plugin_at(&at).ok_or_else(|| invalid("that instrument has no plugin"))?;
         let row = plugin
@@ -1006,6 +1006,7 @@ impl Controller {
         let Some(dir) = self.modules_dir.clone() else { return Err(IntentError::Io("this program keeps no library of modules".to_string())) };
         self.model.locate(node).ok_or(IntentError::NotFound(node))?;
         let name = module::clean_name(name).map_err(invalid)?;
+        self.keep_the_states();
         let text = module::to_text(&self.model, node).map_err(invalid)?;
         self.write_module(&dir, name, &text)
     }
@@ -1018,6 +1019,7 @@ impl Controller {
             self.model.locate(*node).ok_or(IntentError::NotFound(*node))?;
         }
         let name = module::clean_name(name).map_err(invalid)?;
+        self.keep_the_states();
         let text = module::to_text_of(&self.model, nodes).map_err(invalid)?;
         self.write_module(&dir, name, &text)
     }
@@ -1052,6 +1054,8 @@ impl Controller {
                 Some(config) => {
                     let plugin = self.load_instrument(&config.plugin).map_err(refused)?;
                     has_audio_output(plugin.as_ref())?;
+                    // (The state that the module has for it, before its preset and its values, as when a session is loaded.)
+                    super::load::restore_state(plugin.as_ref(), config.state.as_deref());
                     Some(plugin)
                 }
                 None => None,
@@ -1060,6 +1064,7 @@ impl Controller {
             for effect in &lane.effects {
                 let plugin = self.load_effect(&effect.plugin).map_err(refused)?;
                 outputs_fit_the_chain(plugin.name(), plugin.audio_output_count())?;
+                super::load::restore_state(plugin.as_ref(), effect.state.as_deref());
                 effects.push(plugin);
             }
             loaded.push((instrument, effects));
@@ -1240,6 +1245,7 @@ impl Controller {
         }
         if let Some(slot) = self.plugin_at(&at) {
             slot.pin_names(&effect.pinned);
+            slot.state = effect.state.clone();
         }
         if effect.feed == Feed::None {
             if let Err(error) = self.set_feed_intent(node, Feed::None) {
@@ -1257,6 +1263,7 @@ impl Controller {
         }
         if let Some(slot) = self.plugin_at(&at) {
             slot.pin_names(&instrument.pinned);
+            slot.state = instrument.state.clone();
         }
     }
 

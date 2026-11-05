@@ -171,6 +171,16 @@ fn plugin_slot(
         takes_notes: true,
         editor: None,
         pinned: Vec::new(),
+        state: None,
+    }
+}
+
+/// Give a plugin that has just been loaded the state that its session kept for it (step 112, part C), before its preset and its parameters: a preset and a value that a session names were changed after the state. The reason is
+/// logged and the plugin goes on as it was loaded if it does not take it (a plugin that keeps no state, or one that was kept by another version of it): the state is the session's all the same, and is kept.
+pub(super) fn restore_state(plugin: &dyn plugin::Plugin, state: Option<&[u8]>) {
+    let (Some(state), Some(editor)) = (state, plugin.editor_id()) else { return };
+    if let Err(why) = crate::plugin::editors::set_state(editor, state) {
+        log::warn!("{}: the state that the session kept for it was not taken: {why}", plugin.name());
     }
 }
 
@@ -266,6 +276,7 @@ pub fn load_session(
             let editor = effect.editor_id();
             outputs_fit_the_chain(effect.name(), effect.audio_output_count())
                 .map_err(|refusal| anyhow::anyhow!("group[{g_idx}].effect[{fx_idx}]: {refusal}"))?;
+            restore_state(effect.as_ref(), effect_config.state.as_deref());
             if let Some(ref preset_name) = effect_config.preset {
                 session::apply_preset(&mut effect, preset_name);
             }
@@ -311,6 +322,7 @@ pub fn load_session(
             slot.fed = effect_config.feed.is_fed();
             slot.side = side;
             slot.editor = editor;
+            slot.state = effect_config.state.clone();
             group_effects.push(slot);
             group_bus_params.push(params.for_targets());
         }
@@ -362,6 +374,7 @@ pub fn load_session(
                 instrument.name()
             );
 
+            restore_state(instrument.as_ref(), plug_config.state.as_deref());
             if let Some(ref preset_name) = plug_config.preset {
                 session::apply_preset(&mut instrument, preset_name);
             }
@@ -444,6 +457,7 @@ pub fn load_session(
             slot.pin_names(&plug_config.pinned);
             slot.takes_notes = takes_notes;
             slot.editor = editor;
+            slot.state = plug_config.state.clone();
             Some(slot)
         } else {
             chain_params.push(Vec::new());
@@ -470,6 +484,7 @@ pub fn load_session(
                 effect.name()
             );
 
+            restore_state(effect.as_ref(), effect_config.state.as_deref());
             if let Some(ref preset_name) = effect_config.preset {
                 session::apply_preset(&mut effect, preset_name);
             }
@@ -534,6 +549,7 @@ pub fn load_session(
             slot.fed = effect_config.feed.is_fed();
             slot.side = side;
             slot.editor = editor;
+            slot.state = effect_config.state.clone();
             effects.push(slot);
         }
 

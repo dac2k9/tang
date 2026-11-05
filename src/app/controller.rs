@@ -1218,6 +1218,8 @@ impl Controller {
     /// Write the session, with the Piano tab's scale and mode, to `path`, as `mode` says. Does
     /// not touch `session_path`: callers decide what a failed save means for it.
     pub(super) fn save_to(&mut self, path: &Path, mode: FileMode) -> anyhow::Result<()> {
+        // (What is in the plugins that a person has looked into is read first, so that the file has it as it is now.)
+        self.keep_the_states();
         let (instruments, groups, cables, sources) = to_save(&self.model);
         let piano = PianoConfig {
             scale: Some(self.piano_filter.scale().short()),
@@ -1256,6 +1258,8 @@ impl Controller {
         // The plugins' own windows (step 112): what a knob in one of them did is applied as the change of any front-end is, and a window whose plugin has left the session is closed.
         self.apply_window_edits();
         self.close_windows_of_plugins_that_are_gone();
+        // (What a person did in a window that was closed is kept: the session is unsaved if it was something.)
+        let state_changed = self.keep_the_states_of_closed_windows();
         if now.duration_since(self.last_device_poll) >= DEVICE_POLL_INTERVAL {
             self.last_device_poll = now;
             if let Some(changes) = self.devices.as_mut().map(|devices| devices.poll_new_devices()) {
@@ -1263,7 +1267,7 @@ impl Controller {
             }
         }
         let catalog_changed = self.catalog.poll();
-        let model_changed = self.fold_in_notifications();
+        let model_changed = self.fold_in_notifications() || state_changed;
         // What the audio thread reported is a change no intent made.
         #[cfg(any(test, feature = "web"))]
         if model_changed {

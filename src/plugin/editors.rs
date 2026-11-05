@@ -21,6 +21,8 @@ pub struct EditorId(u64);
 struct Entry {
     // (The window goes before the editor that made it: it holds the plugin's view, and the editor the library that the view is from.)
     open: Option<Box<dyn OpenEditor>>,
+    /// Whether a window of the plugin has been opened: a plugin whose window has not is not asked for its state (it has nothing that a person did to it).
+    opened: bool,
     editor: Rc<dyn Editor>,
     /// The other end of what the plugin holds (`register`): once it is gone, so is the plugin, and a window that is still open is a view of nothing.
     alive: Weak<()>,
@@ -30,6 +32,8 @@ struct Entry {
 struct Table {
     next: u64,
     entries: HashMap<EditorId, Entry>,
+    /// The plugins whose windows were closed since `take_closed` was last asked.
+    closed: Vec<EditorId>,
 }
 
 thread_local! {
@@ -43,7 +47,7 @@ pub fn register(editor: Rc<dyn Editor>, alive: &Arc<()>) -> EditorId {
         let mut table = table.borrow_mut();
         let id = EditorId(table.next);
         table.next += 1;
-        table.entries.insert(id, Entry { open: None, editor, alive: Arc::downgrade(alive) });
+        table.entries.insert(id, Entry { open: None, opened: false, editor, alive: Arc::downgrade(alive) });
         id
     })
 }
@@ -81,6 +85,7 @@ pub fn open(id: EditorId, title: &str, focus: bool, values: &[(u32, f32)]) -> Re
             TABLE.with(|table| {
                 if let Some(entry) = table.borrow_mut().entries.get_mut(&id) {
                     entry.open = Some(open);
+                    entry.opened = true;
                 }
             });
             Ok(())
@@ -90,8 +95,44 @@ pub fn open(id: EditorId, title: &str, focus: bool, values: &[(u32, f32)]) -> Re
 
 /// Close the window of the plugin `id`, if it is open; its editor is kept, and the window can be opened again.
 pub fn close(id: EditorId) {
-    let open = TABLE.with(|table| table.borrow_mut().entries.get_mut(&id).and_then(|entry| entry.open.take()));
+    let open = TABLE.with(|table| {
+        let mut table = table.borrow_mut();
+        let open = table.entries.get_mut(&id).and_then(|entry| entry.open.take());
+        if open.is_some() {
+            table.closed.push(id);
+        }
+        open
+    });
     drop(open);
+}
+
+/// The plugins whose windows were closed (by the person, or by `close`) since this was last asked, each once, in the order they were closed: what the session looks at to keep what the person did in them.
+pub fn take_closed() -> Vec<EditorId> {
+    TABLE.with(|table| std::mem::take(&mut table.borrow_mut().closed))
+}
+
+/// Whether a window of the plugin `id` has ever been opened: a plugin that has not been opened has nothing that a person did to it.
+pub fn was_opened(id: EditorId) -> bool {
+    TABLE.with(|table| table.borrow().entries.get(&id).is_some_and(|entry| entry.opened))
+}
+
+/// The state of the plugin `id` (`Editor::state`), open or not; none for a plugin that has none to give, and for one that is not to be had here.
+pub fn state(id: EditorId) -> Option<Vec<u8>> {
+    // (The editor is taken out of the table for the call: it calls into the plugin.)
+    let editor = TABLE.with(|table| table.borrow().entries.get(&id).map(|entry| entry.editor.clone()))?;
+    editor.state()
+}
+
+/// Give the plugin `id` a state (`Editor::set_state`); the reason in words if it is not to be had here or does not take it.
+pub fn set_state(id: EditorId, state: &[u8]) -> Result<(), String> {
+    let editor = TABLE.with(|table| table.borrow().entries.get(&id).map(|entry| entry.editor.clone()));
+    editor.ok_or_else(|| "this plugin is not to be had here (it is gone, or it was made on another thread)".to_string())?.set_state(state)
+}
+
+/// What the parameters of the plugin `id` are now (`Editor::values`); none for a plugin that is not to be had here.
+pub fn values(id: EditorId) -> Vec<(u32, f32)> {
+    let editor = TABLE.with(|table| table.borrow().entries.get(&id).map(|entry| entry.editor.clone()));
+    editor.map(|editor| editor.values()).unwrap_or_default()
 }
 
 /// Whether the plugin `id` has a window open.
@@ -183,13 +224,26 @@ pub mod fakes {
         pub refuses: Option<&'static str>,
         /// Whether the person has closed the window that it made last.
         pub person_closed: Rc<Cell<bool>>,
-        /// What the person has done to the plugin's knobs, as `take_edits` gives it.
-        pub edits: RefCell<Vec<(u32, f32)>>,
+        /// What the person has done to the plugin's knobs, as `take_edits` gives it. (Shared, so that a test that has the editor only through the registry can change it: `plugin::fake`.)
+        pub edits: Rc<RefCell<Vec<(u32, f32)>>>,
+        /// What the plugin's state is now (`Editor::state`); none is a plugin that keeps none. `set_state` puts what it is given here.
+        pub state: Rc<RefCell<Option<Vec<u8>>>>,
+        /// Why it does not take a state, if it does not.
+        pub refuses_state: Option<&'static str>,
+        /// What its parameters are now (`Editor::values`).
+        pub values: Rc<RefCell<Vec<(u32, f32)>>>,
+        /// Where a state that it is given is said too, for a test that has a plugin's calls in the same order (`plugin::fake`).
+        pub sink: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
     }
 
     impl FakeEditor {
+        /// An editor that is not shared yet, for a test that changes a field before it is.
+        pub fn unshared(name: &'static str, log: &Log) -> FakeEditor {
+            FakeEditor { name, log: log.clone(), refuses: None, person_closed: Rc::new(Cell::new(false)), edits: Rc::default(), state: Rc::default(), refuses_state: None, values: Rc::default(), sink: None }
+        }
+
         pub fn new(name: &'static str, log: &Log) -> Rc<FakeEditor> {
-            Rc::new(FakeEditor { name, log: log.clone(), refuses: None, person_closed: Rc::new(Cell::new(false)), edits: RefCell::default() })
+            Rc::new(FakeEditor::unshared(name, log))
         }
     }
 
@@ -207,6 +261,27 @@ pub mod fakes {
         }
         fn set_values(&self, values: &[(u32, f32)]) {
             self.log.borrow_mut().push(format!("{}: values {values:?}", self.name));
+        }
+        fn state(&self) -> Option<Vec<u8>> {
+            self.log.borrow_mut().push(format!("{}: state asked", self.name));
+            if let Some(sink) = &self.sink {
+                sink.lock().expect("a sink").push("state asked".to_string());
+            }
+            self.state.borrow().clone()
+        }
+        fn set_state(&self, state: &[u8]) -> Result<(), String> {
+            self.log.borrow_mut().push(format!("{}: set_state {state:?}", self.name));
+            if let Some(sink) = &self.sink {
+                sink.lock().expect("a sink").push(format!("set_state {state:?}"));
+            }
+            if let Some(why) = self.refuses_state {
+                return Err(why.to_string());
+            }
+            *self.state.borrow_mut() = Some(state.to_vec());
+            Ok(())
+        }
+        fn values(&self) -> Vec<(u32, f32)> {
+            self.values.borrow().clone()
         }
     }
 
@@ -251,8 +326,6 @@ pub mod fakes {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
     use super::fakes::{FakeEditor, Log, said};
     use super::*;
 
@@ -379,9 +452,10 @@ mod tests {
     #[test]
     fn a_window_that_cannot_be_opened_says_why_and_nothing_is_kept() {
         let log = Log::default();
-        let editor = Rc::new(FakeEditor { name: "A", log: log.clone(), refuses: Some("this plugin has no window of its own"), person_closed: Rc::default(), edits: RefCell::default() });
+        let mut editor = FakeEditor::unshared("A", &log);
+        editor.refuses = Some("this plugin has no window of its own");
         let alive = Arc::new(());
-        let id = register(editor, &alive);
+        let id = register(Rc::new(editor), &alive);
         assert_eq!(open(id, "A", true, &[]), Err("this plugin has no window of its own".to_string()));
         assert!(!is_open(id) && !any_open());
     }
@@ -403,6 +477,79 @@ mod tests {
         let from_another = std::thread::spawn(move || (open(id, "A", true, &[]), any_open(), is_open(id))).join().expect("ends");
         assert!(from_another.0.is_err() && !from_another.1 && !from_another.2, "{from_another:?}");
         assert!(open(id, "A", true, &[]).is_ok(), "here it is");
+    }
+
+    #[test]
+    fn the_windows_that_were_closed_are_said_once_each_in_the_order_they_were_closed_by_the_person_or_by_a_call() {
+        let log = Log::default();
+        let (a, _editor_a, _alive_a) = registered("A", &log);
+        let (b, editor_b, _alive_b) = registered("B", &log);
+        let (c, _editor_c, _alive_c) = registered("C", &log);
+        assert!(take_closed().is_empty());
+        for id in [a, b, c] {
+            open(id, "x", false, &[]).expect("opens");
+        }
+        // A is closed by a call, B by the person, who is found by a poll; C stays open.
+        close(a);
+        close(a);
+        editor_b.person_closed.set(true);
+        poll();
+        assert_eq!(take_closed(), [a, b], "each once, in order: a window that is already shut is not closed again");
+        assert!(take_closed().is_empty(), "and said once");
+        assert!(is_open(c));
+        // A window that was never open is not a window that was closed.
+        close(c);
+        let (d, _editor_d, _alive_d) = registered("D", &log);
+        close(d);
+        assert_eq!(take_closed(), [c]);
+    }
+
+    #[test]
+    fn a_plugin_whose_window_has_been_opened_says_so_for_good_and_one_that_could_not_be_opened_does_not() {
+        let log = Log::default();
+        let (id, _editor, _alive) = registered("A", &log);
+        assert!(!was_opened(id));
+        open(id, "A", false, &[]).expect("opens");
+        assert!(was_opened(id));
+        close(id);
+        assert!(was_opened(id), "and it stays so");
+        let mut refusing = FakeEditor::unshared("R", &log);
+        refusing.refuses = Some("no screen");
+        let alive = Arc::new(());
+        let refused = register(Rc::new(refusing), &alive);
+        open(refused, "R", false, &[]).expect_err("refused");
+        assert!(!was_opened(refused));
+        assert!(!was_opened(EditorId(9999)), "and a plugin that is not there has not been");
+    }
+
+    #[test]
+    fn the_state_and_the_values_of_a_plugin_are_asked_of_its_editor_open_or_shut_and_a_plugin_that_is_not_there_has_none() {
+        let log = Log::default();
+        let (id, editor, _alive) = registered("A", &log);
+        assert_eq!(state(id), None, "a plugin that keeps none");
+        *editor.state.borrow_mut() = Some(vec![1, 2, 3]);
+        editor.values.borrow_mut().extend([(0, 0.5), (4, 2.0)]);
+        assert_eq!(state(id), Some(vec![1, 2, 3]), "its window is shut");
+        open(id, "A", false, &[]).expect("opens");
+        assert_eq!(state(id), Some(vec![1, 2, 3]), "and open");
+        assert_eq!(values(id), [(0, 0.5), (4, 2.0)]);
+        set_state(id, &[9, 8]).expect("taken");
+        assert_eq!(state(id), Some(vec![9, 8]), "what it was given is what it has");
+        forget(id);
+        assert_eq!(state(id), None);
+        assert!(values(id).is_empty());
+        assert!(set_state(id, &[1]).expect_err("gone").contains("not to be had here"));
+    }
+
+    #[test]
+    fn a_plugin_that_does_not_take_a_state_says_why() {
+        let log = Log::default();
+        let mut refusing = FakeEditor::unshared("A", &log);
+        refusing.refuses_state = Some("a state from another version");
+        let alive = Arc::new(());
+        let id = register(Rc::new(refusing), &alive);
+        assert_eq!(set_state(id, &[1]), Err("a state from another version".to_string()));
+        assert_eq!(state(id), None, "and has none for it");
     }
 
     #[test]
