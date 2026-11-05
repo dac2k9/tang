@@ -1127,9 +1127,9 @@ mod tests {
         assert_eq!(level_in_words(0.5), "peak -6.0 dB");
     }
 
-    /// The real input, for a person who has one: `cargo test --bin tang the_real_input -- --ignored --nocapture` says what the system gives (the same as `tang listen`, from the test's own program).
+    /// The real input, for a person who has one: `cargo test --lib the_real_input -- --ignored --nocapture` says what the system gives (the same as `tang listen`, from the test's own program).
     #[test]
-    #[ignore = "needs a microphone, and the permission to use it: cargo test --bin tang the_real_input -- --ignored --nocapture"]
+    #[ignore = "needs a microphone, and the permission to use it: cargo test --lib the_real_input -- --ignored --nocapture"]
     fn the_real_input_is_heard() {
         probe(None, 2.0, 48000).unwrap();
     }

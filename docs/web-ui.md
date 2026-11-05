@@ -45,7 +45,7 @@ through shared `Arc`s (`HeldNotes`, `PianoFilter`, `MidiMonitor`).
 - The session exists in five shapes: `session::SessionConfig` (TOML),
   `tui::Loaded*` (transfer structs), the TUI's live mirror (`InstrumentNode`,
   `GroupNode`, `PluginSlot`, …), `session::Save*` (save DTOs), and the audio
-  graph. `main.rs::run_session` plus the two modulator loaders build them;
+  graph. `lib.rs::run_session` plus the two modulator loaders build them;
   `impl State` keeps them in sync, including index fix-ups for cross-mod and
   group ordinals (mirrored again on the audio side).
 - Domain methods are welded to the cursor (`adjust_param` reads
