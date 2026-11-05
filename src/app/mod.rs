@@ -23,5 +23,6 @@ pub mod sources;
 pub mod subscribers;
 mod states;
 pub mod windows;
+pub mod wiring;
 #[cfg(test)]
 pub mod testutil;

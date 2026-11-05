@@ -429,56 +429,16 @@ fn run_session(
     #[cfg(not(feature = "lv2"))]
     let runtime = plugin::Runtime::default();
 
-    // Create channels
-    let (midi_tx, midi_rx) = crossbeam_channel::bounded::<audio::MidiEvent>(audio::MIDI_CHANNEL_CAPACITY);
-    let (cmd_tx, cmd_rx) = crossbeam_channel::bounded::<plugin::chain::GraphCommand>(64);
-    let (return_tx, return_rx) = crossbeam_channel::bounded::<Box<dyn plugin::Plugin>>(16);
-
-    // Shared "currently held notes" state — populated by both the hardware MIDI
-    // thread and the virtual piano, read by the TUI Piano tab.
-    let held = std::sync::Arc::new(held_notes::HeldNotes::new());
-
-    // Shared piano-tab filter: current scale + Highlight/Locked mode. Read by
-    // both senders to drop off-scale notes when locked; written by the TUI.
-    let piano_initial_scale = config
-        .piano
-        .as_ref()
-        .and_then(|p| p.scale.as_deref().and_then(scale::ScaleSetting::parse))
-        .unwrap_or_default();
-    let piano_initial_mode = if config.piano.as_ref().is_some_and(|p| p.locked) {
-        piano_filter::PianoMode::Locked
-    } else {
-        piano_filter::PianoMode::Highlight
-    };
-    let piano_filter = std::sync::Arc::new(piano_filter::PianoFilter::new(
-        piano_initial_scale,
-        piano_initial_mode,
-    ));
-
-    // Create empty audio graph (outputs silence until instruments are added)
-    let mut graph = plugin::chain::AudioGraph::new(plugin::chain::CHAIN_CHANNELS, cmd_rx, return_tx);
-
-    // Pattern recording completion channel
-    let (pattern_tx, pattern_rx) = crossbeam_channel::bounded::<plugin::chain::PatternNotification>(64);
-    graph.set_pattern_tx(pattern_tx.clone());
-    // MIDI-learn captures flow back to the TUI on this channel.
-    let (learn_tx, learn_rx) =
-        crossbeam_channel::bounded::<plugin::chain::MidiLearnedNotification>(64);
-    graph.set_learn_tx(learn_tx);
-    // Give the audio thread the live piano scale for in-key pattern transposition.
-    graph.set_piano_filter(piano_filter.clone());
-    // And the cells it publishes its measurements in (meters, for now).
-    let telemetry = std::sync::Arc::new(telemetry::Telemetry::new());
-    graph.set_telemetry(telemetry.clone());
+    // The channels between the audio thread and the rest, and what they share (the held notes, the Piano tab's filter, the meters).
+    let app::wiring::Wiring { graph, midi_rx, handles } = app::wiring::Wiring::new(config.piano.as_ref(), sample_rate_f, max_block_size, runtime, debug);
 
     // Start MIDI input
     if let Some(sp) = &splash {
         sp.status("Opening MIDI inputs…");
     }
-    // Live incoming-MIDI monitor for `--debug` (a no-op when disabled).
-    let midi_monitor = std::sync::Arc::new(midi_monitor::MidiMonitor::new(debug));
-    let notes = note_input::NoteInput::new(midi_tx.clone(), held.clone(), piano_filter.clone());
-    let mut midi_mgr = midi::MidiManager::new(notes, midi_device, midi_monitor.clone());
+    // (The live incoming-MIDI monitor of `--debug` is a no-op when it is disabled.)
+    let notes = note_input::NoteInput::new(handles.midi_tx.clone(), handles.held.clone(), handles.piano_filter.clone());
+    let mut midi_mgr = midi::MidiManager::new(notes, midi_device, handles.midi_monitor.clone());
     // A server may well be somewhere with no MIDI at all (a container, CI): the
     // browser's keyboard still plays, and nobody should be warned about it every second.
     let midi_available = match midi_mgr.open_ports() {
@@ -513,8 +473,8 @@ fn run_session(
         session_dir,
         sample_rate_f,
         max_block_size,
-        &runtime,
-        &cmd_tx,
+        &handles.runtime,
+        &handles.cmd_tx,
         &mut |p| {
             if let Some(sp) = &splash {
                 match p {
@@ -537,22 +497,7 @@ fn run_session(
     // being plugged in, in both the TUI and `play`.
     let mut ctl = app::controller::Controller::new(
         model,
-        app::controller::EngineHandles {
-            cmd_tx,
-            midi_tx,
-            return_rx,
-            pattern_rx,
-            learn_rx,
-            runtime,
-            sample_rate: sample_rate_f,
-            max_block_size,
-            held,
-            piano_filter,
-            midi_monitor,
-            telemetry,
-            // (The audio thread takes a command within a block or two, 5 to 20 ms: this is for one that is stalled, which an undo then does without.)
-            recovery_wait: std::time::Duration::from_millis(250),
-        },
+        handles,
         Some(source.clone()),
     );
     // The library of modules (step 104): chains of effects that are saved in files, which every session can add. Where it is can be said (`TANG_MODULES_DIR`: the tests of the real program say it).
