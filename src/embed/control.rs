@@ -297,7 +297,7 @@ mod tests {
         let infos = sounds.infos();
         assert_eq!(infos.iter().map(|library| (library.id.as_str(), library.label.as_str(), library.place.as_str())).collect::<Vec<_>>(), [
             ("sessions", "Saved sessions", sessions.to_str().unwrap()),
-            ("folder1", "Mine", Path::new("/home/me/mine").to_str().unwrap()),
+            ("folder1", "Mine", Path::new("/home/me").join("mine").to_str().unwrap()),
             ("folder2", "where", Path::new("/else/where").to_str().unwrap()),
         ]);
         assert!(sounds_in(None, None, None).is_empty(), "no config directory, and no folder for sessions: no library");

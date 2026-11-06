@@ -1,6 +1,9 @@
 //! The plugin's window: a window of the host's with the page in a web view (the size that the host negotiates is tried here; the web view itself is tried with a real window, `tang window Tang.clap`), or, for a host that asks for a floating window, the page of this instance, opened in the browser that the person has. A test of its own, because it says which program opens the page by
 //! an environment variable (`TANG_BROWSER`), which no other test of the process should see.
 
+// (Linux has no window of the plugin's, so the tests below that put one on a screen are not there, and what only they use is dead code and an unused import there.)
+#![cfg_attr(not(any(windows, target_os = "macos")), expect(dead_code, unused_imports, reason = "only the tests of a window on a screen use them, and Linux has none"))]
+
 mod common;
 
 use std::io::{Read, Write};
