@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { createConnection, engineFor, MOCK_INPUTS, sceneFor } from "./engine";
+import { createConnection, engineFor, MOCK_INPUTS, MOCK_LIBRARIES, opensFor, sceneFor } from "./engine";
 
 describe("which scene a page asks of the mock", () => {
   test("is the tracer, unless it asks for the stress scene, the two lanes or the group", () => {
@@ -148,7 +148,7 @@ describe("the connection of a page", () => {
     if (!socket) return;
     socket.readyState = FakeSocket.OPEN;
     socket.onopen?.();
-    socket.onmessage?.({ data: JSON.stringify({ type: "hello", protocol: 1, rev: 0, features: [], needsToken: true }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "hello", protocol: 1, rev: 0, features: [], needsToken: true, libraries: [] }) });
     // (It also asks for the telemetry that the views draw: the levels, what the modulators do, and the keys that are held.)
     expect(socket.sent.map((text) => JSON.parse(text) as unknown)).toEqual([
       { type: "auth", token: "0123abcd" },
@@ -164,5 +164,35 @@ describe("the connection of a page", () => {
     client.start();
     expect(FakeSocket.instances).toHaveLength(0);
     client.stop();
+  });
+});
+
+describe("the libraries of sounds of the mock (step 116)", () => {
+  const at = { protocol: "http:", host: "localhost:5173", hash: "" };
+
+  test("are asked for by an address that says `open=1`, and by nothing else", () => {
+    expect(opensFor("?engine=mock&open=1")).toBe(true);
+    expect(opensFor("?open=1&engine=mock")).toBe(true);
+    for (const search of ["", "?engine=mock", "?engine=mock&open=0", "?engine=mock&open=yes", "?engine=mock&open="]) expect(opensFor(search), search).toBe(false);
+  });
+
+  test("are in the hello of a mock that is asked for them, with the program able to open a session, and in none that is not", async () => {
+    const asked = createConnection({ ...at, search: "?engine=mock&open=1" }).client;
+    const plain = createConnection({ ...at, search: "?engine=mock" }).client;
+    asked.start();
+    plain.start();
+    await vi.waitFor(() => {
+      expect(asked.state.status).toBe("open");
+      expect(plain.state.status).toBe("open");
+    });
+    expect(asked.state.hello?.features).toContain("openSession");
+    expect(asked.state.hello?.libraries.map((library) => library.id)).toEqual(MOCK_LIBRARIES.map((library) => library.id));
+    expect(plain.state.hello?.features).not.toContain("openSession");
+    expect(plain.state.hello?.libraries).toEqual([]);
+    const listing = await asked.listSounds("folder1");
+    expect(listing.entries.length, "longer than the picker is tall").toBeGreaterThan(10);
+    expect(listing.entries.some((entry) => !entry.openable), "and one of them is not a session").toBe(true);
+    asked.stop();
+    plain.stop();
   });
 });

@@ -8,7 +8,7 @@ import { createStore } from "zustand/vanilla";
 import type { StoreApi } from "zustand/vanilla";
 
 import { PROTOCOL } from "../protocol";
-import type { CatalogEntry, ClientMessage, ErrorCode, Intent, NodeId, ServerMessage, Snapshot, TelemetryChannel, WireError } from "../protocol";
+import type { CatalogEntry, ClientMessage, ErrorCode, Intent, NodeId, ServerMessage, Snapshot, SoundEntry, SoundLibrary, TelemetryChannel, WireError } from "../protocol";
 import { NO_HISTORY } from "./history";
 import type { HistoryState } from "./history";
 import { applyEvent } from "./reducers";
@@ -52,6 +52,16 @@ export interface Hello {
   rev: number;
   features: readonly string[];
   needsToken: boolean;
+  /** The libraries of sounds that the server has, which `listSounds` lists and `openSound` opens a sound of, in the order to show them (step 116); none for a program that cannot open another session. */
+  libraries: readonly SoundLibrary[];
+}
+
+/** What a library has, as the server last said (`Client.listSounds`). */
+export interface SoundListing {
+  /** Newest first. */
+  entries: readonly SoundEntry[];
+  /** The library has more than it lists. */
+  truncated: boolean;
 }
 
 /** The plugins that can be added to the session, as far as the server has found them. */
@@ -122,14 +132,23 @@ export const SLOW_AFTER = 400;
 /** What the server says before it closes a connection, when it is not worth trying again. */
 const FINAL: readonly ErrorCode[] = ["unauthorized", "badRequest"];
 
+/** What a server's answer to a request is: the revision of the session that an intent or a sound that was opened brought about, or the sounds that a library has. */
+type Answer = { type: "ack"; rev: number } | ({ type: "sounds" } & SoundListing);
+
 interface Pending {
-  resolve: (rev: number) => void;
+  resolve: (answer: Answer) => void;
   reject: (error: RequestError) => void;
   /** Says that it is slow, if it has not been answered by then. */
   timer: ReturnType<typeof setTimeout> | undefined;
   /** Whether it has been told to be slow (and is in the count). */
   slow: boolean;
 }
+
+/** The revision that an answer carries, if it is an acknowledgement. */
+const acknowledged = (answer: Answer): number | undefined => (answer.type === "ack" ? answer.rev : undefined);
+
+/** The listing that an answer carries, if it is one. */
+const listed = (answer: Answer): SoundListing | undefined => (answer.type === "sounds" ? { entries: answer.entries, truncated: answer.truncated } : undefined);
 
 export class Client {
   readonly store: StoreApi<ClientState> = createStore<ClientState>(() => ({
@@ -204,17 +223,43 @@ export class Client {
    * server refused it or the connection went first.
    */
   request(intent: Intent): Promise<number> {
+    return this.#ask((reqId) => ({ type: "request", reqId, intent }), acknowledged);
+  }
+
+  /**
+   * Ask what the library `library` (one that the hello lists) has (step 116): resolves with its sounds, newest first, once the server has answered (a library that is far away takes its time); rejects with a `RequestError` if the
+   * server could not list it (a folder that is gone, a server that does not answer) or the connection went first. It is no change of the session: it is not an intent.
+   */
+  listSounds(library: string): Promise<SoundListing> {
+    return this.#ask((reqId) => ({ type: "listSounds", reqId, library }), listed);
+  }
+
+  /**
+   * Open the sound `id` of `library` in place of the session (step 116): the server reads it (or fetches it) and goes on as `request` does with an `openSession` intent. Resolves with the revision that it used, rejects with a
+   * `RequestError` if the server refused it (the sound is gone, is not a session, the program cannot open another session) or the connection went first.
+   */
+  openSound(library: string, id: string): Promise<number> {
+    return this.#ask((reqId) => ({ type: "openSound", reqId, library, id }), acknowledged);
+  }
+
+  /** Send the message that `build` makes of a request id, and wait for the answer to it, which `take` makes the result of (or `undefined` if it is not one that the message gets). */
+  #ask<T>(build: (reqId: number) => ClientMessage, take: (answer: Answer) => T | undefined): Promise<T> {
     if (!this.#live) return Promise.reject(new RequestError("Not connected to the server.", null));
     const reqId = this.#nextRequest;
     this.#nextRequest = (this.#nextRequest + 1) >>> 0 || 1;
-    return new Promise<number>((resolve, reject) => {
-      const pending: Pending = { resolve, reject, timer: undefined, slow: false };
+    return new Promise<T>((resolve, reject) => {
+      const answered = (answer: Answer): void => {
+        const result = take(answer);
+        if (result === undefined) reject(new RequestError("The server answered with something this page did not ask for.", null));
+        else resolve(result);
+      };
+      const pending: Pending = { resolve: answered, reject, timer: undefined, slow: false };
       pending.timer = setTimeout(() => {
         pending.slow = true;
         this.#slowBy(1);
       }, this.#options.slowAfter ?? SLOW_AFTER);
       this.#pending.set(reqId, pending);
-      this.#send({ type: "request", reqId, intent });
+      this.#send(build(reqId));
     });
   }
 
@@ -388,7 +433,12 @@ export class Client {
       }
       case "ack":
         this.#settle(message.reqId, (pending) => {
-          pending.resolve(message.rev);
+          pending.resolve({ type: "ack", rev: message.rev });
+        });
+        break;
+      case "sounds":
+        this.#settle(message.reqId, (pending) => {
+          pending.resolve({ type: "sounds", entries: message.entries, truncated: message.truncated });
         });
         break;
       case "rejected":
@@ -403,7 +453,7 @@ export class Client {
   }
 
   #onHello(hello: Hello): void {
-    this.#set({ hello: { protocol: hello.protocol, rev: hello.rev, features: hello.features, needsToken: hello.needsToken } });
+    this.#set({ hello: { protocol: hello.protocol, rev: hello.rev, features: hello.features, needsToken: hello.needsToken, libraries: hello.libraries } });
     if (hello.protocol !== PROTOCOL) {
       this.#giveUp(
         `This page speaks protocol ${PROTOCOL} and the server speaks ${hello.protocol}: the page and the program are not from the same build.`,

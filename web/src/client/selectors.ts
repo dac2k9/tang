@@ -1,7 +1,7 @@
 // Reading the session in the client's store: the parts of it a view shows, found by the id of
 // the node they are of. Pure, on the state, so that a view can hand one to a store hook.
 import { WAVEFORMS } from "../protocol";
-import type { EdgeId, Gain, ModulatorField, Node, NodeId, NoteRange, Param, PatternInfo, Preset } from "../protocol";
+import type { EdgeId, Gain, ModulatorField, Node, NodeId, NoteRange, Param, PatternInfo, Preset, SoundLibrary } from "../protocol";
 import type { ClientState } from "./connection";
 import type { Stages } from "./envelope";
 import { audibleOf, ownAudibleOf } from "./audible";
@@ -113,6 +113,14 @@ export function hasWindowOf(state: ClientState, id: NodeId): boolean {
  */
 export function canOpenSession(state: ClientState): boolean {
   return state.hello?.features.includes("openSession") ?? false;
+}
+
+/** What `soundLibraries` says when there are none: one array, so that a view that reads it is not told of a change each time. */
+const NO_LIBRARIES: readonly SoundLibrary[] = [];
+
+/** The libraries of sounds that the server says it has (step 116), in the order to show them: a program that can open another session and has folders of sounds to list. None before the hello. */
+export function soundLibraries(state: ClientState): readonly SoundLibrary[] {
+  return state.hello?.libraries ?? NO_LIBRARIES;
 }
 
 /** Whether two answers of `paramListOf` are the same list of the same plugin. */

@@ -42,6 +42,9 @@ pub(super) enum Request {
 pub(super) struct Owner {
     pub requests: Sender<Request>,
     pub wake: Arc<dyn Fn() + Send + Sync>,
+    /// The libraries of sounds that the page lists (step 116): the person's own (`standard_sounds`) if none is given, which a test does.
+    #[cfg(feature = "web")]
+    pub sounds: Option<Arc<crate::app::sounds::Sounds>>,
 }
 
 /// What the thread is started with.
@@ -132,11 +135,13 @@ pub(super) fn run(setup: Setup, audio: Sender<(AudioGraph, Receiver<MidiEvent>)>
             return;
         }
     };
+    #[cfg(feature = "web")]
+    let sounds = owner.sounds.clone().unwrap_or_else(standard_sounds);
     let mut ctl = embedded(model, handles, owner);
 
     #[cfg(feature = "web")]
     if serve {
-        match serve_session(&mut ctl, &started, &control, bind) {
+        match serve_session(&mut ctl, &started, &control, bind, sounds) {
             Ok(()) => {
                 ctl.shutdown();
                 return;
@@ -157,7 +162,7 @@ pub(super) fn run(setup: Setup, audio: Sender<(AudioGraph, Receiver<MidiEvent>)>
 /// again by the host's main thread, as it is for a project that the host opens, so the controller hands the text over and has the main thread called back).
 fn embedded(model: crate::app::model::SessionModel, handles: crate::app::controller::EngineHandles, owner: Owner) -> Controller {
     let mut ctl = Controller::new(model, handles, None);
-    let Owner { requests, wake } = owner;
+    let Owner { requests, wake, .. } = owner;
     ctl.open_session = Some(Box::new(move |text| {
         requests.send(Request::OpenSession(text)).map_err(|_| "the plugin that holds this session has stopped".to_string())?;
         wake();
@@ -170,6 +175,29 @@ fn embedded(model: crate::app::model::SessionModel, handles: crate::app::control
     ctl.window_check = no_windows;
     ctl.watch_devices(Box::new(HostDevice));
     ctl
+}
+
+/// The libraries of sounds that a person has (step 116): the folder that sessions are saved to, and the folders that `config.toml` names (`[[sounds.folder]]`), which a plugin reads for itself (the command line reads the file once,
+/// and a plugin does not come through it). A machine that has no config directory has neither: no library, and the page opens a file by its own chooser alone.
+#[cfg(feature = "web")]
+fn standard_sounds() -> Arc<crate::app::sounds::Sounds> {
+    let var = |name: &str| std::env::var_os(name);
+    let config = crate::dirs_config().ok();
+    Arc::new(sounds_in(config.as_deref(), crate::dirs_config_sessions().ok(), home_from(&var).as_deref()))
+}
+
+/// The libraries of sounds of a person whose config directory is `config` (the folders that its file names, a `~` in them being `home`) and whose sessions are saved to `sessions`.
+#[cfg(feature = "web")]
+fn sounds_in(config: Option<&Path>, sessions: Option<std::path::PathBuf>, home: Option<&Path>) -> crate::app::sounds::Sounds {
+    let folders = config.map(|dir| crate::config::read_sound_folders(dir, home)).unwrap_or_default();
+    crate::app::sounds::Sounds::standard(sessions, folders)
+}
+
+/// The home that a `~` in the config file is, given the environment (`var`): `HOME`, and where that is not set (a program that a DAW runs on Windows has none) `USERPROFILE`. An empty variable is not set.
+#[cfg(feature = "web")]
+fn home_from(var: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    set("HOME").or_else(|| set("USERPROFILE")).map(std::path::PathBuf::from)
 }
 
 /// The session as text, and whether it was changed, for `Control::Session`.
@@ -198,11 +226,13 @@ fn run_quietly(ctl: &mut Controller, control: &Receiver<Control>) {
 /// Serve the session of `ctl` to browsers on a port that the system picks (on this machine only: there is no token), say where (`started`), and answer what the browsers and the host ask until the host says to stop. The scan of the
 /// installed plugins loads every one of them, which is not safe in a host's process (`should_scan`): it starts when the first browser has come, and only if `TANG_SCAN` is set.
 #[cfg(feature = "web")]
-fn serve_session(ctl: &mut Controller, started: &Sender<Result<Started, String>>, control: &Receiver<Control>, bind: std::net::SocketAddr) -> anyhow::Result<()> {
+fn serve_session(ctl: &mut Controller, started: &Sender<Result<Started, String>>, control: &Receiver<Control>, bind: std::net::SocketAddr, sounds: Arc<crate::app::sounds::Sounds>) -> anyhow::Result<()> {
     use crate::web::runtime::Runtime;
     use crate::web::server::Config;
 
-    let mut runtime = Runtime::start(ctl, Config::new(bind))?;
+    let mut config = Config::new(bind);
+    config.sounds = Some(sounds);
+    let mut runtime = Runtime::start(ctl, config)?;
     log::info!("Web interface: {}", runtime.url());
     let _ = started.send(Ok(Started { url: Some(runtime.url()) }));
 
@@ -254,7 +284,37 @@ mod tests {
             }
             counter.fetch_add(1, Ordering::SeqCst);
         };
-        (Owner { requests, wake: Arc::new(wake) }, asked, woken, found)
+        (Owner { requests, wake: Arc::new(wake), #[cfg(feature = "web")] sounds: None }, asked, woken, found)
+    }
+
+    #[cfg(feature = "web")]
+    #[test]
+    fn the_libraries_of_a_person_are_the_folder_of_saved_sessions_and_the_folders_of_the_config_file_with_the_home_in_a_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[[sounds.folder]]\nname = \"Mine\"\npath = \"~/mine\"\n[[sounds.folder]]\npath = \"/else/where\"\n").unwrap();
+        let sessions = dir.path().join("sessions");
+        let sounds = sounds_in(Some(dir.path()), Some(sessions.clone()), Some(Path::new("/home/me")));
+        let infos = sounds.infos();
+        assert_eq!(infos.iter().map(|library| (library.id.as_str(), library.label.as_str(), library.place.as_str())).collect::<Vec<_>>(), [
+            ("sessions", "Saved sessions", sessions.to_str().unwrap()),
+            ("folder1", "Mine", Path::new("/home/me/mine").to_str().unwrap()),
+            ("folder2", "where", Path::new("/else/where").to_str().unwrap()),
+        ]);
+        assert!(sounds_in(None, None, None).is_empty(), "no config directory, and no folder for sessions: no library");
+        let only = sounds_in(Some(dir.path()), None, None);
+        assert_eq!(only.infos().len(), 2, "the folders of the file, and a `~` that has no home to go to is left as it is");
+        assert!(only.infos()[0].place.starts_with('~'), "{:?}", only.infos());
+    }
+
+    #[cfg(feature = "web")]
+    #[test]
+    fn the_home_is_home_and_where_it_is_not_set_or_is_empty_userprofile() {
+        let vars = |pairs: &'static [(&'static str, &'static str)]| move |name: &str| pairs.iter().find(|(key, _)| *key == name).map(|(_, value)| std::ffi::OsString::from(value));
+        assert_eq!(home_from(&vars(&[("HOME", "/home/me"), ("USERPROFILE", "C:\\Users\\me")])), Some(std::path::PathBuf::from("/home/me")));
+        assert_eq!(home_from(&vars(&[("USERPROFILE", "C:\\Users\\me")])), Some(std::path::PathBuf::from("C:\\Users\\me")));
+        assert_eq!(home_from(&vars(&[("HOME", ""), ("USERPROFILE", "C:\\Users\\me")])), Some(std::path::PathBuf::from("C:\\Users\\me")), "an empty one is not set");
+        assert_eq!(home_from(&vars(&[("HOME", ""), ("USERPROFILE", "")])), None);
+        assert_eq!(home_from(&vars(&[])), None);
     }
 
     #[test]
@@ -280,9 +340,14 @@ mod tests {
         drop(queue);
         let woken = Arc::new(AtomicUsize::new(0));
         let counter = woken.clone();
-        let owner = Owner { requests, wake: Arc::new(move || {
+        let owner = Owner {
+            requests,
+            wake: Arc::new(move || {
                 counter.fetch_add(1, Ordering::SeqCst);
-            }) };
+            }),
+            #[cfg(feature = "web")]
+            sounds: None,
+        };
         let mut ctl = embedded(crate::app::testutil::load("[[instrument]]\nplugin = \"builtin:osc\"\n").model, handles, owner);
         let refused = ctl.apply(Intent::OpenSession { text: "[[instrument]]\nplugin = \"builtin:osc\"\n".to_string() });
         assert_eq!(refused, Err(IntentError::Invalid("the plugin that holds this session has stopped".to_string())));

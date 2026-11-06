@@ -12,6 +12,7 @@ import type {
   Edge,
   EdgeId,
   Endpoint,
+  ErrorCode,
   Event,
   Feed,
   Gain,
@@ -31,6 +32,8 @@ import type {
   Route,
   ServerMessage,
   Snapshot,
+  SoundEntry,
+  SoundLibrary,
   SourceInfo,
   StampedEvent,
   TelemetryChannel,
@@ -85,6 +88,18 @@ export interface MockOptions {
   windows?: boolean;
   /** Whether it says that its program can open another session while it runs (`openSession` among what `hello` says it can do), as a plugin in a host does: it takes the session, and is as it was (the real one makes its engine again, and the page is served by that: not by this). Not by default. */
   openSession?: boolean;
+  /** The libraries of sounds it says it has (`libraries` in what `hello` says), which a page lists and opens a sound of, each with the sounds it lists or why it cannot (step 116). None by default. */
+  libraries?: readonly MockLibrary[];
+}
+
+/** A library of sounds as the mock has one: what `hello` says of it, and what it lists. */
+export interface MockLibrary extends SoundLibrary {
+  /** The sounds it lists, newest first (none by default). */
+  entries?: readonly SoundEntry[];
+  /** It lists more than it says. */
+  truncated?: boolean;
+  /** Why it cannot be listed, as the server says it (a folder that is gone): every listing is refused with it. */
+  fails?: string;
 }
 
 /**
@@ -1972,6 +1987,7 @@ export class MockServer {
       rev: this.#snapshot.rev,
       features: ["notes", "telemetry", ...(this.#options.windows === true ? ["windows"] : []), ...(this.#options.openSession === true ? ["openSession"] : [])],
       needsToken: this.#options.token !== undefined,
+      libraries: (this.#options.libraries ?? []).map(({ id, label, place }) => ({ id, label, place })),
     };
   }
 
@@ -2058,6 +2074,30 @@ export class MockServer {
           // (The events are told before the answer, and so is the snapshot that tells a change of structure, and what can be undone now.)
           this.#tellHistory();
           connection.tell({ type: "ack", reqId: message.reqId, rev: done.rev });
+        }
+        break;
+      }
+      case "listSounds": {
+        const library = this.#options.libraries?.find((each) => each.id === message.library);
+        if (library === undefined) connection.tell({ type: "rejected", reqId: message.reqId, error: { code: "notFound", message: `there is no library of sounds called ${JSON.stringify(message.library)}` } });
+        else if (library.fails !== undefined) connection.tell({ type: "rejected", reqId: message.reqId, error: { code: "notFound", message: library.fails } });
+        else connection.tell({ type: "sounds", reqId: message.reqId, library: library.id, entries: [...(library.entries ?? [])], truncated: library.truncated === true });
+        break;
+      }
+      // (As an `openSession`: the session is taken and is as it was, since the real one makes its engine again and the page is served by that.)
+      case "openSound": {
+        const refuse = (code: ErrorCode, text: string): void => {
+          connection.tell({ type: "rejected", reqId: message.reqId, error: { code, message: text } });
+        };
+        const library = this.#options.libraries?.find((each) => each.id === message.library);
+        const entry = library?.entries?.find((each) => each.id === message.id);
+        if (this.#options.openSession !== true || library === undefined) refuse("invalid", "this program cannot open another session while it runs: start it with the file");
+        else if (entry === undefined) refuse("notFound", `there is no sound ${JSON.stringify(message.id)} in this library any more`);
+        else if (!entry.openable) refuse("invalid", `that is not a session: ${entry.detail}`);
+        else {
+          const rev = this.#snapshot.rev + 1;
+          this.#snapshot = { ...this.#snapshot, rev };
+          connection.tell({ type: "ack", reqId: message.reqId, rev });
         }
         break;
       }

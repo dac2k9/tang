@@ -23,6 +23,7 @@ use crate::app::intent::{Intent, IntentError, StampedEvent};
 use crate::app::layout::TelemetryLayout;
 use crate::app::model::NodeId;
 use crate::app::snapshot::Snapshot;
+use crate::app::sounds::{SoundEntry, SoundLibrary};
 
 /// The version of the protocol, in `Hello`: it goes up when a message changes in a
 /// way an old client cannot read, and a client refuses a server that says another.
@@ -45,6 +46,12 @@ pub enum ClientMessage {
     Probes { nodes: Vec<NodeId> },
     /// Apply an intent; the answer (`Ack` or `Rejected`) carries `req_id`.
     Request { req_id: u32, intent: Intent },
+    /// What the library `library` (one of those the hello lists) has: the answer is `Sounds`, or `Rejected` with the reason (a folder that is gone, a server that does not answer). It is not an intent: it changes nothing in
+    /// the session, and a library that is far away can take its time.
+    ListSounds { req_id: u32, library: String },
+    /// Open the sound `id` of `library` in place of the session, as `Intent::OpenSession` does with the text of a file that the page read: the server reads it (or downloads it) and goes on as for that intent, and the answer
+    /// (`Ack` or `Rejected`) carries `req_id`. Only for a program that can open another session (the hello says `openSession`).
+    OpenSound { req_id: u32, library: String, id: String },
     /// A note, straight to the audio thread (it does not pass the controller).
     NoteOn { note: u8, velocity: u8 },
     NoteOff { note: u8 },
@@ -69,6 +76,8 @@ pub enum ServerMessage {
         features: Vec<String>,
         /// The next message must be `Auth`.
         needs_token: bool,
+        /// The libraries of sounds that the program has, which a client can list (`ListSounds`) and open a sound of (`OpenSound`), in the order to show them (step 116); none for a program that cannot open another session.
+        libraries: Vec<SoundLibrary>,
     },
     /// The answer to `Subscribe`: where to start from.
     Snapshot { snapshot: Snapshot },
@@ -93,6 +102,8 @@ pub enum ServerMessage {
     /// again whenever the list changes (a device is plugged in or pulled out); it replaces what the client had. It is not part of the session (a session names devices that are not
     /// plugged in too), and a program that has no MIDI subsystem tells an empty list.
     Inputs { names: Vec<String> },
+    /// The answer to `ListSounds` `req_id`: what `library` has, newest first; `truncated` when it has more than it lists.
+    Sounds { req_id: u32, library: String, entries: Vec<SoundEntry>, truncated: bool },
     /// The intent of the request `req_id` was applied; the session is at `rev`.
     Ack { req_id: u32, rev: u64 },
     /// The intent of the request `req_id` was not applied.
@@ -245,6 +256,11 @@ mod message_tests {
             ),
             (ClientMessage::Probes { nodes: vec![NodeId(3), NodeId(9)] }, json!({"type": "probes", "nodes": [3, 9]})),
             (ClientMessage::Probes { nodes: vec![] }, json!({"type": "probes", "nodes": []})),
+            (ClientMessage::ListSounds { req_id: 3, library: "sessions".to_string() }, json!({"type": "listSounds", "reqId": 3, "library": "sessions"})),
+            (
+                ClientMessage::OpenSound { req_id: 4, library: "folder1".to_string(), id: "drums/kick.toml".to_string() },
+                json!({"type": "openSound", "reqId": 4, "library": "folder1", "id": "drums/kick.toml"}),
+            ),
             (ClientMessage::NoteOn { note: 60, velocity: 100 }, json!({"type": "noteOn", "note": 60, "velocity": 100})),
             (ClientMessage::NoteOff { note: 60 }, json!({"type": "noteOff", "note": 60})),
             (ClientMessage::Panic, json!({"type": "panic"})),
@@ -272,6 +288,11 @@ mod message_tests {
             ("a channel that does not exist", json!({"type": "telemetry", "channels": ["spectrum"]})),
             ("probes of nodes that are not numbers", json!({"type": "probes", "nodes": ["Filter"]})),
             ("probes with no nodes", json!({"type": "probes"})),
+            ("a listing of no library", json!({"type": "listSounds", "reqId": 1})),
+            ("a listing with no request id", json!({"type": "listSounds", "library": "sessions"})),
+            ("a sound with no id", json!({"type": "openSound", "reqId": 1, "library": "sessions"})),
+            ("a sound of no library", json!({"type": "openSound", "reqId": 1, "id": "a.toml"})),
+            ("a sound that is a number", json!({"type": "openSound", "reqId": 1, "library": "sessions", "id": 7})),
         ];
         for (what, json) in bad {
             assert!(serde_json::from_value::<ClientMessage>(json).is_err(), "{what}");
@@ -283,8 +304,39 @@ mod message_tests {
         let event = StampedEvent { rev: 9, event: Event::ParamSet { node: NodeId(3), param: 2, value: 0.5 } };
         let cases = vec![
             (
-                ServerMessage::Hello { protocol: PROTOCOL, rev: 4, features: vec!["notes".to_string()], needs_token: true },
-                json!({"type": "hello", "protocol": PROTOCOL, "rev": 4, "features": ["notes"], "needsToken": true}),
+                ServerMessage::Hello { protocol: PROTOCOL, rev: 4, features: vec!["notes".to_string()], needs_token: true, libraries: vec![] },
+                json!({"type": "hello", "protocol": PROTOCOL, "rev": 4, "features": ["notes"], "needsToken": true, "libraries": []}),
+            ),
+            (
+                ServerMessage::Hello {
+                    protocol: PROTOCOL,
+                    rev: 4,
+                    features: vec!["notes".to_string(), "openSession".to_string()],
+                    needs_token: false,
+                    libraries: vec![SoundLibrary { id: "sessions".to_string(), label: "Saved sessions".to_string(), place: "/home/me/.config/tang/sessions".to_string() }],
+                },
+                json!({
+                    "type": "hello", "protocol": PROTOCOL, "rev": 4, "features": ["notes", "openSession"], "needsToken": false,
+                    "libraries": [{"id": "sessions", "label": "Saved sessions", "place": "/home/me/.config/tang/sessions"}],
+                }),
+            ),
+            (
+                ServerMessage::Sounds {
+                    req_id: 3,
+                    library: "sessions".to_string(),
+                    entries: vec![
+                        SoundEntry { id: "pad.toml".to_string(), name: "pad".to_string(), detail: "Helm · 1 effect".to_string(), openable: true, modified: Some(1_704_067_200) },
+                        SoundEntry { id: "broken.toml".to_string(), name: "broken".to_string(), detail: "not a session: expected an equals sign".to_string(), openable: false, modified: None },
+                    ],
+                    truncated: false,
+                },
+                json!({
+                    "type": "sounds", "reqId": 3, "library": "sessions", "truncated": false,
+                    "entries": [
+                        {"id": "pad.toml", "name": "pad", "detail": "Helm · 1 effect", "openable": true, "modified": 1_704_067_200},
+                        {"id": "broken.toml", "name": "broken", "detail": "not a session: expected an equals sign", "openable": false, "modified": null},
+                    ],
+                }),
             ),
             (
                 ServerMessage::Event { event },

@@ -842,7 +842,7 @@ describe("the menus of a module that is a box, and of the lanes of one that is o
 });
 
 describe("the menu of a plugin that has a window of its own (step 112)", () => {
-  const shows = { protocol: 1, rev: 0, features: ["notes", "telemetry", "windows"], needsToken: false };
+  const shows = { protocol: 1, rev: 0, features: ["notes", "telemetry", "windows"], needsToken: false, libraries: [] };
   /** The session with the oscillator's plugin saying that it has a window of its own (the delay's does not). */
   const windowed = (): Snapshot => {
     const copy = structuredClone(session);

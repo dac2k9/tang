@@ -4,7 +4,7 @@
 // to a plain request is what a person needs: the node that was made (the intent does not name it:
 // a client finds it in the session it is then given), and, when the server refuses, a notice that
 // says what could not be done and why, in the names the canvas shows.
-import type { EdgeId, Endpoint, Feed, Graph, Intent, ModulatorKind, NodeId, NodeUi, NoteRange, PatternField, Plugin, Port, Route, SourceInfo } from "../protocol";
+import type { EdgeId, Endpoint, Feed, Graph, Intent, ModulatorKind, NodeId, NodeUi, NoteRange, PatternField, Plugin, Port, Route, SoundEntry, SoundLibrary, SourceInfo } from "../protocol";
 import type { Client } from "./connection";
 import { isModulation } from "./cables";
 import { trimmed } from "./inputs";
@@ -281,6 +281,14 @@ export class Editor {
       return Promise.resolve(false);
     }
     return this.#attempt(what, { type: "openSession", text });
+  }
+
+  /**
+   * Open the sound `entry` of the library `library` in place of this session (step 116): the server reads it, or fetches it, and goes on as it does for the text of a file that a person picked (`openSession`: it is not undone, and a
+   * plugin's window follows the new session). True if it was taken (the page says why if it was not: the sound is gone, is not a session, the program cannot open another).
+   */
+  openSound(library: SoundLibrary, entry: SoundEntry): Promise<boolean> {
+    return this.#attemptTo(`open ${quoted(entry.name)} from ${quoted(library.label)}`, () => this.#client.openSound(library.id, entry.id));
   }
 
   /** The session in a file that a person picked (`openSession`): the file is read here, and a file that cannot be read is said among the notices. True if the session was taken. */
@@ -656,9 +664,14 @@ export class Editor {
   }
 
   /** Do the intent; if it is refused, or the connection fails, say so as a notice and return false. */
-  async #attempt(what: string, intent: Intent): Promise<boolean> {
+  #attempt(what: string, intent: Intent): Promise<boolean> {
+    return this.#attemptTo(what, () => this.#client.request(intent));
+  }
+
+  /** Do what `ask` asks of the server: true if it was done, and if it was not a notice says what could not be done and why. */
+  async #attemptTo(what: string, ask: () => Promise<unknown>): Promise<boolean> {
     try {
-      await this.#client.request(intent);
+      await ask();
       return true;
     } catch (error) {
       this.#notices.say(`Could not ${what}: ${whyNot(error)}`);

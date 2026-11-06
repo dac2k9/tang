@@ -165,13 +165,16 @@ pub struct Host {
     requests: (Sender<Request>, Receiver<Request>),
     /// What wakes the host's main thread up to look at `requests` (a plugin: `request_callback`, which may be called from any thread); the controller's thread calls it after it has put a request there.
     waker: Arc<dyn Fn() + Send + Sync>,
+    /// The libraries of sounds that the page lists, if this host is given some (a test); else the person's own.
+    #[cfg(feature = "web")]
+    sounds: Option<Arc<crate::app::sounds::Sounds>>,
 }
 
 impl Host {
     /// A plugin of this kind that is not running yet (`activate` starts it), which serves its session to browsers if `serve` (a build that has no web interface serves none).
     pub fn new(kind: Kind, serve: bool) -> Host {
         log_file::init();
-        Host { kind, serve, text: None, running: None, requests: crossbeam_channel::unbounded(), waker: Arc::new(|| {}) }
+        Host { kind, serve, text: None, running: None, requests: crossbeam_channel::unbounded(), waker: Arc::new(|| {}), #[cfg(feature = "web")] sounds: None }
     }
 
     pub fn kind(&self) -> Kind {
@@ -181,6 +184,12 @@ impl Host {
     /// Say how to wake the host's main thread when the page has something for it (a plugin: `request_callback`; what it does then is `serve_requests`). It is for the sessions that are started after this: set it before `activate`.
     pub fn set_waker(&mut self, waker: Arc<dyn Fn() + Send + Sync>) {
         self.waker = waker;
+    }
+
+    /// Give the page these libraries of sounds in place of the person's own (`standard_sounds`). It is for the sessions that are started after this: set it before `activate`.
+    #[cfg(all(test, feature = "web"))]
+    pub fn set_sounds(&mut self, sounds: Arc<crate::app::sounds::Sounds>) {
+        self.sounds = Some(sounds);
     }
 
     /// Do what the controller's thread has asked since the last look, on the host's main thread: the page opened another session, which is loaded as a project that the host opens is (`set_session_text`: the engine is made again,
@@ -283,7 +292,7 @@ impl Host {
 
     /// How a controller that this host starts reaches it.
     fn owner(&self) -> Owner {
-        Owner { requests: self.requests.0.clone(), wake: self.waker.clone() }
+        Owner { requests: self.requests.0.clone(), wake: self.waker.clone(), #[cfg(feature = "web")] sounds: self.sounds.clone() }
     }
 
     /// Where the page of this instance is, if the engine runs and serves one.
@@ -851,6 +860,57 @@ mod tests {
             let text = host.session_text().unwrap();
             assert!(text.contains("range = \"C4-C5\""), "the session is the one that was opened:\n{text}");
             assert!(!host.serve_requests(), "and a second look finds nothing");
+        }
+
+        /// A folder with a sound in it (`OTHER`), as the libraries that a plugin's page lists.
+        fn library_of_other() -> (Arc<crate::app::sounds::Sounds>, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("other.toml"), OTHER).unwrap();
+            let folder = crate::app::sounds::Folder::new("here", "Here", dir.path().to_path_buf());
+            (Arc::new(crate::app::sounds::Sounds::new(vec![Box::new(folder)])), dir)
+        }
+
+        #[tokio::test]
+        async fn a_page_that_opens_a_sound_of_a_library_has_the_host_make_the_engine_again_with_it() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let (sounds, _dir) = library_of_other();
+            let mut host = Host::new(Kind::Instrument, true);
+            host.set_sounds(sounds);
+            let woken = Arc::new(AtomicUsize::new(0));
+            let counter = woken.clone();
+            host.set_waker(Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }));
+            let _audio = host.activate(RATE, BLOCK as u32).unwrap();
+            let before = host.url().expect("served");
+            let (mut client, _, _) = subscribed(&host).await;
+            // (The hello of this page names the library: a connection of its own says it.)
+            let mut first = connect(address(&host)).await;
+            let hello = said(&mut first).await;
+            assert_eq!(hello["libraries"][0]["label"], json!("Here"), "{hello}");
+            drop(first);
+
+            tell(&mut client, json!({"type": "listSounds", "reqId": 4, "library": "here"})).await;
+            let listing = answer(&mut client, 4).await;
+            assert_eq!(listing["type"], "sounds", "{listing}");
+            assert_eq!((listing["entries"][0]["id"].as_str(), listing["entries"][0]["detail"].as_str()), (Some("other.toml"), Some("osc")));
+
+            tell(&mut client, json!({"type": "openSound", "reqId": 5, "library": "here", "id": "other.toml"})).await;
+            assert_eq!(answer(&mut client, 5).await["type"], "ack");
+            wait_until("the host is woken", || woken.load(Ordering::SeqCst) == 1).await;
+            assert!(host.serve_requests(), "the host made it again");
+            assert_ne!(host.url().expect("served"), before, "and the page is served again, at another address (a window follows it)");
+            assert!(host.session_text().unwrap().contains("range = \"C4-C5\""), "the session is the sound that was opened");
+        }
+
+        #[tokio::test]
+        async fn a_plugin_that_is_given_no_libraries_has_the_persons_own_which_may_be_none() {
+            // (No libraries given: the person's, which are the folder that sessions are saved to and the folders of the config file: on a machine that has neither, none, and the hello says so.)
+            let mut host = Host::new(Kind::Instrument, true);
+            let _audio = host.activate(RATE, BLOCK as u32).unwrap();
+            let mut client = connect(address(&host)).await;
+            let hello = said(&mut client).await;
+            assert!(hello["libraries"].is_array(), "{hello}");
         }
 
         #[tokio::test]

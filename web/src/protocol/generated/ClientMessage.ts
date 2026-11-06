@@ -6,4 +6,4 @@ import type { TelemetryChannel } from "./TelemetryChannel";
 /**
  * What a client sends, as a text frame of JSON.
  */
-export type ClientMessage = { "type": "auth", token: string, } | { "type": "subscribe" } | { "type": "telemetry", channels: Array<TelemetryChannel>, } | { "type": "probes", nodes: Array<NodeId>, } | { "type": "request", reqId: number, intent: Intent, } | { "type": "noteOn", note: number, velocity: number, } | { "type": "noteOff", note: number, } | { "type": "panic" };
+export type ClientMessage = { "type": "auth", token: string, } | { "type": "subscribe" } | { "type": "telemetry", channels: Array<TelemetryChannel>, } | { "type": "probes", nodes: Array<NodeId>, } | { "type": "request", reqId: number, intent: Intent, } | { "type": "listSounds", reqId: number, library: string, } | { "type": "openSound", reqId: number, library: string, id: string, } | { "type": "noteOn", note: number, velocity: number, } | { "type": "noteOff", note: number, } | { "type": "panic" };

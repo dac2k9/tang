@@ -25,6 +25,8 @@ if (typeof window !== "undefined") {
   Object.assign(globalThis, { ResizeObserver: ObserverOfSizes, DOMMatrixReadOnly: Matrix });
   // jsdom has no hit testing either: no element is under any point (a test that needs one says which).
   document.elementFromPoint = () => null;
+  // ...and nothing scrolls into view: the list of the picker brings the sound that an arrow went to into view, and jsdom has no such method.
+  window.Element.prototype.scrollIntoView = () => undefined;
   // ...and no canvas to draw on: it says so, loudly, for each canvas that asks. A canvas has no context here (a test of what is
   // drawn on one gives it a context of its own).
   window.HTMLCanvasElement.prototype.getContext = () => null;

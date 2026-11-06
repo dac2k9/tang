@@ -19,6 +19,7 @@ use crate::app::model::NodeId;
 use crate::app::protocol::{ClientMessage, ErrorCode, PROTOCOL, ServerMessage, WireError};
 use crate::note_input::{Delivery, NoteInput};
 use crate::web::Shared;
+use crate::web::desk::Desk;
 use crate::web::hub::{ClientId, Hub, Outgoing};
 use crate::web::security::Policy;
 
@@ -112,6 +113,8 @@ pub struct Context {
     pub windows: bool,
     /// Whether the program can open another session while it runs (`Config::open_session`): said in the hello.
     pub open_session: bool,
+    /// The desk that lists and fetches sounds, for a program that has libraries of them (step 116, `Config::sounds`): the hello lists them, and `ListSounds` and `OpenSound` are for it.
+    pub desk: Option<Desk>,
 }
 
 pub struct Connection {
@@ -123,6 +126,7 @@ pub struct Connection {
     notes: NoteInput,
     windows: bool,
     open_session: bool,
+    desk: Option<Desk>,
     state: State,
     /// The notes this connection has started and not ended, one bit each.
     held: u128,
@@ -131,9 +135,9 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(id: ClientId, context: Context, now: Instant) -> Connection {
-        let Context { hub, policy, shared, owner, notes, limits, windows, open_session } = context;
+        let Context { hub, policy, shared, owner, notes, limits, windows, open_session, desk } = context;
         let state = if policy.needs_token() { State::Unauthorized } else { State::Open };
-        Connection { id, hub, policy, shared, owner, notes, windows, open_session, state, held: 0, limiter: RateLimiter::new(limits, now) }
+        Connection { id, hub, policy, shared, owner, notes, windows, open_session, desk, state, held: 0, limiter: RateLimiter::new(limits, now) }
     }
 
     /// Whether the connection may go on without the token: it has none to give, or it
@@ -149,6 +153,7 @@ impl Connection {
             rev: self.shared.rev.load(Ordering::Relaxed),
             features: ["notes", "telemetry"].into_iter().chain(self.windows.then_some("windows")).chain(self.open_session.then_some("openSession")).map(String::from).collect(),
             needs_token: self.policy.needs_token(),
+            libraries: self.desk.as_ref().map(|desk| desk.libraries().to_vec()).unwrap_or_default(),
         });
     }
 
@@ -216,6 +221,30 @@ impl Connection {
                     self.reject(req_id, ErrorCode::RateLimited, "too many requests: slow down");
                 } else if !self.ask_owner(OwnerRequest::Apply { client: self.id, req_id, intent }) {
                     self.reject(req_id, ErrorCode::RateLimited, "the server is busy: try again");
+                }
+                Flow::Continue
+            }
+            ClientMessage::ListSounds { req_id, library } => {
+                if !self.limiter.allow(now) {
+                    self.reject(req_id, ErrorCode::RateLimited, "too many requests: slow down");
+                } else if let Some(desk) = &self.desk {
+                    if !desk.list(self.id, req_id, library) {
+                        self.reject(req_id, ErrorCode::RateLimited, "the server is busy: try again");
+                    }
+                } else {
+                    self.reject(req_id, ErrorCode::Invalid, "this program has no sounds to list");
+                }
+                Flow::Continue
+            }
+            ClientMessage::OpenSound { req_id, library, id } => {
+                if !self.limiter.allow(now) {
+                    self.reject(req_id, ErrorCode::RateLimited, "too many requests: slow down");
+                } else if let Some(desk) = self.desk.as_ref().filter(|_| self.open_session) {
+                    if !desk.open(self.id, req_id, library, id) {
+                        self.reject(req_id, ErrorCode::RateLimited, "the server is busy: try again");
+                    }
+                } else {
+                    self.reject(req_id, ErrorCode::Invalid, "this program cannot open another session while it runs: start it with the file");
                 }
                 Flow::Continue
             }
@@ -312,6 +341,8 @@ mod tests {
         id: ClientId,
         out: Receiver<Outgoing>,
         owner: crossbeam_channel::Receiver<OwnerRequest>,
+        /// The other end of `owner`, for a desk that hands it what a sound that is opened turns into.
+        owner_tx: Sender<OwnerRequest>,
         midi: crossbeam_channel::Receiver<MidiEvent>,
         hub: Arc<Hub>,
         filter: Arc<PianoFilter>,
@@ -329,9 +360,9 @@ mod tests {
         let notes = NoteInput::new(midi_tx, held.clone(), filter.clone());
         let t0 = Instant::now();
         let shared = Arc::new(Shared::new(7, SessionModel::default().telemetry_layout()));
-        let context = Context { hub: hub.clone(), policy: Arc::new(policy), shared, owner: owner_tx, notes, limits, windows: false, open_session: false };
+        let context = Context { hub: hub.clone(), policy: Arc::new(policy), shared, owner: owner_tx.clone(), notes, limits, windows: false, open_session: false, desk: None };
         let conn = Connection::new(id, context, t0);
-        Rig { conn, id, out, owner, midi, hub, filter, held, t0 }
+        Rig { conn, id, out, owner, owner_tx, midi, hub, filter, held, t0 }
     }
 
     fn open_policy() -> Policy {
@@ -369,6 +400,29 @@ mod tests {
             self.owner.try_iter().collect()
         }
 
+        /// Give the connection a desk over a folder that has the sound `pad.toml` in it, and the program the means to open a session: the thread of the desk, and the folder, which has to be kept.
+        fn with_desk(&mut self) -> (crate::web::desk::Worker, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("pad.toml"), "[[instrument]]\nplugin = \"builtin:osc\"\n").unwrap();
+            let sounds = crate::app::sounds::Sounds::new(vec![Box::new(crate::app::sounds::Folder::new("here", "Here", dir.path().to_path_buf()))]);
+            let (desk, worker) = Desk::start(Arc::new(sounds), self.hub.clone(), self.owner_tx.clone()).unwrap();
+            self.conn.desk = Some(desk);
+            self.conn.open_session = true;
+            (worker, dir)
+        }
+
+        /// What the connection is told, waiting a while for it (a desk is a thread).
+        fn said_soon(&mut self) -> Vec<Value> {
+            for _ in 0..500 {
+                let said = self.said();
+                if !said.is_empty() {
+                    return said;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Vec::new()
+        }
+
         fn played(&self) -> Vec<MidiEvent> {
             self.midi.try_iter().collect()
         }
@@ -386,7 +440,7 @@ mod tests {
         rig.conn.open();
         assert_eq!(
             rig.said(),
-            [json!({"type": "hello", "protocol": PROTOCOL, "rev": 7, "features": ["notes", "telemetry"], "needsToken": false})]
+            [json!({"type": "hello", "protocol": PROTOCOL, "rev": 7, "features": ["notes", "telemetry"], "needsToken": false, "libraries": []})]
         );
     }
 
@@ -397,7 +451,7 @@ mod tests {
         rig.conn.open();
         assert_eq!(
             rig.said(),
-            [json!({"type": "hello", "protocol": PROTOCOL, "rev": 7, "features": ["notes", "telemetry", "windows"], "needsToken": false})],
+            [json!({"type": "hello", "protocol": PROTOCOL, "rev": 7, "features": ["notes", "telemetry", "windows"], "needsToken": false, "libraries": []})],
             "after the others, so that a client that reads the first two reads them as it did"
         );
     }
@@ -715,6 +769,7 @@ mod tests {
             limits: Limits::default(),
             windows: false,
             open_session: false,
+            desk: None,
         };
         let mut conn = Connection::new(id, context, t0);
         conn.on_text(&json!({"type": "noteOn", "note": 60, "velocity": 100}).to_string(), t0);
@@ -796,6 +851,103 @@ mod tests {
         rig.conn.windows = true;
         rig.conn.open();
         assert_eq!(rig.said()[0]["features"], json!(["notes", "telemetry", "windows", "openSession"]), "after the others");
+    }
+
+    #[test]
+    fn hello_lists_the_libraries_of_sounds_that_the_program_has_in_the_order_it_has_them() {
+        let mut rig = rig();
+        let (mut worker, _dir) = rig.with_desk();
+        rig.conn.open();
+        let hello = rig.said().remove(0);
+        let libraries = hello["libraries"].as_array().unwrap();
+        assert_eq!(libraries.len(), 1);
+        assert_eq!((libraries[0]["id"].as_str(), libraries[0]["label"].as_str()), (Some("here"), Some("Here")));
+        assert!(libraries[0]["place"].as_str().unwrap().len() > 1, "{hello}");
+        rig.conn.desk = None;
+        drop(rig);
+        worker.join();
+    }
+
+    #[test]
+    fn a_listing_of_sounds_goes_to_the_desk_and_is_answered_by_it_under_the_requests_id() {
+        let mut rig = rig();
+        let (mut worker, _dir) = rig.with_desk();
+        assert_eq!(rig.send(json!({"type": "listSounds", "reqId": 12, "library": "here"})), Flow::Continue);
+        let said = rig.said_soon();
+        assert_eq!((said[0]["type"].as_str(), said[0]["reqId"].as_u64(), said[0]["library"].as_str()), (Some("sounds"), Some(12), Some("here")), "{said:?}");
+        assert_eq!(said[0]["entries"][0]["id"], json!("pad.toml"));
+        assert!(rig.asked().is_empty(), "the owner is not asked: a listing is no intent");
+        rig.conn.desk = None;
+        drop(rig);
+        worker.join();
+    }
+
+    #[test]
+    fn a_sound_that_is_opened_is_read_by_the_desk_and_the_owner_is_asked_to_open_it_as_a_session() {
+        let mut rig = rig();
+        let (mut worker, _dir) = rig.with_desk();
+        assert_eq!(rig.send(json!({"type": "openSound", "reqId": 13, "library": "here", "id": "pad.toml"})), Flow::Continue);
+        let asked = rig.owner.recv_timeout(Duration::from_secs(5)).expect("asked");
+        assert_eq!(asked, OwnerRequest::Apply { client: rig.id, req_id: 13, intent: Intent::OpenSession { text: "[[instrument]]\nplugin = \"builtin:osc\"\n".to_string() } });
+        rig.conn.desk = None;
+        drop(rig);
+        worker.join();
+    }
+
+    #[test]
+    fn a_program_that_has_no_libraries_has_no_sounds_to_list_or_open() {
+        let mut rig = rig();
+        rig.send(json!({"type": "listSounds", "reqId": 1, "library": "here"}));
+        rig.send(json!({"type": "openSound", "reqId": 2, "library": "here", "id": "pad.toml"}));
+        let said = rig.said();
+        assert_eq!(said.iter().map(|message| (message["type"].as_str().unwrap(), message["reqId"].as_u64().unwrap(), message["error"]["code"].as_str().unwrap())).collect::<Vec<_>>(), [("rejected", 1, "invalid"), ("rejected", 2, "invalid")]);
+        assert_eq!(said[0]["error"]["message"], json!("this program has no sounds to list"));
+        assert!(said[1]["error"]["message"].as_str().unwrap().starts_with("this program cannot open another session while it runs"), "{said:?}");
+        assert!(rig.asked().is_empty());
+    }
+
+    #[test]
+    fn a_program_that_cannot_open_another_session_does_not_open_a_sound_though_it_lists_them() {
+        let mut rig = rig();
+        let (mut worker, _dir) = rig.with_desk();
+        rig.conn.open_session = false;
+        rig.send(json!({"type": "openSound", "reqId": 3, "library": "here", "id": "pad.toml"}));
+        let said = rig.said();
+        assert_eq!((said[0]["type"].as_str(), said[0]["error"]["code"].as_str()), (Some("rejected"), Some("invalid")), "{said:?}");
+        assert!(rig.owner.recv_timeout(Duration::from_millis(100)).is_err(), "and the desk was not asked to read it");
+        rig.conn.desk = None;
+        drop(rig);
+        worker.join();
+    }
+
+    #[test]
+    fn the_messages_about_sounds_are_for_a_connection_that_has_been_let_in_and_are_counted_as_requests_are() {
+        let mut rig = rig_with(guarded_policy(), Limits::default(), 16);
+        assert_eq!(rig.send(json!({"type": "listSounds", "reqId": 1, "library": "here"})), Flow::Close, "before the token");
+        let mut rig = rig_with(open_policy(), Limits { burst: 2.0, per_second: 0.0 }, 16);
+        let (mut worker, _dir) = rig.with_desk();
+        rig.send(json!({"type": "listSounds", "reqId": 1, "library": "here"}));
+        rig.send(json!({"type": "openSound", "reqId": 2, "library": "here", "id": "pad.toml"}));
+        rig.send(json!({"type": "listSounds", "reqId": 3, "library": "here"}));
+        rig.send(json!({"type": "openSound", "reqId": 4, "library": "here", "id": "pad.toml"}));
+        let refused: Vec<(u64, String)> = rig.said_soon().iter().filter(|message| message["type"] == "rejected").map(|message| (message["reqId"].as_u64().unwrap(), message["error"]["code"].as_str().unwrap().to_string())).collect();
+        assert_eq!(refused, [(3, "rateLimited".to_string()), (4, "rateLimited".to_string())], "the third and the fourth, which the burst of two does not cover");
+        rig.conn.desk = None;
+        drop(rig);
+        worker.join();
+    }
+
+    #[test]
+    fn a_desk_that_takes_nothing_is_busy_for_a_listing_and_for_a_sound() {
+        let mut rig = rig();
+        rig.conn.desk = Some(Desk::stalled());
+        rig.conn.open_session = true;
+        rig.send(json!({"type": "listSounds", "reqId": 1, "library": "here"}));
+        rig.send(json!({"type": "openSound", "reqId": 2, "library": "here", "id": "pad.toml"}));
+        let said = rig.said();
+        assert_eq!(said.iter().map(|message| (message["type"].as_str().unwrap(), message["reqId"].as_u64().unwrap(), message["error"]["code"].as_str().unwrap())).collect::<Vec<_>>(), [("rejected", 1, "rateLimited"), ("rejected", 2, "rateLimited")]);
+        assert!(said.iter().all(|message| message["error"]["message"] == json!("the server is busy: try again")), "{said:?}");
+        assert!(rig.asked().is_empty());
     }
 
     #[test]

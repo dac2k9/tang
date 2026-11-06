@@ -2,6 +2,8 @@
 import type { CatalogEntry } from "./CatalogEntry";
 import type { NodeId } from "./NodeId";
 import type { Snapshot } from "./Snapshot";
+import type { SoundEntry } from "./SoundEntry";
+import type { SoundLibrary } from "./SoundLibrary";
 import type { StampedEvent } from "./StampedEvent";
 import type { TelemetryLayout } from "./TelemetryLayout";
 import type { WireError } from "./WireError";
@@ -26,4 +28,8 @@ features: Array<string>,
 /**
  * The next message must be `Auth`.
  */
-needsToken: boolean, } | { "type": "snapshot", snapshot: Snapshot, } | { "type": "event", event: StampedEvent, } | { "type": "layout", layout: TelemetryLayout, } | { "type": "catalog", rev: number, scanning: boolean, entries: Array<CatalogEntry>, } | { "type": "history", undo: string | null, redo: string | null, } | { "type": "probes", nodes: Array<NodeId>, } | { "type": "inputs", names: Array<string>, } | { "type": "ack", reqId: number, rev: number, } | { "type": "rejected", reqId: number, error: WireError, } | { "type": "closing", error: WireError, };
+needsToken: boolean, 
+/**
+ * The libraries of sounds that the program has, which a client can list (`ListSounds`) and open a sound of (`OpenSound`), in the order to show them (step 116); none for a program that cannot open another session.
+ */
+libraries: Array<SoundLibrary>, } | { "type": "snapshot", snapshot: Snapshot, } | { "type": "event", event: StampedEvent, } | { "type": "layout", layout: TelemetryLayout, } | { "type": "catalog", rev: number, scanning: boolean, entries: Array<CatalogEntry>, } | { "type": "history", undo: string | null, redo: string | null, } | { "type": "probes", nodes: Array<NodeId>, } | { "type": "inputs", names: Array<string>, } | { "type": "sounds", reqId: number, library: string, entries: Array<SoundEntry>, truncated: boolean, } | { "type": "ack", reqId: number, rev: number, } | { "type": "rejected", reqId: number, error: WireError, } | { "type": "closing", error: WireError, };

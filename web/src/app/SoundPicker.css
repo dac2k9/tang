@@ -1,0 +1,157 @@
+/* The picker of sounds (step 116), in the box of a dialog (Dialog.css): a bar with the search and the button of this computer's own chooser, the libraries one under the other (the list scrolls, the rest of the box does not), the
+   notices, what opening does, and the buttons. A sound is a row of its name, what is in it and the day it was last changed; the one that Enter opens is marked. */
+.tang-picker {
+  width: min(720px, 100%);
+  /* (A list that has the room of the window, and no more than a screenful of it.) */
+  height: min(560px, 100%);
+}
+
+.tang-picker__top {
+  display: flex;
+  gap: var(--tang-space-2);
+}
+
+.tang-picker__search {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 var(--tang-space-2);
+  border: 1px solid var(--tang-border);
+  border-radius: var(--tang-radius);
+  background: var(--tang-surface-raised);
+  color: var(--tang-text);
+  font: inherit;
+}
+
+.tang-picker__search:focus-visible {
+  outline: 2px solid var(--tang-scale);
+  outline-offset: 1px;
+}
+
+.tang-picker__libraries {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--tang-border);
+  border-radius: var(--tang-radius);
+  background: var(--tang-bg);
+}
+
+.tang-picker__library + .tang-picker__library {
+  border-top: 1px solid var(--tang-border);
+}
+
+.tang-picker__heading {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--tang-space-2);
+  margin: 0;
+  padding: var(--tang-space-1) var(--tang-space-3);
+  background: var(--tang-surface-raised);
+  font-size: var(--tang-text-small);
+  font-weight: 600;
+}
+
+.tang-picker__place {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tang-text-muted);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tang-picker__note {
+  margin: 0;
+  padding: var(--tang-space-2) var(--tang-space-3);
+  color: var(--tang-text-muted);
+  font-size: var(--tang-text-small);
+}
+
+.tang-picker__note--problem {
+  display: flex;
+  align-items: baseline;
+  gap: var(--tang-space-2);
+  color: var(--tang-danger);
+}
+
+.tang-picker__retry {
+  flex: none;
+  padding: 0 var(--tang-space-2);
+  border: 1px solid var(--tang-border);
+  border-radius: var(--tang-radius);
+  background: var(--tang-surface-raised);
+  color: var(--tang-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tang-picker__rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tang-picker__row {
+  display: grid;
+  grid-template-columns: minmax(8em, 1fr) minmax(0, 2fr) 6.5em;
+  align-items: baseline;
+  gap: var(--tang-space-3);
+  padding: var(--tang-space-1) var(--tang-space-3);
+  font-size: var(--tang-text-small);
+  cursor: pointer;
+}
+
+.tang-picker__row:hover {
+  background: var(--tang-surface);
+}
+
+.tang-picker__row--active,
+.tang-picker__row--active:hover {
+  background: var(--tang-surface-raised);
+  box-shadow: inset 3px 0 0 var(--tang-modulation);
+}
+
+.tang-picker__row--unavailable {
+  cursor: default;
+}
+
+.tang-picker__row--unavailable .tang-picker__name {
+  color: var(--tang-text-muted);
+}
+
+.tang-picker__row--unavailable .tang-picker__detail {
+  color: var(--tang-danger);
+}
+
+.tang-picker__name,
+.tang-picker__detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tang-picker__detail,
+.tang-picker__date {
+  color: var(--tang-text-muted);
+}
+
+.tang-picker__date {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tang-picker__warning {
+  margin: 0;
+  color: var(--tang-text-muted);
+  font-size: var(--tang-text-small);
+}
+
+.tang-picker__buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--tang-space-2);
+}

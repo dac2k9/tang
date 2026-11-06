@@ -33,6 +33,8 @@ export type { Feed } from "./generated/Feed";
 export type { SideInfo } from "./generated/SideInfo";
 export type { ServerMessage } from "./generated/ServerMessage";
 export type { SlotKind } from "./generated/SlotKind";
+export type { SoundEntry } from "./generated/SoundEntry";
+export type { SoundLibrary } from "./generated/SoundLibrary";
 export type { SourceInfo } from "./generated/SourceInfo";
 export type { Snapshot } from "./generated/Snapshot";
 export type { StampedEvent } from "./generated/StampedEvent";

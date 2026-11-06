@@ -19,6 +19,7 @@ pub mod probes;
 pub mod protocol;
 pub mod save;
 pub mod snapshot;
+pub mod sounds;
 pub mod sources;
 pub mod subscribers;
 mod states;

@@ -23,6 +23,7 @@ use crate::web::server::Config;
 
 pub mod assets;
 pub mod connection;
+pub mod desk;
 pub mod hub;
 pub mod owner;
 pub mod pusher;

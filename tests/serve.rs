@@ -2579,6 +2579,88 @@ async fn the_page_of_a_plugin_that_tang_hosts_opens_another_session_and_the_wind
     assert_ne!(after[0], after[1], "the window went to the page of the engine that was made again, at another address: {after:?}");
 }
 
+/// The libraries of sounds of a plugin that Tang hosts, for real (step 116): the plugin, run by `tang window` with a home of the test's own, has the folder that sessions are saved to and a folder that the config file names; the page, a client of
+/// the plugin's own server, is told of both in the hello, lists one, and opens a sound of the other, and the window goes to the page of the engine that is made with it. For a person at a Mac, after `cargo build -p tang-clap`; the window is on the
+/// screen for some seconds and does not take the keyboard. `cargo test --features web --test serve -- --ignored`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "opens a plugin's window on the screen for a few seconds: cargo build -p tang-clap, then cargo test --features web --test serve -- --ignored"]
+async fn the_page_of_a_plugin_that_tang_hosts_lists_the_libraries_of_sounds_and_opens_one_and_the_window_follows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(bundle) = tangs_own_plugin(dir.path()) else {
+        eprintln!("skipped: build the plugin first (cargo build -p tang-clap)");
+        return;
+    };
+    // The person's home, which the plugin reads for itself: a saved session, a folder with a sound in it, and a config file that names the folder (with a `~`, which is this home).
+    let home = dir.path().join("home");
+    let sessions = home.join(".config/tang/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join("saved.toml"), "[[instrument]]\nplugin = \"builtin:osc\"\n").unwrap();
+    std::fs::create_dir_all(home.join("mine")).unwrap();
+    std::fs::write(home.join("mine/other.toml"), "[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"C4-C5\"\n\n[master]\nlimiter = false\n").unwrap();
+    std::fs::write(home.join(".config/tang/config.toml"), "[[sounds.folder]]\nname = \"Mine\"\npath = \"~/mine\"\n").unwrap();
+    struct Kill(Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut hosting = Kill(
+        Command::new(env!("CARGO_BIN_EXE_tang"))
+            .args(["window", &bundle.to_string_lossy(), "--seconds", "40", "--no-focus"])
+            .env("HOME", &home)
+            .env("TMPDIR", dir.path())
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let log = dir.path().join("tang-plugin.log");
+    let mut pages = |count: usize| -> Option<Vec<String>> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let found: Vec<String> = text.lines().filter_map(|line| line.split("The window's page has loaded: ").nth(1)).map(|url| url.trim().to_string()).collect();
+            if found.len() >= count {
+                return Some(found);
+            }
+            if let Ok(Some(status)) = hosting.0.try_wait() {
+                eprintln!("skipped: tang window ended ({status}): this machine has no screen to open a window on");
+                return None;
+            }
+            assert!(Instant::now() < deadline, "the window did not load {count} page(s) in thirty seconds; the plugin's log:\n{text}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let Some(first) = pages(1).and_then(|found| found.first().cloned()) else { return };
+    let address = first.trim_start_matches("http://").trim_end_matches('/');
+    let mut client = tokio_tungstenite::connect_async(format!("ws://{address}/ws")).await.expect("the plugin serves its page").0;
+    let hello = next_json(&mut client).await;
+    let libraries: Vec<(String, String)> = hello["libraries"].as_array().unwrap().iter().map(|library| (library["id"].as_str().unwrap().to_string(), library["label"].as_str().unwrap().to_string())).collect();
+    assert_eq!(libraries, [("sessions".to_string(), "Saved sessions".to_string()), ("folder1".to_string(), "Mine".to_string())], "the hello names the folder of saved sessions and the one that the config names: {hello}");
+    tell(&mut client, json!({"type": "listSounds", "reqId": 1, "library": "sessions"})).await;
+    let saved = answer(&mut client, 1).await;
+    assert_eq!(saved["entries"][0]["id"], "saved.toml", "{saved}");
+    assert_eq!(saved["entries"][0]["detail"], "osc");
+    tell(&mut client, json!({"type": "listSounds", "reqId": 2, "library": "folder1"})).await;
+    let mine = answer(&mut client, 2).await;
+    assert_eq!(mine["entries"][0]["id"], "other.toml", "{mine}");
+    tell(&mut client, json!({"type": "openSound", "reqId": 3, "library": "folder1", "id": "other.toml"})).await;
+    assert_eq!(answer(&mut client, 3).await["type"], "ack");
+    let after = pages(2).expect("the window goes on");
+    assert_ne!(after[0], after[1], "the window went to the page of the engine that was made again, at another address: {after:?}");
+    // The page of the new engine has the sound that was opened, and the same libraries.
+    let address = after[1].trim_start_matches("http://").trim_end_matches('/');
+    let mut client = tokio_tungstenite::connect_async(format!("ws://{address}/ws")).await.expect("the plugin serves its new page").0;
+    assert_eq!(next_json(&mut client).await["libraries"].as_array().unwrap().len(), 2);
+    tell(&mut client, json!({"type": "subscribe"})).await;
+    let snapshot = next_json(&mut client).await;
+    let range = snapshot["snapshot"]["graph"]["nodes"].as_array().unwrap().iter().find(|node| node["kind"] == "instrument").map(|node| node["range"].clone());
+    assert_eq!(range, Some(json!({"low": 60, "high": 72})), "the session of the sound that was opened is the one that plays: {snapshot}");
+}
+
 /// The `state` of the first instrument of a session file, as the text that the file keeps it as (base64).
 #[cfg(target_os = "macos")]
 fn state_in(file: &std::path::Path) -> Option<String> {

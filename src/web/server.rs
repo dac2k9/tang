@@ -35,11 +35,13 @@ use axum::routing::get;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::app::protocol::{ErrorCode, ServerMessage, WireError};
+use crate::app::sounds::Sounds;
 use crate::note_input::NoteInput;
 use crate::telemetry::Telemetry;
 use crate::web::Shared;
 use crate::web::assets::{self, Assets};
 use crate::web::connection::{Connection, Context, Flow, Limits, MAX_OPEN_MESSAGE_BYTES, OwnerRequest};
+use crate::web::desk::{Desk, Worker};
 use crate::web::hub::{Hub, Outgoing};
 use crate::web::pusher;
 use crate::web::security::{Policy, Refusal, Token};
@@ -82,6 +84,8 @@ pub struct Config {
     pub windows: bool,
     /// Whether the program can open another session while it runs (step 115, `Controller::open_session`): the clients are told so in the hello (`openSession`), and a page shows its Open button only then.
     pub open_session: bool,
+    /// The libraries of sounds that the program has, for a page to list and open a sound of (step 116): the hello lists them, and a desk (a thread of its own, `web::desk`) lists and fetches. None, or none in it, for a program that has no such libraries.
+    pub sounds: Option<Arc<Sounds>>,
 }
 
 impl Config {
@@ -99,6 +103,7 @@ impl Config {
             limits: Limits::default(),
             windows: false,
             open_session: false,
+            sounds: None,
         }
     }
 }
@@ -127,6 +132,7 @@ struct App {
     limits: Limits,
     windows: bool,
     open_session: bool,
+    desk: Option<Desk>,
     auth_timeout: Duration,
     write_timeout: Duration,
     /// One permit per connection, held by its task: how many there can be, and when
@@ -143,6 +149,8 @@ pub struct Server {
     token: Option<Token>,
     stop: watch::Sender<bool>,
     thread: Option<JoinHandle<()>>,
+    /// The thread that lists and fetches sounds, if there is one: it ends when the server's thread has dropped the last way to it, and is waited for after it.
+    desk: Option<Worker>,
 }
 
 /// The listener `config` asks for. Fails, without having listened, if the policy does not
@@ -166,7 +174,7 @@ impl Server {
     /// address cannot be listened on.
     pub fn start(config: Config, parts: Parts) -> anyhow::Result<Server> {
         let listener = listen(&config)?;
-        let Config { token, extra_origins, max_clients, auth_timeout, write_timeout, telemetry_period, stop_grace, limits, windows, open_session, .. } = config;
+        let Config { token, extra_origins, max_clients, auth_timeout, write_timeout, telemetry_period, stop_grace, limits, windows, open_session, sounds, .. } = config;
         listener.set_nonblocking(true).context("cannot make the listener non-blocking")?;
         let addr = listener.local_addr().context("cannot tell where the server listens")?;
         // The port may have been left to the system, and the policy has to know it.
@@ -179,6 +187,15 @@ impl Server {
         let listener = {
             let _entered = runtime.enter();
             tokio::net::TcpListener::from_std(listener).context("cannot listen with the runtime")?
+        };
+
+        // (A desk only for a program that has a library to list: the libraries are asked on a thread of their own.)
+        let (desk, worker) = match sounds.filter(|sounds| !sounds.is_empty()) {
+            Some(sounds) => {
+                let (desk, worker) = Desk::start(sounds, parts.hub.clone(), parts.owner.clone()).context("cannot start the thread that lists sounds")?;
+                (Some(desk), Some(worker))
+            }
+            None => (None, None),
         };
 
         let (stop_tx, stop_rx) = watch::channel(false);
@@ -195,6 +212,7 @@ impl Server {
             limits,
             windows,
             open_session,
+            desk,
             auth_timeout,
             write_timeout,
             seats: Arc::new(Semaphore::new(seat_count as usize)),
@@ -206,7 +224,7 @@ impl Server {
             .spawn(move || run(runtime, listener, app, stop_rx, stop_grace))
             .context("cannot start the web server's thread")?;
         log::info!("Web server listening on http://{addr}/");
-        Ok(Server { addr, token, stop: stop_tx, thread: Some(thread) })
+        Ok(Server { addr, token, stop: stop_tx, thread: Some(thread), desk: worker })
     }
 
     /// Where the server listens (the port is the one the system chose, if it was asked
@@ -234,6 +252,10 @@ impl Server {
             if thread.join().is_err() {
                 log::warn!("The web server's thread panicked");
             }
+        }
+        // (The server's thread held the last way to the desk, and has ended with it: the desk's thread is on its way out.)
+        if let Some(mut worker) = self.desk.take() {
+            worker.join();
         }
     }
 }
@@ -360,6 +382,7 @@ async fn serve_socket(app: Arc<App>, mut socket: WebSocket, _seat: OwnedSemaphor
         limits: app.limits,
         windows: app.windows,
         open_session: app.open_session,
+        desk: app.desk.clone(),
     };
     // (A connection that is dropped is closed, so the notes it holds end on every path out of here.)
     let mut conn = Connection::new(id, context, Instant::now());
@@ -648,7 +671,7 @@ mod tests {
         let mut client = connect(&rig).await;
         assert_eq!(
             said(&mut client).await,
-            json!({"type": "hello", "protocol": 1, "rev": 3, "features": ["notes", "telemetry"], "needsToken": false})
+            json!({"type": "hello", "protocol": 1, "rev": 3, "features": ["notes", "telemetry"], "needsToken": false, "libraries": []})
         );
     }
 

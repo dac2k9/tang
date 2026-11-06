@@ -2,8 +2,8 @@ import { describe, expect, test } from "vitest";
 
 import type { ClientState } from "./connection";
 import { MASTER, audioCablesFixture, groupsFixture, movesFixture, nodeNamed, reachFixture, tracerSnapshot } from "./fixtures";
-import { audibleAt, cableDepthOf, canOpenSession, cableGainOf, cableSourceOf, chainLengthOf, chainPlaceOf, envelopeStagesOf, flagsOf, gainOf, groupChoicesOf, hasPins, hasWindowOf, isKnob, limiterOf, modulatorFieldOf, nodeById, paramCountOf, paramListOf, paramOf, patternOf, presetsOf, rangeOf, removalOf, sameChainPlace, sameFlags, sameGroupChoices, sameParamList, sameRemoval, sameStages, stepsOf } from "./selectors";
-import type { Node, Snapshot } from "../protocol";
+import { audibleAt, cableDepthOf, canOpenSession, cableGainOf, cableSourceOf, chainLengthOf, chainPlaceOf, envelopeStagesOf, flagsOf, gainOf, groupChoicesOf, hasPins, hasWindowOf, isKnob, limiterOf, modulatorFieldOf, nodeById, paramCountOf, paramListOf, paramOf, patternOf, presetsOf, rangeOf, removalOf, sameChainPlace, sameFlags, sameGroupChoices, sameParamList, sameRemoval, sameStages, soundLibraries, stepsOf } from "./selectors";
+import type { Node, Snapshot, SoundLibrary } from "../protocol";
 import type { Removal } from "./selectors";
 
 const stateOf = (snapshot: Snapshot | null): ClientState => ({ status: "open", problem: null, hello: null, snapshot, catalog: null, inputs: [], history: { undo: null, redo: null }, reconnects: 0, probed: [] });
@@ -373,7 +373,7 @@ describe("counting the parameters of a plugin", () => {
 });
 
 describe("whether a plugin has a window of its own that can be opened (step 112)", () => {
-  const shows = { protocol: 1, rev: 0, features: ["notes", "telemetry", "windows"], needsToken: false };
+  const shows = { protocol: 1, rev: 0, features: ["notes", "telemetry", "windows"], needsToken: false, libraries: [] };
   /** The tracer with the oscillator's plugin saying that it has a window of its own (the filter's does not); and what the server's hello says. */
   const windowed = (hello: ClientState["hello"], also: readonly number[] = []): ClientState => {
     const copy = structuredClone(tracerSnapshot);
@@ -405,7 +405,7 @@ describe("whether a plugin has a window of its own that can be opened (step 112)
 });
 
 describe("whether the page may offer to open a session file (step 115)", () => {
-  const hello = (features: readonly string[]): ClientState["hello"] => ({ protocol: 1, rev: 0, features: [...features], needsToken: false });
+  const hello = (features: readonly string[]): ClientState["hello"] => ({ protocol: 1, rev: 0, features: [...features], needsToken: false, libraries: [] });
 
   test("is so on a server that says openSession among what it can do, before or after the others", () => {
     expect(canOpenSession({ ...state, hello: hello(["notes", "telemetry", "openSession"]) })).toBe(true);
@@ -910,5 +910,23 @@ describe("whether a node can be heard at the master", () => {
   test("says nothing of what is no lane, no group and no effect: a modulator, the master, a node that is not there, and a session that is not there", () => {
     for (const node of [lfo.id, MASTER, 424242]) expect(audibleAt(state, node), `node ${String(node)}`).toBeUndefined();
     expect(audibleAt(stateOf(null), oscillator.id)).toBeUndefined();
+  });
+});
+
+describe("soundLibraries (step 116)", () => {
+  const library = { id: "sessions", label: "Saved sessions", place: "/home/me/.config/tang/sessions" };
+  const hello = (libraries: SoundLibrary[]): ClientState["hello"] => ({ protocol: 1, rev: 0, features: ["notes", "telemetry", "openSession"], needsToken: false, libraries });
+
+  test("are what the hello lists, in its order", () => {
+    const second = { id: "folder1", label: "Examples", place: "/src/examples" };
+    expect(soundLibraries({ ...state, hello: hello([library, second]) })).toEqual([library, second]);
+  });
+
+  test("are none before the hello, and the same array every time, for a view that reads it to see no change", () => {
+    const before = soundLibraries({ ...state, hello: null });
+    expect(before).toEqual([]);
+    expect(soundLibraries({ ...state, hello: null })).toBe(before);
+    const told = hello([]);
+    expect(soundLibraries({ ...state, hello: told })).toBe(told?.libraries);
   });
 });

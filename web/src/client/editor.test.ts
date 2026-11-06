@@ -2384,3 +2384,42 @@ describe("opening another session (step 115: a session file that a person picked
     expect(said(notices)[0]).toMatch(/^Could not open "a-session-file-with-a-ve…": /);
   });
 });
+
+describe("opening a sound of a library (step 116)", () => {
+  const entry = (id: string, openable = true) => ({ id, name: id.replace(/\.toml$/, ""), detail: openable ? "osc" : "expected an equals sign", openable, modified: null });
+  const library = { id: "sessions", label: "Saved sessions", place: "/home/me/.config/tang/sessions" };
+  const options = { openSession: true, libraries: [{ ...library, entries: [entry("pad.toml"), entry("broken.toml", false)] }] };
+
+  test("names the sound and its library to the server, which reads it: no text goes from the page, and the session is as it was", async () => {
+    const { server, client, notices, editor } = await open(options);
+    const before = client.state.snapshot;
+    expect(await editor.openSound(library, entry("pad.toml"))).toBe(true);
+    expect(said(notices)).toEqual([]);
+    expect(server.received.at(-1)).toEqual({ type: "openSound", reqId: expect.any(Number) as number, library: "sessions", id: "pad.toml" });
+    expect(server.received.some((message) => message.type === "request")).toBe(false);
+    expect(client.state.snapshot?.graph).toEqual(before?.graph);
+    expect(client.state.history).toEqual({ undo: null, redo: null });
+  });
+
+  test("is refused with the server's reason when the sound is not a session, and the notice names the sound and the library in quotes", async () => {
+    const { notices, editor } = await open(options);
+    expect(await editor.openSound(library, entry("broken.toml", false))).toBe(false);
+    expect(said(notices)).toEqual(['Could not open "broken" from "Saved sessions": that is not a session: expected an equals sign']);
+  });
+
+  test("is refused when the sound is gone, and by a program that cannot open another session", async () => {
+    const { notices, editor } = await open(options);
+    expect(await editor.openSound(library, entry("gone.toml"))).toBe(false);
+    expect(said(notices)[0]).toBe('Could not open "gone" from "Saved sessions": there is no sound "gone.toml" in this library any more');
+    const cannot = await open({ libraries: options.libraries });
+    expect(await cannot.editor.openSound(library, entry("pad.toml"))).toBe(false);
+    expect(said(cannot.notices)[0]).toMatch(/^Could not open "pad" from "Saved sessions": this program cannot open another session while it runs/);
+  });
+
+  test("the notice quotes a name that is long cut short, as the others do, and says why when the connection is gone", async () => {
+    const { client, notices, editor } = await open(options);
+    client.stop();
+    await editor.openSound({ ...library, label: "A library with a very long name indeed" }, entry("a-sound-with-a-very-long-name.toml"));
+    expect(said(notices)[0]).toBe('Could not open "a-sound-with-a-very-long…" from "A library with a very lo…": Not connected to the server.');
+  });
+});

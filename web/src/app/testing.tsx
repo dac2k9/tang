@@ -80,7 +80,7 @@ export function holdable(server: MockServer) {
               return;
             }
             const { type } = JSON.parse(text) as { type: string };
-            held.push({ answer: type === "ack" || type === "rejected", tell });
+            held.push({ answer: type === "ack" || type === "rejected" || type === "sounds", tell });
           },
         });
       },

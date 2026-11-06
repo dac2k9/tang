@@ -185,6 +185,11 @@ depth = 0.5
 
     /// As `live`, over a controller whose program can open another session (`Controller::open_session`: a plugin in a host).
     fn started(opens: bool) -> Live {
+        started_with(opens, None, None)
+    }
+
+    /// As `started`, with libraries of sounds for the page (step 116), and a list that the sessions that the controller is asked to open are put in.
+    fn started_with(opens: bool, sounds: Option<Arc<crate::app::sounds::Sounds>>, opened: Option<Arc<std::sync::Mutex<Vec<String>>>>) -> Live {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (quit_tx, quit_rx) = crossbeam_channel::bounded(1);
         let thread = std::thread::spawn(move || {
@@ -192,9 +197,16 @@ depth = 0.5
             let telemetry = handles.telemetry.clone();
             let mut ctl = Controller::new(load(SESSION).model, handles, None);
             if opens {
-                ctl.open_session = Some(Box::new(|_| Ok(())));
+                ctl.open_session = Some(Box::new(move |text| {
+                    if let Some(opened) = &opened {
+                        opened.lock().unwrap().push(text);
+                    }
+                    Ok(())
+                }));
             }
-            let mut runtime = Runtime::start(&mut ctl, Config::new("127.0.0.1:0".parse().unwrap())).unwrap();
+            let mut config = Config::new("127.0.0.1:0".parse().unwrap());
+            config.sounds = sounds;
+            let mut runtime = Runtime::start(&mut ctl, config).unwrap();
             ready_tx.send((runtime.addr(), engine, telemetry)).unwrap();
             runtime.run_headless(&mut ctl, &quit_rx);
         });
@@ -256,6 +268,96 @@ depth = 0.5
         let opens = started(true);
         let mut client = testclient::connect(opens.addr).await;
         assert!(features(&said(&mut client).await).contains(&"openSession".to_string()), "a plugin in a host can");
+    }
+
+    /// A folder with two sounds in it, as libraries of a program: the folder is kept as long as the value is.
+    fn folder_of_sounds() -> (Arc<crate::app::sounds::Sounds>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pad.toml"), "[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"C4-C5\"\n").unwrap();
+        std::fs::write(dir.path().join("broken.toml"), "this is {not toml").unwrap();
+        let folder = crate::app::sounds::Folder::new("here", "Here", dir.path().to_path_buf());
+        (Arc::new(crate::app::sounds::Sounds::new(vec![Box::new(folder)])), dir)
+    }
+
+    #[tokio::test]
+    async fn a_page_lists_the_sounds_of_a_library_that_the_hello_names_and_opens_one_as_a_session() {
+        let (sounds, _dir) = folder_of_sounds();
+        let opened = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let live = started_with(true, Some(sounds), Some(opened.clone()));
+        let mut client = testclient::connect(live.addr).await;
+        let hello = said(&mut client).await;
+        assert_eq!(hello["libraries"].as_array().unwrap().len(), 1, "{hello}");
+        assert_eq!((hello["libraries"][0]["id"].as_str(), hello["libraries"][0]["label"].as_str()), (Some("here"), Some("Here")));
+        let _ = testclient::subscribe(&mut client).await;
+
+        tell(&mut client, json!({"type": "listSounds", "reqId": 5, "library": "here"})).await;
+        let listing = said(&mut client).await;
+        assert_eq!((listing["type"].as_str(), listing["reqId"].as_u64(), listing["library"].as_str()), (Some("sounds"), Some(5), Some("here")), "{listing}");
+        let mut names: Vec<(&str, bool)> = listing["entries"].as_array().unwrap().iter().map(|entry| (entry["name"].as_str().unwrap(), entry["openable"].as_bool().unwrap())).collect();
+        names.sort();
+        assert_eq!(names, [("broken", false), ("pad", true)]);
+
+        tell(&mut client, json!({"type": "openSound", "reqId": 6, "library": "here", "id": "pad.toml"})).await;
+        assert_eq!(said(&mut client).await, json!({"type": "ack", "reqId": 6, "rev": 1}));
+        assert_eq!(*opened.lock().unwrap(), ["[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"C4-C5\"\n"], "the controller was handed the sound's text, to open it");
+
+        tell(&mut client, json!({"type": "openSound", "reqId": 7, "library": "here", "id": "broken.toml"})).await;
+        let refused = said(&mut client).await;
+        assert_eq!((refused["type"].as_str(), refused["reqId"].as_u64(), refused["error"]["code"].as_str()), (Some("rejected"), Some(7), Some("invalid")), "{refused}");
+        assert!(refused["error"]["message"].as_str().unwrap().starts_with("that is not a session: "), "{refused}");
+        assert_eq!(opened.lock().unwrap().len(), 1, "a sound that is not a session is not handed on");
+
+        tell(&mut client, json!({"type": "openSound", "reqId": 8, "library": "here", "id": "../escape.toml"})).await;
+        let refused = said(&mut client).await;
+        assert_eq!((refused["type"].as_str(), refused["reqId"].as_u64()), (Some("rejected"), Some(8)), "{refused}");
+        tell(&mut client, json!({"type": "listSounds", "reqId": 9, "library": "elsewhere"})).await;
+        let refused = said(&mut client).await;
+        assert_eq!((refused["error"]["code"].as_str(), refused["reqId"].as_u64()), (Some("notFound"), Some(9)), "{refused}");
+    }
+
+    /// A library that takes its time to be let go of, and says when it has been: the desk's thread lets go of it when it ends.
+    #[derive(Debug)]
+    struct SlowToLetGo(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for SlowToLetGo {
+        fn drop(&mut self) {
+            std::thread::sleep(Duration::from_millis(300));
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl crate::app::sounds::Library for SlowToLetGo {
+        fn info(&self) -> crate::app::sounds::SoundLibrary {
+            crate::app::sounds::SoundLibrary { id: "slow".to_string(), label: "Slow".to_string(), place: "nowhere".to_string() }
+        }
+        fn list(&self) -> Result<crate::app::sounds::Listing, crate::app::protocol::WireError> {
+            Ok(crate::app::sounds::Listing { entries: Vec::new(), truncated: false })
+        }
+        fn read(&self, _: &str) -> Result<String, crate::app::protocol::WireError> {
+            Err(crate::app::protocol::WireError::new(crate::app::protocol::ErrorCode::NotFound, "none"))
+        }
+    }
+
+    #[test]
+    fn stopping_the_server_waits_for_the_thread_that_lists_sounds_which_a_plugin_that_is_unloaded_must_not_leave_running() {
+        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sounds = Arc::new(crate::app::sounds::Sounds::new(vec![Box::new(SlowToLetGo(gone.clone()))]));
+        let mut live = started_with(true, Some(sounds), None);
+        live.stop();
+        assert!(gone.load(std::sync::atomic::Ordering::SeqCst), "the thread had ended, and let go of its libraries, by the time the server had stopped");
+    }
+
+    #[tokio::test]
+    async fn a_program_with_no_libraries_lists_none_and_has_no_sounds_to_open() {
+        for sounds in [None, Some(Arc::new(crate::app::sounds::Sounds::default()))] {
+            let live = started_with(true, sounds, None);
+            let mut client = testclient::connect(live.addr).await;
+            assert_eq!(said(&mut client).await["libraries"], json!([]));
+            let _ = testclient::subscribe(&mut client).await;
+            tell(&mut client, json!({"type": "listSounds", "reqId": 1, "library": "here"})).await;
+            let refused = said(&mut client).await;
+            assert_eq!((refused["type"].as_str(), refused["error"]["message"].as_str()), (Some("rejected"), Some("this program has no sounds to list")), "{refused}");
+        }
     }
 
     #[tokio::test]

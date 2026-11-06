@@ -1,0 +1,37 @@
+/* The dialog (step 116): a box in the middle of the page over a dimmed backdrop, which is as wide as its content wants within the window and as tall, with what does not fit scrolling inside it (the box is a column that
+   its content shares: a list that has the room, and a bar of buttons that has none to spare). */
+.tang-dialog__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--tang-space-4);
+  background: rgb(0 0 0 / 55%);
+}
+
+.tang-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tang-space-3);
+  box-sizing: border-box;
+  width: min(640px, 100%);
+  max-height: 100%;
+  padding: var(--tang-space-4);
+  border: 1px solid var(--tang-border);
+  border-radius: var(--tang-radius);
+  background: var(--tang-surface);
+  color: var(--tang-text);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 50%);
+}
+
+.tang-dialog:focus {
+  outline: none;
+}
+
+.tang-dialog__title {
+  margin: 0;
+  font-size: var(--tang-text-size);
+  font-weight: 600;
+}

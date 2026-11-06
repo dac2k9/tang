@@ -6,7 +6,7 @@ import { Client, RequestError, SLOW_AFTER } from "./connection";
 import type { ClientOptions, Transport, TransportFactory } from "./connection";
 import { builtinCatalog, builtinEffects, builtinInstruments, builtinPresets, fieldsFixture, MASTER, nodeNamed, reachFixture, tracerSnapshot } from "./fixtures";
 import { MockServer } from "./mock";
-import type { MockOptions } from "./mock";
+import type { MockLibrary, MockOptions } from "./mock";
 import { noise } from "./noise";
 import { fractionOf, valueAt } from "./travel";
 import { Spectrum } from "./fft";
@@ -86,7 +86,7 @@ describe("connecting", () => {
     expect(client.state.status).toBe("connecting");
     await until(() => client.state.status === "open", "the session");
     expect(client.state.snapshot).toEqual(tracerSnapshot);
-    expect(client.state.hello).toEqual({ protocol: 1, rev: 0, features: ["notes", "telemetry"], needsToken: false });
+    expect(client.state.hello).toEqual({ protocol: 1, rev: 0, features: ["notes", "telemetry"], needsToken: false, libraries: [] });
     expect(client.state.problem).toBeNull();
     expect(server.received).toEqual([{ type: "subscribe" }]);
   });
@@ -114,6 +114,105 @@ describe("connecting", () => {
     expect(server.received).toEqual([]);
     expect(server.connections).toBe(0);
     expect(client.state.reconnects).toBe(0);
+  });
+});
+
+// The libraries of sounds (step 116): a hello that lists them, a listing that is asked for and answered, and a sound that is opened. What the real server makes of them is `src/web/desk.rs`'s; here the client's side, with the mock's.
+describe("the libraries of sounds", () => {
+  const entry = (id: string, openable = true) => ({ id, name: id.replace(/\.toml$/, ""), detail: openable ? "osc" : "not a session: expected an equals sign", openable, modified: 1_704_067_200 });
+  const libraries: MockLibrary[] = [
+    { id: "sessions", label: "Saved sessions", place: "/home/me/.config/tang/sessions", entries: [entry("pad.toml"), entry("broken.toml", false)] },
+    { id: "gone", label: "Examples", place: "/src/examples", fails: "/src/examples: it does not exist" },
+  ];
+
+  test("are in the hello, in the order the server has them, with what a person reads of each and none of what they list", async () => {
+    const client = await open(new MockServer({ openSession: true, libraries }));
+    expect(client.state.hello?.libraries).toEqual([
+      { id: "sessions", label: "Saved sessions", place: "/home/me/.config/tang/sessions" },
+      { id: "gone", label: "Examples", place: "/src/examples" },
+    ]);
+  });
+
+  test("are listed on request, and the listing is what the library has, with whether it has more", async () => {
+    const server = new MockServer({
+      openSession: true,
+      libraries: [{ id: "sessions", label: "Saved sessions", place: "/home/me/.config/tang/sessions", entries: [entry("pad.toml"), entry("broken.toml", false)], truncated: true }],
+    });
+    const client = await open(server);
+    expect(await client.listSounds("sessions")).toEqual({ entries: [entry("pad.toml"), entry("broken.toml", false)], truncated: true });
+    expect(server.received.at(-1)).toMatchObject({ type: "listSounds", library: "sessions" });
+    expect(client.state.snapshot, "a listing is no change of the session").toEqual(tracerSnapshot);
+  });
+
+  test("that cannot be listed are refused with the server's reason, as is one that is not there", async () => {
+    const client = await open(new MockServer({ openSession: true, libraries }));
+    const refused = await client.listSounds("gone").catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(RequestError);
+    expect(refused).toMatchObject({ message: "/src/examples: it does not exist", code: "notFound" });
+    await expect(client.listSounds("nowhere")).rejects.toMatchObject({ code: "notFound" });
+  });
+
+  test("a sound is opened by naming it, and the answer is the revision that was used", async () => {
+    const server = new MockServer({ openSession: true, libraries });
+    const client = await open(server);
+    expect(await client.openSound("sessions", "pad.toml")).toBe(1);
+    expect(server.received.at(-1)).toMatchObject({ type: "openSound", library: "sessions", id: "pad.toml" });
+  });
+
+  test("a sound that cannot be opened is refused, and why: it is not a session, it is gone, the program cannot", async () => {
+    const client = await open(new MockServer({ openSession: true, libraries }));
+    await expect(client.openSound("sessions", "broken.toml")).rejects.toMatchObject({ code: "invalid", message: "that is not a session: not a session: expected an equals sign" });
+    await expect(client.openSound("sessions", "gone.toml")).rejects.toMatchObject({ code: "notFound" });
+    await expect(client.openSound("nowhere", "pad.toml")).rejects.toMatchObject({ code: "invalid" });
+    const cannot = await open(new MockServer({ libraries }));
+    await expect(cannot.openSound("sessions", "pad.toml")).rejects.toMatchObject({ code: "invalid", message: expect.stringContaining("cannot open another session") as string });
+  });
+
+  test("a request for either that is waiting when the connection is lost fails, and says so, and one made while it is not connected fails at once", async () => {
+    const server = new MockServer({ openSession: true, libraries });
+    const client = await open(server, { reconnectDelay: () => 60_000 });
+    server.drop();
+    await until(() => client.state.status === "reconnecting", "the loss");
+    await expect(client.listSounds("sessions")).rejects.toMatchObject({ message: "Not connected to the server." });
+    await expect(client.openSound("sessions", "pad.toml")).rejects.toMatchObject({ message: "Not connected to the server." });
+  });
+
+  test("an answer of the other kind to a request is not taken for the answer", async () => {
+    const answers: Transport[] = [];
+    const server = new MockServer({ openSession: true, libraries });
+    const transport: TransportFactory = () => {
+      const inner = server.transport();
+      const wrapped: Transport = {
+        connect: (events) => {
+          inner.connect({
+            ...events,
+            // (A server that answers a listing with an acknowledgement, and a sound that is opened or an intent with a listing.)
+            text: (text) => {
+              const message = JSON.parse(text) as ServerMessage;
+              if (message.type === "sounds") events.text(JSON.stringify({ type: "ack", reqId: message.reqId, rev: 9 }));
+              else if (message.type === "ack") events.text(JSON.stringify({ type: "sounds", reqId: message.reqId, library: "sessions", entries: [], truncated: false }));
+              else events.text(text);
+            },
+          });
+        },
+        send: (text) => {
+          inner.send(text);
+        },
+        close: () => {
+          inner.close();
+        },
+      };
+      answers.push(wrapped);
+      return wrapped;
+    };
+    const client = new Client({ transport, reconnectDelay: () => 5 });
+    clients.push(client);
+    client.start();
+    await until(() => client.state.status === "open", "the session");
+    const unasked = { message: "The server answered with something this page did not ask for." };
+    await expect(client.listSounds("sessions")).rejects.toMatchObject(unasked);
+    await expect(client.openSound("sessions", "pad.toml")).rejects.toMatchObject(unasked);
+    await expect(client.request({ type: "setBpm", bpm: 99 })).rejects.toMatchObject(unasked);
   });
 });
 
