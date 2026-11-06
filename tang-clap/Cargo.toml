@@ -21,6 +21,16 @@ clack-plugin = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f161
 clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin", "audio-ports", "note-ports", "params", "state", "gui"] }
 log = "0.4"
 
+# The plugin's window (step 114): the page in a web view that a window of the host's holds, WebView2 on Windows and WKWebView on macOS, through wry without its Linux parts (Linux keeps the browser).
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+raw-window-handle = "0.6"
+
+# A view that the host has not put in a window yet cannot hold a web view: AppKit says whether it is in one.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow"] }
+
 [dev-dependencies]
 # A host in the same process, to run the plugin through the way a DAW does (and the raw buffers that a host that processes in place gives).
 clap-sys = "0.5"

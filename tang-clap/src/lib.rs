@@ -2,12 +2,14 @@
 //! session makes of it goes out), for a DAW that hosts CLAP, such as Bitwig.
 //!
 //! What a plugin is lies in the library (`tang::embed`): the engine that the host's `process` renders, the controller that serves the session to browsers, and the session as the text that a host keeps in its project. This crate is
-//! the host's way into it: the CLAP entry, the two descriptors, the ports, the events turned to MIDI (`events`), the state (`state`), and a window that is a page in a browser (`browser`).
+//! the host's way into it: the CLAP entry, the two descriptors, the ports, the events turned to MIDI (`events`), the state (`state`), and the window: the page in a web view that a window of the host's holds (`gui`, step 114), or, where that
+//! cannot be, in a browser (`browser`).
 //!
 //! The session is the plugin's whole state: what a person builds in the page (lanes, effects, cables, modulators, what the plugins inside keep in them) is saved with the host's project and comes back with it.
 
 mod browser;
 mod events;
+pub mod gui;
 mod state;
 
 use std::ffi::CStr;
@@ -16,7 +18,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts, PluginAudioPortsImpl};
-use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui, PluginGuiImpl, Window};
+use clack_extensions::gui::{GuiConfiguration, GuiResizeHints, GuiSize, PluginGui, PluginGuiImpl, Window};
 use clack_extensions::note_ports::{NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts, PluginNotePortsImpl};
 use clack_extensions::params::{ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams, PluginMainThreadParams, PluginParams};
 use clack_extensions::state::{PluginState, PluginStateImpl};
@@ -28,6 +30,8 @@ use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
 use clack_plugin::utils::Cookie;
 use tang::embed::{Host, HostMidi, Kind};
+
+use crate::gui::{Gui, Page, Parent, Shown};
 
 /// The ids that the plugins have. A host keeps a plugin by its id, in every project that has it: they are never changed.
 pub const INSTRUMENT_ID: &str = "io.github.apanloco.tang.instrument";
@@ -154,8 +158,8 @@ fn switch_is_back() -> ParamValueEvent {
 /// The host's main thread's end of an instance: the engine, which is started when the plugin is activated and has the session, the page and the controller.
 pub struct TangMainThread<'a, F> {
     host: Host,
-    /// Whether the host has made the plugin's window (`gui.create`), which is a page that `show` opens.
-    window_made: bool,
+    /// The plugin's window (`gui.create` and the calls after it): a web view in a window of the host's, or the page in a browser.
+    gui: Gui,
     shared: &'a TangShared,
     _handle: HostMainThreadHandle<'a>,
     _flavour: PhantomData<fn() -> F>,
@@ -208,6 +212,8 @@ impl<'a, F: Flavour> PluginAudioProcessor<'a, TangShared, TangMainThread<'a, F>>
             log::error!("Tang could not start: {why}");
             PluginError::Message("Tang could not start: the log, tang-plugin.log in the temporary files, says why")
         })?;
+        // (A window that was asked for before the plugin was switched on shows that it was waiting: now it has a page.)
+        main_thread.refresh_gui();
         let input = [vec![0.0; frames as usize], vec![0.0; frames as usize]];
         Ok(TangAudioProcessor { audio, shared, host: host.shared(), midi: Vec::with_capacity(1024), input, reset: false })
     }
@@ -401,50 +407,80 @@ impl<F: Flavour> PluginStateImpl for TangMainThread<'_, F> {
             log::error!("The state that the host gave is not a session: {why}");
             PluginError::Message("the state that the host gave is not a session of Tang's")
         })?;
-        self.host.set_session_text(text).map_err(|why| {
+        let loaded = self.host.set_session_text(text).map_err(|why| {
             log::error!("The session that the host gave could not be loaded: {why}");
             PluginError::Message("Tang could not load the session that the host gave")
-        })
+        });
+        // (A session that is loaded while the engine runs is served at another address: the window follows.)
+        self.refresh_gui();
+        loaded
     }
 }
 
-/// The plugin's window is a page in a browser, which the host's button for the window opens: a window that is a floating one that the plugin makes itself, as far as the host is concerned (it asks the plugin to show it, and does not
-/// give it a window of its own to put anything in).
+/// The plugin's window (step 114). A host that can put a plugin's face in a window of its own is given the page in a web view that goes in it (`gui`): the window is embedded, `set_parent` gives the host's window and `show` shows the
+/// view. Where that cannot be (Linux, a Windows that has no WebView2) the window is a floating one that the plugin shows itself, as far as the host is concerned: it asks the plugin to show it and gives it no window to put anything
+/// in, and the page is opened in the browser.
 impl<F: Flavour> PluginGuiImpl for TangMainThread<'_, F> {
     fn is_api_supported(&mut self, configuration: GuiConfiguration) -> bool {
-        configuration.is_floating
+        self.gui.is_api_supported(configuration)
     }
 
     fn get_preferred_api(&mut self) -> Option<GuiConfiguration<'_>> {
-        GuiApiType::default_for_current_platform().map(|api_type| GuiConfiguration { api_type, is_floating: true })
+        self.gui.preferred()
     }
 
     fn create(&mut self, configuration: GuiConfiguration) -> Result<(), PluginError> {
-        if !configuration.is_floating {
-            return Err(PluginError::Message("Tang's window is a page in a browser: it is not put in a window of the host's"));
-        }
-        self.window_made = true;
-        Ok(())
+        self.gui.create(configuration).map_err(|why| {
+            log::error!("The window could not be made: {why}");
+            PluginError::Message("Tang's window could not be made: tang-plugin.log in the temporary files says why")
+        })
     }
 
     fn destroy(&mut self) {
-        self.window_made = false;
+        self.gui.destroy();
     }
 
-    fn set_scale(&mut self, _scale: f64) -> Result<(), PluginError> {
-        Ok(())
+    fn set_scale(&mut self, scale: f64) -> Result<(), PluginError> {
+        self.gui.set_scale(scale).map_err(|why| {
+            log::warn!("The window's scale was not taken: {why}");
+            PluginError::Message("Tang's window did not take that scale")
+        })
     }
 
     fn get_size(&mut self) -> Option<GuiSize> {
-        None
+        Some(self.gui.size())
     }
 
-    fn set_size(&mut self, _size: GuiSize) -> Result<(), PluginError> {
-        Err(PluginError::Message("Tang's window is a page in a browser, and has no size of the host's to be"))
+    fn can_resize(&mut self) -> bool {
+        true
     }
 
-    fn set_parent(&mut self, _window: Window) -> Result<(), PluginError> {
-        Err(PluginError::Message("Tang's window is a page in a browser: it is not put in a window of the host's"))
+    fn get_resize_hints(&mut self) -> Option<GuiResizeHints> {
+        Some(Gui::hints())
+    }
+
+    fn adjust_size(&mut self, size: GuiSize) -> Option<GuiSize> {
+        Some(self.gui.adjust_size(size))
+    }
+
+    fn set_size(&mut self, size: GuiSize) -> Result<(), PluginError> {
+        self.gui.set_size(size).map_err(|why| {
+            log::warn!("The window's size was not taken: {why}");
+            PluginError::Message("Tang's window did not take that size")
+        })
+    }
+
+    fn set_parent(&mut self, window: Window) -> Result<(), PluginError> {
+        // (The window of this system's own kind, and no other: an `HWND` on Windows, an `NSView *` on macOS.)
+        let Some(pointer) = window.as_win32_hwnd().or_else(|| window.as_cocoa_nsview()) else {
+            log::error!("The host's window is not one that Tang can put a view in");
+            return Err(PluginError::Message("Tang can put its window in a Windows or a macOS window of the host's, and this is neither"));
+        };
+        let page = self.page();
+        self.gui.set_parent(Parent(pointer), page).map_err(|why| {
+            log::error!("The window could not be put in the host's: {why}");
+            PluginError::Message("Tang's window could not be put in the host's: tang-plugin.log in the temporary files says why")
+        })
     }
 
     fn set_transient(&mut self, _window: Window) -> Result<(), PluginError> {
@@ -452,11 +488,37 @@ impl<F: Flavour> PluginGuiImpl for TangMainThread<'_, F> {
     }
 
     fn show(&mut self) -> Result<(), PluginError> {
-        self.open_page()
+        let page = self.page();
+        match self.gui.show(page) {
+            Ok(Shown::Embedded) => Ok(()),
+            Ok(Shown::Floating) => self.open_page(),
+            Err(why) => {
+                log::error!("The window could not be shown: {why}");
+                Err(PluginError::Message("Tang's window could not be shown: tang-plugin.log in the temporary files says why"))
+            }
+        }
     }
 
     fn hide(&mut self) -> Result<(), PluginError> {
-        Ok(())
+        self.gui.hide().map_err(|why| {
+            log::warn!("The window could not be hidden: {why}");
+            PluginError::Message("Tang's window could not be hidden")
+        })
+    }
+}
+
+impl<F: Flavour> TangMainThread<'_, F> {
+    /// The page that the instance has now: its address, or none while it has not started.
+    fn page(&self) -> Page {
+        Page::of(self.host.url())
+    }
+
+    /// The instance may have another page than the window shows (it started, or was made again, at another rate or with a session that the host gave, and has another address): the window shows the one it has.
+    fn refresh_gui(&mut self) {
+        let page = self.page();
+        if let Err(why) = self.gui.refresh(page) {
+            log::warn!("The window did not take the new page: {why}");
+        }
     }
 }
 
@@ -465,7 +527,7 @@ fn new_shared(_host: HostSharedHandle<'_>) -> Result<TangShared, PluginError> {
 }
 
 fn new_main_thread<'a, F: Flavour>(host: HostMainThreadHandle<'a>, shared: &'a TangShared) -> Result<TangMainThread<'a, F>, PluginError> {
-    Ok(TangMainThread { host: Host::new(F::KIND, true), window_made: false, shared, _handle: host, _flavour: PhantomData })
+    Ok(TangMainThread { host: Host::new(F::KIND, true), gui: Gui::native(), shared, _handle: host, _flavour: PhantomData })
 }
 
 /// The two plugins, as the host asks for them.
