@@ -69,11 +69,18 @@ impl DeviceWatcher for HostDevice {
     }
 }
 
-/// Whether the scan of the installed plugins starts now: it is wanted (`TANG_NO_SCAN` is not set), it has not been started, and someone is looking at the page (a scan loads every plugin that is installed, which is a thing to do in a host's process only when someone
-/// asks for the list).
+/// Whether the scan of the installed plugins starts now: it is wanted (`TANG_SCAN` is set: **it is not by default**), it has not been started, and someone is looking at the page. A scan loads every plugin that is installed, on a thread
+/// of its own, and lets go of it; in a host's process the host's main thread turns the run loop all the time, and a plugin of the JUCE kind (ROLI's players) that is loaded and let go of while it turns crashes the process (f179, found
+/// again with the plugin's window: `tang window Tang.clap` died in `juce::MessageQueue::runLoopSourceCallback`). So a plugin lists the built-ins and the modules, and the plugins that are installed only for a person who has said so.
 #[cfg(any(test, feature = "web"))]
 fn should_scan(wanted: bool, started: bool, browsers: usize) -> bool {
     wanted && !started && browsers > 0
+}
+
+/// Whether `TANG_SCAN` asks for the scan: it is set to something that is not empty and not `0`.
+#[cfg(any(test, feature = "web"))]
+fn scan_asked_for(variable: Option<&std::ffi::OsStr>) -> bool {
+    variable.is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Say why a plugin's own window cannot be opened here: the window is the main thread's, and the main thread is the host's.
@@ -136,6 +143,8 @@ fn embedded(model: crate::app::model::SessionModel, handles: crate::app::control
     let mut ctl = Controller::new(model, handles, None);
     ctl.modules_dir = crate::modules_dir();
     ctl.refresh_modules();
+    // (What can be listed without loading a plugin: the built-ins.)
+    ctl.catalog.builtins();
     ctl.window_check = no_windows;
     ctl.watch_devices(Box::new(HostDevice));
     ctl
@@ -165,7 +174,7 @@ fn run_quietly(ctl: &mut Controller, control: &Receiver<Control>) {
 }
 
 /// Serve the session of `ctl` to browsers on a port that the system picks (on this machine only: there is no token), say where (`started`), and answer what the browsers and the host ask until the host says to stop. The scan of the
-/// installed plugins loads every one of them, which is a thing to do in a host's process only when someone asks for the list: it starts when the first browser has come (and not at all if `TANG_NO_SCAN` is set).
+/// installed plugins loads every one of them, which is not safe in a host's process (`should_scan`): it starts when the first browser has come, and only if `TANG_SCAN` is set.
 #[cfg(feature = "web")]
 fn serve_session(ctl: &mut Controller, started: &Sender<Result<Started, String>>, control: &Receiver<Control>, bind: std::net::SocketAddr) -> anyhow::Result<()> {
     use crate::web::runtime::Runtime;
@@ -177,7 +186,7 @@ fn serve_session(ctl: &mut Controller, started: &Sender<Result<Started, String>>
 
     let requests = runtime.requests();
     let tick = crossbeam_channel::tick(TICK);
-    let scan = std::env::var_os("TANG_NO_SCAN").is_none();
+    let scan = scan_asked_for(std::env::var_os("TANG_SCAN").as_deref());
     let mut scanned = false;
     loop {
         crossbeam_channel::select! {
@@ -192,7 +201,7 @@ fn serve_session(ctl: &mut Controller, started: &Sender<Result<Started, String>>
                 runtime.refresh(ctl);
                 if should_scan(scan, scanned, runtime.clients()) {
                     scanned = true;
-                    ctl.catalog.ensure_scan();
+                    ctl.catalog.scan_installed();
                 }
             }
             recv(control) -> message => match message {
@@ -233,6 +242,27 @@ mod tests {
         assert!((ctl.window_check)().unwrap_err().contains("not available inside a host"), "the check that every window is asked is the host's");
         assert_eq!(ctl.inputs(), [HOST_DEVICE], "the host is the one input that is open");
         assert!(ctl.session_path.is_none(), "the host's project is where the session is kept, not a file");
+    }
+
+    #[test]
+    fn the_scan_of_the_installed_plugins_is_asked_for_by_tang_scan_and_by_nothing_else() {
+        use std::ffi::OsStr;
+        assert!(!scan_asked_for(None), "it is not what a plugin does by itself");
+        assert!(!scan_asked_for(Some(OsStr::new(""))), "an empty variable is not a yes");
+        assert!(!scan_asked_for(Some(OsStr::new("0"))), "and a 0 is a no");
+        assert!(scan_asked_for(Some(OsStr::new("1"))));
+        assert!(scan_asked_for(Some(OsStr::new("yes"))));
+    }
+
+    #[test]
+    fn the_controller_of_a_host_lists_the_built_ins_at_once_and_loads_no_plugin_to_do_it() {
+        let (handles, _engine) = crate::app::testutil::stub_engine();
+        let ctl = embedded(crate::app::testutil::load("[[instrument]]\nplugin = \"builtin:osc\"\n").model, handles);
+        assert!(!ctl.catalog.is_scanning(), "no scan of the installed plugins is started: that loads every one of them in the host's process");
+        let ids: Vec<&str> = ctl.catalog.plugins().iter().map(|plugin| plugin.id.as_str()).collect();
+        assert!(ids.contains(&"builtin:osc") && ids.contains(&"builtin:input"), "the built-ins are in the list, so that a lane can be added: {ids:?}");
+        assert!(ids.iter().all(|id| id.starts_with("builtin:")), "and nothing else is: {ids:?}");
+        assert!(ctl.catalog.rev() > 0, "the clients are told that there is a list");
     }
 
     /// The thread's own: a controller that is started on `text`, with `bind` for its page, whose engine's other end is drained as the host's idle thread does.
@@ -300,6 +330,6 @@ mod tests {
         assert!(should_scan(true, false, 3));
         assert!(!should_scan(true, false, 0), "not before a browser has come");
         assert!(!should_scan(true, true, 1), "not twice");
-        assert!(!should_scan(false, false, 1), "not when it is not wanted");
+        assert!(!should_scan(false, false, 1), "not when it is not wanted, which is how it is unless `TANG_SCAN` says so");
     }
 }

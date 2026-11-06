@@ -689,7 +689,7 @@ pub fn load(
 
 /// Find a CLAP plugin by ID or bundle path.
 /// Returns (bundle, plugin_id, name, is_instrument).
-fn find_plugin(source: &str) -> anyhow::Result<(PluginBundle, String, String, bool)> {
+pub(super) fn find_plugin(source: &str) -> anyhow::Result<(PluginBundle, String, String, bool)> {
     use clack_host::plugin::features::INSTRUMENT;
 
     // Try stripping "clap:" prefix for ID-based lookup

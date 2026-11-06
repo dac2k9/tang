@@ -1,4 +1,4 @@
-//! A check that is run from the command line and plays nothing: what a plugin's own window is like on this machine (`tang window`, step 112). (`tang listen` is the other of its kind, and is with the audio input that it checks.)
+//! A check that is run from the command line and plays nothing: what a plugin's own window is like on this machine (`tang window`, step 112; a CLAP plugin's, step 114). (`tang listen` is the other of its kind, and is with the audio input that it checks.)
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -18,13 +18,22 @@ pub struct WindowOptions<'a> {
     pub focus: bool,
     /// Whether the views that the plugin made in the window are printed, a moment before it is closed.
     pub tree: bool,
+    /// The size that the window is made once it is open, in points: what a host does that has kept the size that a person gave it (a CLAP plugin: a VST3 plugin's window is its view's).
+    pub size: Option<(u32, u32)>,
 }
 
 /// Open the window of the plugin `source`, as `options` say, and say what it was.
 pub fn window(source: &str, options: WindowOptions, sample_rate: u32) -> anyhow::Result<()> {
     // (Before anything is loaded: a session that has no screen is said so, and the plugin is not made to wait for nothing.)
     window::available().map_err(|why| anyhow!(why))?;
+    // A CLAP plugin has its own way to a window (its `gui` extension, step 114): the VST3 view protocol below is not it.
+    if let Ok((plugin::PluginType::Clap, resolved)) = plugin::autodetect::resolve(source) {
+        return plugin::clap_window::window(&resolved, &options, sample_rate);
+    }
     // The plugin is loaded as `describe` loads it, on this thread, which is the main one: the window and the plugin's controller are its. No sound is made, and none is needed to draw a plugin's face.
+    if options.size.is_some() {
+        println!("(--size is for a CLAP plugin: the window of a VST3 plugin is the size of its view)");
+    }
     let plugin = plugin::load(source, sample_rate as f32, 512, &plugin::Runtime::default())?;
     let name = plugin.name().to_string();
     let editor = plugin.editor_id().ok_or_else(|| anyhow!("{name} has no window of its own that Tang can show (its plugin format has none yet)"))?;

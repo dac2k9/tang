@@ -143,3 +143,50 @@ fn window_opens_a_plugin_that_is_installed_and_takes_a_picture_of_it_and_closes_
     let png = std::fs::read(&picture).expect("the picture was written");
     assert!(png.starts_with(b"\x89PNG"), "{:?}", &png[..8.min(png.len())]);
 }
+
+/// Opens the window of Tang's own plugin on the screen for a few seconds, resized, with the page in its web view (step 114): the real file, loaded the way a host loads it, a real window, and the page that is served by the plugin
+/// inside it. For a person at a Mac, after `cargo build -p tang-clap`: `cargo test --test cli -- --ignored`.
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "opens the window of Tang's own plugin on the screen for a few seconds: cargo build -p tang-clap, then cargo test --test cli -- --ignored"]
+fn window_opens_tangs_own_plugin_with_its_page_in_a_web_view_resizes_it_and_the_page_has_loaded() {
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/libtang_clap.dylib");
+    if !library.exists() {
+        eprintln!("skipped: build the plugin first (cargo build -p tang-clap)");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("a directory");
+    // A bundle, as a host finds one: the library in `Contents/MacOS` and a plist that names it.
+    let bundle = dir.path().join("Tang.clap");
+    std::fs::create_dir_all(bundle.join("Contents/MacOS")).expect("the bundle's directory");
+    std::fs::copy(&library, bundle.join("Contents/MacOS/Tang")).expect("the library is copied");
+    std::fs::write(
+        bundle.join("Contents/Info.plist"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>Tang</string><key>CFBundleIdentifier</key><string>io.github.apanloco.tang</string><key>CFBundlePackageType</key><string>BNDL</string></dict></plist>",
+    )
+    .expect("the plist");
+    let picture = dir.path().join("window.png");
+    // (The plugin's log goes to the temporary directory: this one's, so that the test reads its own.)
+    let output = Command::new(env!("CARGO_BIN_EXE_tang"))
+        .args(["window", &bundle.to_string_lossy(), "--seconds", "3", "--size", "900x600", "--no-focus", "--tree", "--snapshot", &picture.to_string_lossy()])
+        .env("TMPDIR", dir.path())
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("tang runs");
+    let said = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    if err.contains("has no screen") {
+        eprintln!("skipped: {err}");
+        return;
+    }
+    assert_eq!(output.status.code(), Some(0), "{said}{err}");
+    assert!(said.contains("Tang: a window of 1100 x 720, which it can be resized"), "the size that the plugin asks for, and that it can be resized: {said}");
+    assert!(said.contains("The window is 900 x 600"), "the plugin took the size that the host made the window: {said}");
+    assert!(said.contains("wry_web_view") && said.contains("WryWebView0.57.1 900x600"), "the web view is in the window, at the size that it was made: {said}");
+    assert!(said.contains("Snapshot: ") && said.trim_end().ends_with(" s."), "{said}");
+    let png = std::fs::read(&picture).expect("the picture was written");
+    assert!(png.starts_with(b"\x89PNG"), "{:?}", &png[..8.min(png.len())]);
+    let log = std::fs::read_to_string(dir.path().join("tang-plugin.log")).expect("the plugin's log");
+    assert!(log.contains("The window's web view is made, 1100 x 720"), "{log}");
+    assert!(log.contains("The window's page has loaded: http://127.0.0.1:"), "the page that the plugin serves was loaded by the view: {log}");
+}

@@ -120,8 +120,12 @@ pub enum Command {
     },
     /// Open a plugin's own window by itself and play nothing: a check that the window works and what it looks like (`--snapshot` writes what is in it as a picture, for a person who cannot see the screen)
     Window {
-        /// Plugin source (vst3:<name>, or the path of a .vst3 bundle: a path loads only that plugin)
+        /// Plugin source (vst3:<name>, or the path of a .vst3 bundle: a path loads only that plugin; clap:<id>, or the path of a .clap file, which is its first plugin)
         plugin: String,
+
+        /// Make the window this size, in points (`900x600`), once it is open, as a host does that has kept the size that a person gave the window (a CLAP plugin: a VST3 plugin's window is its view's)
+        #[arg(long, value_name = "WxH", value_parser = parse_size)]
+        size: Option<(u32, u32)>,
 
         /// Close the window after this many seconds; without it the window stays until it is closed
         #[arg(long)]
@@ -180,6 +184,13 @@ pub enum EnumerateTarget {
     Plugins,
     /// List built-in plugins
     Builtins,
+}
+
+/// A size for `tang window --size`: two whole numbers above 0, as `900x600`.
+fn parse_size(text: &str) -> Result<(u32, u32), String> {
+    let (width, height) = text.split_once(['x', 'X']).ok_or_else(|| format!("`{text}` is not a size: write it as 900x600"))?;
+    let side = |side: &str| side.trim().parse::<u32>().ok().filter(|&length| length > 0).ok_or_else(|| format!("`{text}` is not a size: both sides are whole numbers above 0, as 900x600"));
+    Ok((side(width)?, side(height)?))
 }
 
 #[cfg(test)]
@@ -298,14 +309,22 @@ mod tests {
 
     #[test]
     fn the_window_check_takes_a_plugin_and_says_how_long_and_where_to_write_what_it_sees() {
-        let Command::Window { plugin, seconds, snapshot, no_focus, tree } = Cli::try_parse_from(["tang", "window", "vst3:Pianoteq"]).unwrap().command.unwrap() else {
+        let Command::Window { plugin, seconds, snapshot, no_focus, tree, size } = Cli::try_parse_from(["tang", "window", "vst3:Pianoteq"]).unwrap().command.unwrap() else {
             panic!("not window")
         };
-        assert_eq!((plugin.as_str(), seconds, snapshot, no_focus, tree), ("vst3:Pianoteq", None, None, false, false), "open until it is closed, the keyboard taken, nothing written");
+        assert_eq!((plugin.as_str(), seconds, snapshot, no_focus, tree, size), ("vst3:Pianoteq", None, None, false, false, None), "open until it is closed, the keyboard taken, nothing written, the plugin's size");
 
         let args = ["tang", "window", "x.vst3", "--seconds", "2.5", "--snapshot", "x.png", "--no-focus", "--tree"];
         let Command::Window { seconds, snapshot, no_focus, tree, .. } = Cli::try_parse_from(args).unwrap().command.unwrap() else { panic!("not window") };
         assert_eq!((seconds, snapshot.as_deref(), no_focus, tree), (Some(2.5), Some(std::path::Path::new("x.png")), true, true));
+
+        let Command::Window { size, .. } = Cli::try_parse_from(["tang", "window", "x.clap", "--size", "900x600"]).unwrap().command.unwrap() else { panic!("not window") };
+        assert_eq!(size, Some((900, 600)));
+        let Command::Window { size, .. } = Cli::try_parse_from(["tang", "window", "x.clap", "--size", "1100X720"]).unwrap().command.unwrap() else { panic!("not window") };
+        assert_eq!(size, Some((1100, 720)), "an X is an x");
+        for bad in ["900", "x600", "900x", "0x600", "900x0", "-1x5", "ax b", "900x600x3"] {
+            assert!(Cli::try_parse_from(["tang", "window", "x.clap", "--size", bad]).is_err(), "{bad}");
+        }
 
         assert!(Cli::try_parse_from(["tang", "window"]).is_err(), "a plugin is needed");
         // The flags that every command has are the same here, written where they are written.

@@ -50,9 +50,27 @@ pub struct Catalog {
 impl Catalog {
     /// Start scanning on a background thread. Results arrive through `poll`.
     pub fn scan(&mut self) {
+        self.start(true);
+    }
+
+    /// List the built-in plugins and nothing else, at once: no plugin is loaded for that. What a program that is a guest in another's process does until it is told to look further (Tang inside a host, `embed`: the host's own
+    /// threads turn the run loop, which a plugin of the JUCE kind that is loaded and let go of on another thread does not survive, f179).
+    pub fn builtins(&mut self) {
+        self.add(plugin::builtin::enumerate_plugins());
+    }
+
+    /// Start scanning the plugins that are installed (LV2, CLAP and VST3: each is loaded to be asked what it is), on a background thread, and not the built-ins (`builtins` has them). Results arrive through `poll`.
+    #[cfg_attr(not(any(test, feature = "web")), expect(dead_code, reason = "only the page of a plugin in a host asks for the scan, when it is told to"))]
+    pub fn scan_installed(&mut self) {
+        self.start(false);
+    }
+
+    fn start(&mut self, builtins: bool) {
         let (tx, rx) = crossbeam_channel::unbounded();
         std::thread::spawn(move || {
-            let _ = tx.send(plugin::builtin::enumerate_plugins());
+            if builtins {
+                let _ = tx.send(plugin::builtin::enumerate_plugins());
+            }
 
             #[cfg(feature = "lv2")]
             let _ = tx.send(plugin::lv2::enumerate_plugins());
@@ -135,8 +153,11 @@ impl Catalog {
             .collect()
     }
 
-    /// Add plugins to the catalog. True if there were any.
+    /// Add plugins to the catalog: those that it does not list already, by `id` (a batch that comes twice, and a plugin that is found in two places, are listed once: a plugin is loaded by its id, and the first is the one
+    /// that is found). True if any was added.
     pub fn add(&mut self, batch: Vec<PluginInfo>) -> bool {
+        let mut known: std::collections::HashSet<String> = self.plugins.iter().map(|plugin| plugin.id.clone()).collect();
+        let batch: Vec<PluginInfo> = batch.into_iter().filter(|plugin| known.insert(plugin.id.clone())).collect();
         if batch.is_empty() {
             return false;
         }
@@ -166,6 +187,32 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_built_ins_are_listed_at_once_by_a_catalog_that_has_started_no_scan_and_loads_no_plugin() {
+        let mut catalog = Catalog::default();
+        catalog.builtins();
+        assert!(!catalog.is_scanning(), "no scan is under way: nothing is loaded for the built-ins");
+        assert!(catalog.rev() > 0, "a client is told that there is a list");
+        let ids: Vec<&str> = catalog.plugins().iter().map(|plugin| plugin.id.as_str()).collect();
+        assert!(ids.contains(&"builtin:osc") && ids.contains(&"builtin:input"), "{ids:?}");
+        assert!(ids.iter().all(|id| id.starts_with("builtin:")), "only the built-ins: {ids:?}");
+        let (rev, listed) = (catalog.rev(), catalog.plugins().len());
+        catalog.builtins();
+        assert_eq!((catalog.rev(), catalog.plugins().len()), (rev, listed), "asked again, nothing is listed twice");
+    }
+
+    #[test]
+    fn a_plugin_that_is_listed_already_is_not_listed_again_whichever_batch_it_comes_in() {
+        let mut catalog = Catalog::default();
+        assert!(catalog.add(vec![info("Reverb", "clap:reverb"), info("Reverb again", "clap:reverb"), info("Delay", "clap:delay")]), "the first of two with the same id is kept, and the others are added");
+        assert_eq!(catalog.plugins().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Delay", "Reverb"], "once within a batch");
+        let rev = catalog.rev();
+        assert!(!catalog.add(vec![info("Reverb from another folder", "clap:reverb")]), "and once across batches: nothing was added");
+        assert_eq!(catalog.rev(), rev, "so a client is not told again");
+        assert!(catalog.add(vec![info("Reverb", "vst3:Reverb")]), "a plugin of another format with the same name has an id of its own");
+        assert_eq!(catalog.plugins().len(), 3);
+    }
 
     fn info(name: &str, id: &str) -> PluginInfo {
         PluginInfo {

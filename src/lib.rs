@@ -193,9 +193,9 @@ pub fn run() -> anyhow::Result<()> {
             env_logger::init();
             plugin::builtin::listen_to_the_input(device.as_deref(), seconds, sample_rate)
         }
-        Some(Command::Window { plugin: source, seconds, snapshot, no_focus, tree }) => {
+        Some(Command::Window { plugin: source, seconds, snapshot, no_focus, tree, size }) => {
             env_logger::init();
-            probe::window(&source, probe::WindowOptions { seconds, snapshot: snapshot.as_deref(), focus: !no_focus, tree }, sample_rate)
+            probe::window(&source, probe::WindowOptions { seconds, snapshot: snapshot.as_deref(), focus: !no_focus, tree, size }, sample_rate)
         }
         Some(Command::Play { session: play_session }) => {
             run_session(play_session, audio_device, jack, midi_device, buffer_size, sample_rate, debug, Mode::Play)

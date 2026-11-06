@@ -5,6 +5,7 @@ pub mod autodetect;
 pub mod builtin;
 pub mod chain;
 pub mod clap;
+pub mod clap_window;
 // (A VST3 plugin is the only one that has a window of its own so far: a build without the format registers no editor, and the table and the way into it are not used.)
 #[cfg_attr(not(feature = "vst3"), allow(dead_code))]
 pub mod editors;
