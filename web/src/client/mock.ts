@@ -83,6 +83,8 @@ export interface MockOptions {
   modules?: Readonly<Record<string, Module>>;
   /** Whether it says that its machine can show a plugin's own window (`windows` among what `hello` says it can do), as a server on a machine that has a screen does (not by default: the mock has no screen). */
   windows?: boolean;
+  /** Whether it says that its program can open another session while it runs (`openSession` among what `hello` says it can do), as a plugin in a host does: it takes the session, and is as it was (the real one makes its engine again, and the page is served by that: not by this). Not by default. */
+  openSession?: boolean;
 }
 
 /**
@@ -1618,6 +1620,7 @@ function intentOutcome(snapshot: Snapshot, intent: Intent, counters: Counters, c
   // (Undo and Redo are not the outcome of an intent on a snapshot: the history is the server's, `MockServer#carry`. Nor is the window of a plugin, which `carry` opens: whether the machine can show one is the server's.)
   if (intent.type === "undo" || intent.type === "redo") return invalid(`${intent.type} is done by the history`);
   if (intent.type === "openEditor") return invalid("a window is opened by the server");
+  if (intent.type === "openSession") return invalid("another session is opened by the server's owner");
   if (intent.type === "setScale") return scaleOutcome(intent.scale);
   if (intent.type === "setLocked") return { event: { type: "lockedSet", locked: intent.locked } };
   if (intent.type === "setBpm") return bpmOutcome(intent.bpm);
@@ -1967,7 +1970,7 @@ export class MockServer {
       type: "hello",
       protocol: this.#options.protocol ?? PROTOCOL,
       rev: this.#snapshot.rev,
-      features: this.#options.windows === true ? ["notes", "telemetry", "windows"] : ["notes", "telemetry"],
+      features: ["notes", "telemetry", ...(this.#options.windows === true ? ["windows"] : []), ...(this.#options.openSession === true ? ["openSession"] : [])],
       needsToken: this.#options.token !== undefined,
     };
   }
@@ -2081,6 +2084,13 @@ export class MockServer {
     // (What has run out by now is done first: an intent is about the session as it is.)
     this.settle();
     if (requested.type === "undo" || requested.type === "redo") return this.#backAndForth(requested.type, tell);
+    // (Another session is no change of this one: `Controller::open_session_intent` hands it to the program's owner, uses a revision and tells no event, and keeps nothing in the history.)
+    if (requested.type === "openSession") {
+      if (this.#options.openSession !== true) return { error: { code: "invalid", message: "this program cannot open another session while it runs: start it with the file" } };
+      const rev = this.#snapshot.rev + 1;
+      this.#snapshot = { ...this.#snapshot, rev };
+      return { rev, told: { events: [], restructured: false } };
+    }
     // (A window that is opened is no change of the session: `Controller::open_editor_intent` uses a revision, as a save does, and keeps nothing in the history.)
     if (requested.type === "openEditor") {
       const opened = openEditorOutcome(this.#snapshot, requested.node, this.#options.windows === true);

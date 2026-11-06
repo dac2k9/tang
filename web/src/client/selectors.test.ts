@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import type { ClientState } from "./connection";
 import { MASTER, audioCablesFixture, groupsFixture, movesFixture, nodeNamed, reachFixture, tracerSnapshot } from "./fixtures";
-import { audibleAt, cableDepthOf, cableGainOf, cableSourceOf, chainLengthOf, chainPlaceOf, envelopeStagesOf, flagsOf, gainOf, groupChoicesOf, hasPins, hasWindowOf, isKnob, limiterOf, modulatorFieldOf, nodeById, paramCountOf, paramListOf, paramOf, patternOf, presetsOf, rangeOf, removalOf, sameChainPlace, sameFlags, sameGroupChoices, sameParamList, sameRemoval, sameStages, stepsOf } from "./selectors";
+import { audibleAt, cableDepthOf, canOpenSession, cableGainOf, cableSourceOf, chainLengthOf, chainPlaceOf, envelopeStagesOf, flagsOf, gainOf, groupChoicesOf, hasPins, hasWindowOf, isKnob, limiterOf, modulatorFieldOf, nodeById, paramCountOf, paramListOf, paramOf, patternOf, presetsOf, rangeOf, removalOf, sameChainPlace, sameFlags, sameGroupChoices, sameParamList, sameRemoval, sameStages, stepsOf } from "./selectors";
 import type { Node, Snapshot } from "../protocol";
 import type { Removal } from "./selectors";
 
@@ -401,6 +401,25 @@ describe("whether a plugin has a window of its own that can be opened (step 112)
   test("is not so on a server whose machine cannot show a window, or before it has said hello, whatever the plugin says", () => {
     expect(hasWindowOf(windowed({ ...shows, features: ["notes", "telemetry"] }), oscillator.id)).toBe(false);
     expect(hasWindowOf(windowed(null), oscillator.id)).toBe(false);
+  });
+});
+
+describe("whether the page may offer to open a session file (step 115)", () => {
+  const hello = (features: readonly string[]): ClientState["hello"] => ({ protocol: 1, rev: 0, features: [...features], needsToken: false });
+
+  test("is so on a server that says openSession among what it can do, before or after the others", () => {
+    expect(canOpenSession({ ...state, hello: hello(["notes", "telemetry", "openSession"]) })).toBe(true);
+    expect(canOpenSession({ ...state, hello: hello(["notes", "telemetry", "windows", "openSession"]) })).toBe(true);
+  });
+
+  test("is not so on a server that does not say it (a program that is started with its file), nor before it has said hello", () => {
+    expect(canOpenSession({ ...state, hello: hello(["notes", "telemetry", "windows"]) })).toBe(false);
+    expect(canOpenSession({ ...state, hello: hello([]) })).toBe(false);
+    expect(canOpenSession({ ...state, hello: null })).toBe(false);
+  });
+
+  test("is not so for a word that only contains it: the features are whole words", () => {
+    expect(canOpenSession({ ...state, hello: hello(["openSessions", "openSessio"]) })).toBe(false);
   });
 });
 

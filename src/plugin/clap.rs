@@ -22,6 +22,7 @@ use clack_host::prelude::*;
 use clack_host::process::StartedPluginAudioProcessor;
 use clack_host::utils::Cookie;
 
+use super::clap_callbacks;
 use super::clap_editor::{self, Asked};
 use super::editors;
 use super::{ParameterInfo, Plugin, PluginInfo, Preset};
@@ -59,7 +60,8 @@ impl<'a> SharedHandler<'a> for TangHostShared {
         log::debug!("CLAP plugin requested process (ignored)");
     }
     fn request_callback(&self) {
-        log::debug!("CLAP plugin requested callback (ignored)");
+        // (From any thread: the call is the main thread's, made by whoever turns the controller, `plugin::clap_callbacks::run`.)
+        self.asked.request_callback();
     }
 }
 
@@ -384,7 +386,9 @@ pub struct ClapPlugin {
     /// The plugin's own window in the registry of the windows (step 114, part C; `plugin::editors`): made when the plugin is loaded if it has a `gui` extension, and forgotten, with its window closed, first thing when the
     /// plugin is let go of.
     editor_id: Option<editors::EditorId>,
-    /// What the registry looks at to know that the plugin is still there (`editors::register`).
+    /// Where the plugin is in the table of the calls that it asks the main thread for (step 115; `plugin::clap_callbacks`): taken out first thing when the plugin is let go of.
+    callback_id: clap_callbacks::CallbackId,
+    /// What the registries look at to know that the plugin is still there (`editors::register`, `clap_callbacks::register`).
     _alive: Arc<()>,
     _bundle: PluginBundle,
     instance: PluginInstance<TangHost>,
@@ -410,7 +414,8 @@ unsafe impl Send for ClapPlugin {}
 
 impl Drop for ClapPlugin {
     fn drop(&mut self) {
-        // The window first: a window of a plugin that is destroyed is a window of nothing.
+        // The calls it asked for first, and its window: neither is for a plugin that is destroyed.
+        clap_callbacks::forget(self.callback_id);
         if let Some(editor) = self.editor_id {
             editors::forget(editor);
         }
@@ -710,8 +715,10 @@ pub fn load(
     // The plugin's own window, if it has one (its `gui` extension): in the registry of the windows for as long as the plugin is (`plugin::clap_editor`).
     let alive = Arc::new(());
     let gui: Option<PluginGui> = instance.plugin_shared_handle().get_extension();
-    // What the plugin says of its window is written down by the host's handler that it was made with, and the editor answers that same one.
+    // What the plugin says to the host (of its window, and that it wants its main thread called) is written down by the host's handler that it was made with, and the editor and the calls answer that same one.
     let asked = instance.access_shared_handler(|shared| shared.asked.clone());
+    // SAFETY: the entry is taken out of the table first thing when the plugin is let go of (`Drop for ClapPlugin`), and a plugin whose token is gone is not called.
+    let callback_id = clap_callbacks::register(Rc::new(unsafe { clap_callbacks::RealCall::new(instance.plugin_handle()) }), asked.clone(), &alive);
     let editor_id = gui.map(|gui| {
         // SAFETY: the editor is forgotten, with its window closed, before the plugin is let go of (`Drop for ClapPlugin`), and calls nothing in a plugin whose token is gone.
         let calls = unsafe { clap_editor::RealGui::new(instance.plugin_handle(), gui) };
@@ -733,6 +740,7 @@ pub fn load(
         preset_data,
         preset_load_ext,
         editor_id,
+        callback_id,
         _alive: alive,
         _bundle: bundle,
         instance,
@@ -1077,5 +1085,16 @@ mod tests {
         assert!(shared.request_show().is_err());
         assert_eq!(shared.asked.take_resize(), None);
         assert!(!shared.asked.take_closed());
+    }
+
+    #[test]
+    fn a_plugin_that_asks_for_a_callback_from_any_thread_is_written_down_for_the_main_threads_turn() {
+        let shared = TangHostShared::default();
+        assert!(!shared.asked.take_callback(), "nobody asked");
+        std::thread::scope(|scope| {
+            scope.spawn(|| shared.request_callback());
+        });
+        assert!(shared.asked.take_callback(), "asked on another thread");
+        assert!(!shared.asked.take_callback(), "taken: it is one call for an ask");
     }
 }

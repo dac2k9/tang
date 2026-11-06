@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use clack_extensions::state::PluginState;
+use clack_extensions::state::{HostState, HostStateImpl, PluginState};
 use clack_host::events::event_types::MidiEvent;
 use clack_host::factory::plugin::PluginFactory;
 use clack_host::prelude::*;
@@ -17,8 +17,12 @@ pub struct Handlers;
 #[derive(Default)]
 pub struct TestShared {
     pub callbacks: std::sync::atomic::AtomicUsize,
+    /// How many times the plugin has told the host that the project has changed (`state.mark_dirty`, on the main thread).
+    pub dirty: std::sync::atomic::AtomicUsize,
 }
-pub struct TestMainThread;
+pub struct TestMainThread<'a> {
+    pub shared: &'a TestShared,
+}
 pub struct TestAudioProcessor;
 
 impl SharedHandler<'_> for TestShared {
@@ -30,12 +34,22 @@ impl SharedHandler<'_> for TestShared {
 }
 
 impl AudioProcessorHandler<'_> for TestAudioProcessor {}
-impl MainThreadHandler<'_> for TestMainThread {}
+impl<'a> MainThreadHandler<'a> for TestMainThread<'a> {}
+
+impl HostStateImpl for TestMainThread<'_> {
+    fn mark_dirty(&mut self) {
+        self.shared.dirty.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 impl HostHandlers for Handlers {
     type Shared<'a> = TestShared;
-    type MainThread<'a> = TestMainThread;
+    type MainThread<'a> = TestMainThread<'a>;
     type AudioProcessor<'a> = TestAudioProcessor;
+
+    fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
+        builder.register::<HostState>();
+    }
 }
 
 /// The file, loaded from its entry as a host loads a file that it has found.
@@ -46,7 +60,7 @@ pub fn bundle() -> PluginBundle {
 /// An instance of the plugin with this id, which is not active yet.
 pub fn instance(bundle: &PluginBundle, id: &std::ffi::CStr) -> PluginInstance<Handlers> {
     let info = HostInfo::new("a test host", "", "", "").unwrap();
-    PluginInstance::<Handlers>::new(|_| TestShared::default(), |_| TestMainThread, bundle, id, &info).expect("the plugin is made")
+    PluginInstance::<Handlers>::new(|_| TestShared::default(), |shared| TestMainThread { shared }, bundle, id, &info).expect("the plugin is made")
 }
 
 /// An instance that has been activated and started, with what plays it.
@@ -130,6 +144,11 @@ impl Rig {
     /// How many times the plugin has asked the host to call its main thread back.
     pub fn callbacks(&self) -> usize {
         self.instance.access_shared_handler(|shared| shared.callbacks.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// How many times the plugin has told the host that the project has changed.
+    pub fn dirty_marks(&self) -> usize {
+        self.instance.access_shared_handler(|shared| shared.dirty.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     /// The host calls the plugin's main thread back, as it does when it is asked to.

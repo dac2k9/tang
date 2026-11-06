@@ -28,6 +28,8 @@ pub struct Asked {
     resize: Mutex<Option<(u32, u32)>>,
     /// The plugin has closed its window, or lost its connection to it.
     closed: AtomicBool,
+    /// The plugin has asked the host to call its `on_main_thread` (`request_callback`, step 115: `clap_callbacks`).
+    callback: AtomicBool,
 }
 
 impl Asked {
@@ -37,6 +39,16 @@ impl Asked {
 
     pub fn closed(&self) {
         self.closed.store(true, Ordering::Release);
+    }
+
+    /// The plugin asks for a call of its `on_main_thread`: asks that come together are one call (what the CLAP rules say a host may do).
+    pub fn request_callback(&self) {
+        self.callback.store(true, Ordering::Release);
+    }
+
+    /// Whether the plugin has asked for a call since the last time this was asked, which it is by whoever makes the call.
+    pub(super) fn take_callback(&self) -> bool {
+        self.callback.swap(false, Ordering::AcqRel)
     }
 
     pub(super) fn take_resize(&self) -> Option<(u32, u32)> {

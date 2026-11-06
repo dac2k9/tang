@@ -107,6 +107,14 @@ export function hasWindowOf(state: ClientState, id: NodeId): boolean {
   return (node?.kind === "instrument" || node?.kind === "effect" ? node.plugin?.hasEditor : undefined) ?? false;
 }
 
+/**
+ * Whether the page may offer to open a session file (step 115): the server says that its program can make its engine again with another session (`openSession` among what its hello says it can do: a plugin in a host; a program
+ * that is started with its file cannot).
+ */
+export function canOpenSession(state: ClientState): boolean {
+  return state.hello?.features.includes("openSession") ?? false;
+}
+
 /** Whether two answers of `paramListOf` are the same list of the same plugin. */
 export function sameParamList(a: ParamList | null, b: ParamList | null): boolean {
   if (a === b) return true;

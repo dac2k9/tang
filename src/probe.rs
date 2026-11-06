@@ -49,6 +49,8 @@ pub fn window(source: &str, options: WindowOptions, sample_rate: u32) -> anyhow:
     let limit = options.seconds.map(Duration::from_secs_f32);
     let still_open = loop {
         editors::poll();
+        // (What a plugin asked its host's main thread to do: the plugin's page opening another session, say.)
+        plugin::clap_callbacks::run();
         // What the person does to the plugin's knobs is said as it comes (there is no session to apply it to: it shows that the plugin tells the host).
         for (_, index, value) in editors::take_edits() {
             println!("The plugin says that its parameter {index} is {value}");

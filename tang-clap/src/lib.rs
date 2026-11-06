@@ -15,13 +15,14 @@ mod state;
 use std::ffi::CStr;
 use std::io::{Read, Write};
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts, PluginAudioPortsImpl};
 use clack_extensions::gui::{GuiConfiguration, GuiResizeHints, GuiSize, PluginGui, PluginGuiImpl, Window};
 use clack_extensions::note_ports::{NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts, PluginNotePortsImpl};
 use clack_extensions::params::{ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams, PluginMainThreadParams, PluginParams};
-use clack_extensions::state::{PluginState, PluginStateImpl};
+use clack_extensions::state::{HostState, PluginState, PluginStateImpl};
 use clack_plugin::entry::prelude::*;
 use clack_plugin::events::event_types::ParamValueEvent;
 use clack_plugin::events::spaces::CoreEventSpace;
@@ -161,17 +162,22 @@ pub struct TangMainThread<'a, F> {
     /// The plugin's window (`gui.create` and the calls after it): a web view in a window of the host's, or the page in a browser.
     gui: Gui,
     shared: &'a TangShared,
-    _handle: HostMainThreadHandle<'a>,
+    handle: HostMainThreadHandle<'a>,
     _flavour: PhantomData<fn() -> F>,
 }
 
 impl<'a, F: Flavour> PluginMainThread<'a, TangShared> for TangMainThread<'a, F> {
-    /// The host calls back, as the audio thread asked (`request_callback`) when the switch that opens the page was pressed in a block.
+    /// The host calls back, as the audio thread asked (`request_callback`) when the switch that opens the page was pressed in a block, or as the controller's thread asked when the page opened another session.
     fn on_main_thread(&mut self) {
         if self.shared.open_requested.swap(false, Ordering::AcqRel) {
             // (A page that could not be opened has said why in the log; the switch goes back all the same, for the host to show that the press was seen.)
             let _ = self.open_page();
             self.shared.put_back.store(true, Ordering::Release);
+        }
+        // The page opened another session (a person picked a file): the engine is made again with it, as for a project that the host opens, at another address; the window follows it, and the host is told that the project has changed.
+        if self.host.serve_requests() {
+            self.refresh_gui();
+            self.mark_dirty();
         }
     }
 }
@@ -513,6 +519,13 @@ impl<F: Flavour> TangMainThread<'_, F> {
         Page::of(self.host.url())
     }
 
+    /// Tell the host that the project has changed, as far as this plugin is concerned (its session is another one now): a host that has the `state` extension asks to save before it closes the project.
+    fn mark_dirty(&mut self) {
+        if let Some(mut state) = self.handle.shared().get_extension::<HostState>() {
+            state.mark_dirty(&self.handle);
+        }
+    }
+
     /// The instance may have another page than the window shows (it started, or was made again, at another rate or with a session that the host gave, and has another address): the window shows the one it has.
     fn refresh_gui(&mut self) {
         let page = self.page();
@@ -527,7 +540,13 @@ fn new_shared(_host: HostSharedHandle<'_>) -> Result<TangShared, PluginError> {
 }
 
 fn new_main_thread<'a, F: Flavour>(host: HostMainThreadHandle<'a>, shared: &'a TangShared) -> Result<TangMainThread<'a, F>, PluginError> {
-    Ok(TangMainThread { host: Host::new(F::KIND, true), gui: Gui::native(), shared, _handle: host, _flavour: PhantomData })
+    let mut engine = Host::new(F::KIND, true);
+    // When the page opens another session its controller's thread hands the text over and has the host's main thread called back, where the engine is made again (`on_main_thread`): `request_callback` is for any thread to call.
+    // SAFETY: the handle lives for as long as the host does, which is longer than this instance (a host destroys its plugins before itself), and the only thread that calls this is the controller's, which `engine` stops, and waits
+    // for, when it is dropped: it is a field of `TangMainThread`, which is dropped when the host destroys the instance.
+    let waker: HostSharedHandle<'static> = unsafe { std::mem::transmute::<HostSharedHandle<'_>, HostSharedHandle<'static>>(host.shared()) };
+    engine.set_waker(Arc::new(move || waker.request_callback()));
+    Ok(TangMainThread { host: engine, gui: Gui::native(), shared, handle: host, _flavour: PhantomData })
 }
 
 /// The two plugins, as the host asks for them.

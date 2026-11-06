@@ -2519,6 +2519,66 @@ async fn a_clap_plugins_own_window_opens_through_the_server_and_leaves_the_scree
     assert!(!tang.log().contains("was open when the plugin was let go of"), "{}", tang.log());
 }
 
+/// Tang as the host of its own plugin, for real (step 115): `tang window` hosts the plugin and shows its page in a web view; the page, which is a client of the plugin's own server, asks to open another session; Tang, as the host, calls the
+/// plugin's main thread back when the plugin asks (`request_callback`, which Tang used to ignore), the plugin makes its engine again with the session, and the window goes to the page's new address. For a person at a Mac, after `cargo build -p tang-clap`;
+/// the window is on the screen for some seconds and does not take the keyboard. `cargo test --features web --test serve -- --ignored`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "opens a plugin's window on the screen for a few seconds: cargo build -p tang-clap, then cargo test --features web --test serve -- --ignored"]
+async fn the_page_of_a_plugin_that_tang_hosts_opens_another_session_and_the_window_follows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(bundle) = tangs_own_plugin(dir.path()) else {
+        eprintln!("skipped: build the plugin first (cargo build -p tang-clap)");
+        return;
+    };
+    // (The plugin's log goes to the temporary directory, which is this one: the test reads its own.)
+    struct Kill(Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut hosting = Kill(
+        Command::new(env!("CARGO_BIN_EXE_tang"))
+            .args(["window", &bundle.to_string_lossy(), "--seconds", "40", "--no-focus"])
+            .env("TMPDIR", dir.path())
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let log = dir.path().join("tang-plugin.log");
+    // The addresses that the window has loaded, once there are `count` of them; none if `tang window` ended (this machine has no screen to open a window on).
+    let mut pages = |count: usize| -> Option<Vec<String>> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let found: Vec<String> = text.lines().filter_map(|line| line.split("The window's page has loaded: ").nth(1)).map(|url| url.trim().to_string()).collect();
+            if found.len() >= count {
+                return Some(found);
+            }
+            if let Ok(Some(status)) = hosting.0.try_wait() {
+                eprintln!("skipped: tang window ended ({status}): this machine has no screen to open a window on");
+                return None;
+            }
+            assert!(Instant::now() < deadline, "the window did not load {count} page(s) in thirty seconds; the plugin's log:\n{text}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let Some(first) = pages(1).and_then(|found| found.first().cloned()) else { return };
+    let address = first.trim_start_matches("http://").trim_end_matches('/');
+    let mut client = tokio_tungstenite::connect_async(format!("ws://{address}/ws")).await.expect("the plugin serves its page").0;
+    let hello = next_json(&mut client).await;
+    assert!(hello["features"].as_array().unwrap().iter().any(|feature| feature == "openSession"), "the page of the plugin can open a session: {hello}");
+    let session = "[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"C4-C5\"\n\n[master]\nlimiter = false\n";
+    tell(&mut client, json!({"type": "request", "reqId": 1, "intent": {"type": "openSession", "text": session}})).await;
+    assert_eq!(answer(&mut client, 1).await["type"], "ack");
+    let after = pages(2).expect("the window goes on");
+    assert_ne!(after[0], after[1], "the window went to the page of the engine that was made again, at another address: {after:?}");
+}
+
 /// The `state` of the first instrument of a session file, as the text that the file keeps it as (base64).
 #[cfg(target_os = "macos")]
 fn state_in(file: &std::path::Path) -> Option<String> {

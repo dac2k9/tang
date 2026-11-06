@@ -31,6 +31,19 @@ pub(super) enum Control {
     Quit,
 }
 
+/// What the controller asks of the host that owns it (the plugin's main thread, which makes the engine again): the page opened another session (`Intent::OpenSession`).
+pub(super) enum Request {
+    /// Make the session this text of a session file.
+    OpenSession(String),
+}
+
+/// How the controller's thread reaches its host: a queue that the host's main thread reads (`Host::serve_requests`), and what wakes the main thread up to look (a plugin: `request_callback`, which may be called from any thread).
+#[derive(Clone)]
+pub(super) struct Owner {
+    pub requests: Sender<Request>,
+    pub wake: Arc<dyn Fn() + Send + Sync>,
+}
+
 /// What the thread is started with.
 pub(super) struct Setup {
     /// The session to load, as the text of a session file.
@@ -43,6 +56,8 @@ pub(super) struct Setup {
     pub bind: std::net::SocketAddr,
     /// What the audio inputs of the session play: what the host's `process` is given to hear.
     pub input: Arc<HostInput>,
+    /// How the controller reaches the host that owns it.
+    pub owner: Owner,
 }
 
 /// What the thread says when the session is loaded and the page is served.
@@ -90,7 +105,7 @@ fn no_windows() -> Result<(), String> {
 
 /// The thread's body. The audio half of the engine goes to the host's side first (`audio`), so that it can take the commands that the load sends while it goes on; then the session is loaded and the page is served, and `started` says how it went.
 pub(super) fn run(setup: Setup, audio: Sender<(AudioGraph, Receiver<MidiEvent>)>, started: Sender<Result<Started, String>>, control: Receiver<Control>) {
-    let Setup { text, sample_rate, max_frames, serve, bind, input } = setup;
+    let Setup { text, sample_rate, max_frames, serve, bind, input, owner } = setup;
     let config = match crate::session::parse(&text) {
         Ok(config) => config,
         Err(error) => {
@@ -117,7 +132,7 @@ pub(super) fn run(setup: Setup, audio: Sender<(AudioGraph, Receiver<MidiEvent>)>
             return;
         }
     };
-    let mut ctl = embedded(model, handles);
+    let mut ctl = embedded(model, handles, owner);
 
     #[cfg(feature = "web")]
     if serve {
@@ -138,9 +153,16 @@ pub(super) fn run(setup: Setup, audio: Sender<(AudioGraph, Receiver<MidiEvent>)>
     ctl.shutdown();
 }
 
-/// The controller of a session that is in a host: the library of modules, no window of a plugin's own, and the host as a device.
-fn embedded(model: crate::app::model::SessionModel, handles: crate::app::controller::EngineHandles) -> Controller {
+/// The controller of a session that is in a host: the library of modules, no window of a plugin's own, the host as a device, and the host to ask when the page opens another session (`Intent::OpenSession`: the engine is made
+/// again by the host's main thread, as it is for a project that the host opens, so the controller hands the text over and has the main thread called back).
+fn embedded(model: crate::app::model::SessionModel, handles: crate::app::controller::EngineHandles, owner: Owner) -> Controller {
     let mut ctl = Controller::new(model, handles, None);
+    let Owner { requests, wake } = owner;
+    ctl.open_session = Some(Box::new(move |text| {
+        requests.send(Request::OpenSession(text)).map_err(|_| "the plugin that holds this session has stopped".to_string())?;
+        wake();
+        Ok(())
+    }));
     ctl.modules_dir = crate::modules_dir();
     ctl.refresh_modules();
     // (What can be listed without loading a plugin: the built-ins.)
@@ -220,6 +242,53 @@ fn serve_session(ctl: &mut Controller, started: &Sender<Result<Started, String>>
 mod tests {
     use super::*;
 
+    /// An owner that a test reads: what the controller asked, how many times it was woken, and how many of those times the request was already there to be found (a host's main thread looks the moment it is called).
+    fn owner() -> (Owner, Receiver<Request>, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (requests, asked) = crossbeam_channel::unbounded();
+        let (woken, found) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (counter, finds, looking) = (woken.clone(), found.clone(), asked.clone());
+        let wake = move || {
+            if !looking.is_empty() {
+                finds.fetch_add(1, Ordering::SeqCst);
+            }
+            counter.fetch_add(1, Ordering::SeqCst);
+        };
+        (Owner { requests, wake: Arc::new(wake) }, asked, woken, found)
+    }
+
+    #[test]
+    fn the_page_opening_another_session_is_handed_to_the_host_which_is_woken_when_the_request_is_there_to_be_found() {
+        use crate::app::intent::Intent;
+        use std::sync::atomic::Ordering;
+        let (handles, _engine) = crate::app::testutil::stub_engine();
+        let (owner, asked, woken, found) = owner();
+        let mut ctl = embedded(crate::app::testutil::load("[[instrument]]\nplugin = \"builtin:osc\"\n").model, handles, owner);
+        let text = "[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"C4-C5\"\n";
+        ctl.apply(Intent::OpenSession { text: text.to_string() }).expect("taken");
+        assert!(matches!(asked.try_recv(), Ok(Request::OpenSession(handed)) if handed == text), "the text as it came");
+        assert!(asked.try_recv().is_err(), "once");
+        assert_eq!((woken.load(Ordering::SeqCst), found.load(Ordering::SeqCst)), (1, 1), "the host was woken once, and when the request was in its queue: a main thread that looks at once finds it");
+    }
+
+    #[test]
+    fn a_host_that_has_gone_is_not_woken_and_the_page_is_told_why_in_words() {
+        use crate::app::intent::{Intent, IntentError};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (handles, _engine) = crate::app::testutil::stub_engine();
+        let (requests, queue) = crossbeam_channel::unbounded();
+        drop(queue);
+        let woken = Arc::new(AtomicUsize::new(0));
+        let counter = woken.clone();
+        let owner = Owner { requests, wake: Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }) };
+        let mut ctl = embedded(crate::app::testutil::load("[[instrument]]\nplugin = \"builtin:osc\"\n").model, handles, owner);
+        let refused = ctl.apply(Intent::OpenSession { text: "[[instrument]]\nplugin = \"builtin:osc\"\n".to_string() });
+        assert_eq!(refused, Err(IntentError::Invalid("the plugin that holds this session has stopped".to_string())));
+        assert_eq!(woken.load(Ordering::SeqCst), 0, "nobody to wake");
+    }
+
     #[test]
     fn the_host_is_the_one_device_there_is_and_the_source_of_what_it_sends_is_its_own() {
         let mut host = HostDevice;
@@ -238,7 +307,7 @@ mod tests {
     #[test]
     fn the_controller_of_a_host_has_no_windows_and_has_the_host_as_its_device() {
         let (handles, _engine) = crate::app::testutil::stub_engine();
-        let ctl = embedded(crate::app::testutil::load("[[instrument]]\nplugin = \"builtin:osc\"\n").model, handles);
+        let ctl = embedded(crate::app::testutil::load("[[instrument]]\nplugin = \"builtin:osc\"\n").model, handles, owner().0);
         assert!((ctl.window_check)().unwrap_err().contains("not available inside a host"), "the check that every window is asked is the host's");
         assert_eq!(ctl.inputs(), [HOST_DEVICE], "the host is the one input that is open");
         assert!(ctl.session_path.is_none(), "the host's project is where the session is kept, not a file");
@@ -257,7 +326,7 @@ mod tests {
     #[test]
     fn the_controller_of_a_host_lists_the_built_ins_at_once_and_loads_no_plugin_to_do_it() {
         let (handles, _engine) = crate::app::testutil::stub_engine();
-        let ctl = embedded(crate::app::testutil::load("[[instrument]]\nplugin = \"builtin:osc\"\n").model, handles);
+        let ctl = embedded(crate::app::testutil::load("[[instrument]]\nplugin = \"builtin:osc\"\n").model, handles, owner().0);
         assert!(!ctl.catalog.is_scanning(), "no scan of the installed plugins is started: that loads every one of them in the host's process");
         let ids: Vec<&str> = ctl.catalog.plugins().iter().map(|plugin| plugin.id.as_str()).collect();
         assert!(ids.contains(&"builtin:osc") && ids.contains(&"builtin:input"), "the built-ins are in the list, so that a lane can be added: {ids:?}");
@@ -271,7 +340,7 @@ mod tests {
         let (audio_tx, audio_rx) = crossbeam_channel::bounded(1);
         let (started_tx, started_rx) = crossbeam_channel::bounded(1);
         let (control_tx, control_rx) = crossbeam_channel::unbounded();
-        let setup = Setup { text: "[[instrument]]\nplugin = \"builtin:osc\"\n".to_string(), sample_rate: 48_000.0, max_frames: 256, serve: true, bind, input: Arc::new(HostInput::new(256)) };
+        let setup = Setup { text: "[[instrument]]\nplugin = \"builtin:osc\"\n".to_string(), sample_rate: 48_000.0, max_frames: 256, serve: true, bind, input: Arc::new(HostInput::new(256)), owner: owner().0 };
         let thread = std::thread::spawn(move || run(setup, audio_tx, started_tx, control_rx));
         // (The engine's audio half is kept and drained, so that the load goes through.)
         let (mut graph, _notes) = audio_rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the audio half");

@@ -31,7 +31,7 @@ fn the_file_has_two_plugins_that_a_host_lists_by_these_ids_names_and_features() 
 fn a_plugin_that_is_not_in_the_file_is_not_made() {
     let bundle = bundle();
     let info = HostInfo::new("a test host", "", "", "").unwrap();
-    assert!(PluginInstance::<Handlers>::new(|_| TestShared::default(), |_| TestMainThread, &bundle, c"no.such.plugin", &info).is_err());
+    assert!(PluginInstance::<Handlers>::new(|_| TestShared::default(), |shared| TestMainThread { shared }, &bundle, c"no.such.plugin", &info).is_err());
 }
 
 #[test]

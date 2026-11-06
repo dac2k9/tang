@@ -39,7 +39,7 @@ use crate::note_input::NoteInput;
 use crate::telemetry::Telemetry;
 use crate::web::Shared;
 use crate::web::assets::{self, Assets};
-use crate::web::connection::{Connection, Context, Flow, Limits, MAX_MESSAGE_BYTES, OwnerRequest};
+use crate::web::connection::{Connection, Context, Flow, Limits, MAX_OPEN_MESSAGE_BYTES, OwnerRequest};
 use crate::web::hub::{Hub, Outgoing};
 use crate::web::pusher;
 use crate::web::security::{Policy, Refusal, Token};
@@ -80,6 +80,8 @@ pub struct Config {
     pub limits: Limits,
     /// Whether this machine can show a plugin's own window (step 112): the clients are told so in the hello (`windows`), and a page shows the button that opens one only then.
     pub windows: bool,
+    /// Whether the program can open another session while it runs (step 115, `Controller::open_session`): the clients are told so in the hello (`openSession`), and a page shows its Open button only then.
+    pub open_session: bool,
 }
 
 impl Config {
@@ -96,6 +98,7 @@ impl Config {
             stop_grace: STOP_GRACE,
             limits: Limits::default(),
             windows: false,
+            open_session: false,
         }
     }
 }
@@ -123,6 +126,7 @@ struct App {
     notes: NoteInput,
     limits: Limits,
     windows: bool,
+    open_session: bool,
     auth_timeout: Duration,
     write_timeout: Duration,
     /// One permit per connection, held by its task: how many there can be, and when
@@ -162,7 +166,7 @@ impl Server {
     /// address cannot be listened on.
     pub fn start(config: Config, parts: Parts) -> anyhow::Result<Server> {
         let listener = listen(&config)?;
-        let Config { token, extra_origins, max_clients, auth_timeout, write_timeout, telemetry_period, stop_grace, limits, windows, .. } = config;
+        let Config { token, extra_origins, max_clients, auth_timeout, write_timeout, telemetry_period, stop_grace, limits, windows, open_session, .. } = config;
         listener.set_nonblocking(true).context("cannot make the listener non-blocking")?;
         let addr = listener.local_addr().context("cannot tell where the server listens")?;
         // The port may have been left to the system, and the policy has to know it.
@@ -190,6 +194,7 @@ impl Server {
             notes: parts.notes,
             limits,
             windows,
+            open_session,
             auth_timeout,
             write_timeout,
             seats: Arc::new(Semaphore::new(seat_count as usize)),
@@ -322,8 +327,9 @@ async fn upgrade(State(app): State<Arc<App>>, ws: WebSocketUpgrade) -> Response 
     let Ok(seat) = app.seats.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tang has all the connections it takes: close another tab.\n").into_response();
     };
-    ws.max_message_size(MAX_MESSAGE_BYTES)
-        .max_frame_size(MAX_MESSAGE_BYTES)
+    // (The transport reads a frame whole, so it takes what the connections that were let in may send: `Connection::on_text` cuts one that was not at `MAX_MESSAGE_BYTES`.)
+    ws.max_message_size(MAX_OPEN_MESSAGE_BYTES)
+        .max_frame_size(MAX_OPEN_MESSAGE_BYTES)
         .on_upgrade(move |socket| serve_socket(app, socket, seat))
 }
 
@@ -353,6 +359,7 @@ async fn serve_socket(app: Arc<App>, mut socket: WebSocket, _seat: OwnedSemaphor
         notes: app.notes.clone(),
         limits: app.limits,
         windows: app.windows,
+        open_session: app.open_session,
     };
     // (A connection that is dropped is closed, so the notes it holds end on every path out of here.)
     let mut conn = Connection::new(id, context, Instant::now());
@@ -461,6 +468,7 @@ mod tests {
     use super::*;
     use crate::app::model::SessionModel;
     use crate::audio::MidiEvent;
+    use crate::web::connection::MAX_MESSAGE_BYTES;
     use crate::held_notes::HeldNotes;
     use crate::piano_filter::{PianoMode, PianoFilter};
     use crate::web::assets::Files;
@@ -785,13 +793,26 @@ mod tests {
         let rig = rig();
         let mut client = connect(&rig).await;
         said(&mut client).await;
-        let long = json!({"type": "auth", "token": "x".repeat(MAX_MESSAGE_BYTES)}).to_string();
+        let long = json!({"type": "auth", "token": "x".repeat(MAX_OPEN_MESSAGE_BYTES)}).to_string();
         // (The server may reset the connection while this is still being written.)
         let _ = client.send(ClientMessage::text(long)).await;
         let (texts, _code) = until_closed(&mut client).await;
         // The connection would answer a long message with its reason; the socket just ends it.
         assert!(texts.is_empty(), "{texts:?}");
         wait_until("the connection was not closed", || rig.hub.client_count() == 0).await;
+    }
+
+    #[tokio::test]
+    async fn a_message_over_the_small_limit_reaches_a_connection_that_is_open_and_the_connection_goes_on() {
+        // (A session's file goes through as one message: a hundred kilobytes is far over the small limit and far under the other.)
+        let rig = rig();
+        let mut client = connect(&rig).await;
+        said(&mut client).await;
+        let long = json!({"type": "auth", "token": "x".repeat(MAX_MESSAGE_BYTES + 36 * 1024)}).to_string();
+        client.send(ClientMessage::text(long)).await.unwrap();
+        // The connection is still there: what comes next reaches the owner of the controller.
+        tell(&mut client, json!({"type": "subscribe"})).await;
+        assert!(matches!(rig.asked(), OwnerRequest::Subscribe { .. }), "the connection went on after the long message");
     }
 
     #[tokio::test]
@@ -802,7 +823,7 @@ mod tests {
         let mut client = connect(&rig).await;
         said(&mut client).await;
         // Each piece is within the limit; the two together are not.
-        let piece = vec![b' '; MAX_MESSAGE_BYTES / 2 + 1];
+        let piece = vec![b' '; MAX_OPEN_MESSAGE_BYTES / 2 + 1];
         let first = Frame::message(piece.clone(), OpCode::Data(Data::Text), false);
         let last = Frame::message(piece, OpCode::Data(Data::Continue), true);
         client.send(ClientMessage::Frame(first)).await.unwrap();

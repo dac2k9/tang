@@ -311,6 +311,12 @@ pub enum Intent {
     /// no instrument), a plugin that has no window of its own (the built-in ones, the LV2 plugins and a CLAP plugin that has no `gui` extension: a VST3 plugin has one, and so has a CLAP plugin that can put its window in one of Tang's own, step 114), a machine that has no screen to open one on, a plugin scan that is still going (the windows' events are not turned
     /// while it is: f179) and a plugin whose window did not open, each in its own words.
     OpenEditor { node: NodeId },
+    /// Replace the session by another, given as the text of a session file (step 115: "load a sound from within the UI, i.e. load a toml"): what a page sends when a person picks a `.toml` file. It is for a program whose
+    /// owner can make the engine again, as it does for a project that a host opens (a plugin in a host: `Controller::open_session`). The text is read here first, so that one that is not a session is refused (`Invalid`,
+    /// with what is wrong with it) with nothing asked of the owner and nothing changed; a program that cannot do it (one that is started with its file, `tang serve`) refuses it too (`Invalid`). It is no step of the
+    /// history and there is no undoing it: the session that is there goes when the new one is loaded, which is after this is answered, and the page that sent it, which the old engine served, is served again by
+    /// the new one (at another address, which the window of a plugin follows).
+    OpenSession { text: String },
     /// Put back what the last step that can be undone did: a parameter, a gain, a modulator's setting, a cable's depth, the keys
     /// of a lane, the place of a node, the knobs a node shows, a group's name, the scale or the lock of the piano, the place of
     /// an effect. A change that goes on (a knob that is dragged) is one step. What it does is told as the intents it is made of
@@ -890,6 +896,7 @@ mod tests {
             (Intent::SaveAs { name: "copy".to_string() }, json!({"type": "saveAs", "name": "copy"})),
             (Intent::SaveModule { node: NodeId(4), name: "Space".to_string() }, json!({"type": "saveModule", "node": 4, "name": "Space"})),
             (Intent::OpenEditor { node: NodeId(3) }, json!({"type": "openEditor", "node": 3})),
+            (Intent::OpenSession { text: "[[instrument]]\nplugin = \"builtin:osc\"\n".to_string() }, json!({"type": "openSession", "text": "[[instrument]]\nplugin = \"builtin:osc\"\n"})),
             (
                 Intent::SaveSelectionAsModule { nodes: vec![NodeId(4), NodeId(7)], name: "Space".to_string() },
                 json!({"type": "saveSelectionAsModule", "nodes": [4, 7], "name": "Space"}),

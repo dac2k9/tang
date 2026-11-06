@@ -50,7 +50,9 @@ pub struct Runtime {
 impl Runtime {
     /// Start serving `ctl`'s session. From now on what the controller applies, whichever
     /// front-end asked for it, is told to the clients that have subscribed.
-    pub fn start(ctl: &mut Controller, config: Config) -> anyhow::Result<Runtime> {
+    pub fn start(ctl: &mut Controller, mut config: Config) -> anyhow::Result<Runtime> {
+        // (A page shows its Open button when the program that owns the controller can open another session: the hello says so.)
+        config.open_session = ctl.open_session.is_some();
         let hub = Arc::new(Hub::new(CLIENT_QUEUE));
         let shared = Arc::new(Shared::new(ctl.rev, ctl.model.telemetry_layout()));
         let (owner_tx, owner_rx) = crossbeam_channel::bounded(OWNER_QUEUE);
@@ -178,12 +180,20 @@ depth = 0.5
     }
 
     fn live() -> Live {
+        started(false)
+    }
+
+    /// As `live`, over a controller whose program can open another session (`Controller::open_session`: a plugin in a host).
+    fn started(opens: bool) -> Live {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (quit_tx, quit_rx) = crossbeam_channel::bounded(1);
         let thread = std::thread::spawn(move || {
             let (handles, engine) = testutil::stub_engine();
             let telemetry = handles.telemetry.clone();
             let mut ctl = Controller::new(load(SESSION).model, handles, None);
+            if opens {
+                ctl.open_session = Some(Box::new(|_| Ok(())));
+            }
             let mut runtime = Runtime::start(&mut ctl, Config::new("127.0.0.1:0".parse().unwrap())).unwrap();
             ready_tx.send((runtime.addr(), engine, telemetry)).unwrap();
             runtime.run_headless(&mut ctl, &quit_rx);
@@ -235,6 +245,17 @@ depth = 0.5
         assert_eq!(said(&mut client).await["type"], "hello");
         let snapshot = testclient::subscribe(&mut client).await;
         (client, snapshot)
+    }
+
+    #[tokio::test]
+    async fn the_hello_says_that_the_program_can_open_another_session_only_when_its_controller_can() {
+        let features = |hello: &Value| hello["features"].as_array().unwrap().iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>();
+        let plain = live();
+        let mut client = testclient::connect(plain.addr).await;
+        assert!(!features(&said(&mut client).await).contains(&"openSession".to_string()), "a program that is started with its file cannot");
+        let opens = started(true);
+        let mut client = testclient::connect(opens.addr).await;
+        assert!(features(&said(&mut client).await).contains(&"openSession".to_string()), "a plugin in a host can");
     }
 
     #[tokio::test]

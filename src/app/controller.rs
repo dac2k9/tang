@@ -246,6 +246,9 @@ pub(super) fn outputs_fit_the_chain(name: &str, outputs: usize) -> Result<(), In
     Ok(())
 }
 
+/// What a controller does to open another session for the program that owns it: the text of a session file goes in, and whether it was taken comes out (`Controller::open_session`).
+pub type OpenSession = Box<dyn Fn(String) -> Result<(), String> + Send>;
+
 pub struct Controller {
     /// The instrument lanes and the submix groups.
     pub model: SessionModel,
@@ -301,6 +304,9 @@ pub struct Controller {
     pub(super) editing_from: Option<crate::plugin::editors::EditorId>,
     /// Whether this machine can show a plugin's window, and why it cannot if it cannot (`window::available`; a test gives its own).
     pub window_check: fn() -> Result<(), String>,
+    /// Make another session of the text of a session file, when the program that owns this controller can (step 115, `Intent::OpenSession`): a plugin in a host, which makes its engine again as it does for a project that the host
+    /// opens; it hands the text over and says whether it was taken. None where the program cannot (a session that is started with its file).
+    pub open_session: Option<OpenSession>,
 }
 
 impl Controller {
@@ -364,6 +370,7 @@ impl Controller {
             probes: super::probes::Probes::default(),
             editing_from: None,
             window_check: crate::window::available,
+            open_session: None,
         };
         // (A lane that cables of notes end at hears the sources they start at: the audio thread is told, as it is when a device is plugged in.)
         controller.sync_lane_sources();
@@ -1267,6 +1274,8 @@ impl Controller {
 
     pub(super) fn poll_at(&mut self, now: Instant) -> Polled {
         self.reap();
+        // What the CLAP plugins loaded here have asked their host's main thread to do (step 115, `request_callback`): this is the main thread's turn.
+        crate::plugin::clap_callbacks::run();
         // The plugins' own windows (step 112): what a knob in one of them did is applied as the change of any front-end is, and a window whose plugin has left the session is closed.
         self.apply_window_edits();
         self.close_windows_of_plugins_that_are_gone();

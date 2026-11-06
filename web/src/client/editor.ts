@@ -28,6 +28,12 @@ function quoted(text: string): string {
 }
 
 /**
+ * The most that a session file may be for the page to send it (`Editor.openSession`), in bytes of its text: the server reads a message of up to 8 MiB from a client that it let in (`MAX_OPEN_MESSAGE_BYTES`), and the text goes as a
+ * JSON string, in which a quote and a line's end take two bytes: half of that is what is certain to go through, and is more than the files that people write (some kilobytes; the state of a plugin that is kept in a session makes it some hundreds).
+ */
+export const MAX_SESSION_FILE_BYTES = 4 * 1024 * 1024;
+
+/**
  * How deep the cable of a control that learns starts, as the TUI's `l` gives it: the whole range, since a controller that is moved offsets the
  * parameter by as much as its knob goes. A new LFO or envelope has the controller's own depth, half (`NEW_CABLE_DEPTH`), as the TUI's `m` gives it.
  */
@@ -40,6 +46,7 @@ const DOING: Record<Intent["type"], string> = {
   setLimiter: "put the limiter in the sound or take it out",
   loadPreset: "load a preset",
   openEditor: "open a plugin's own window",
+  openSession: "open a session",
   setModulatorField: "change a modulator's setting",
   setSteps: "change the steps of a step sequencer",
   setEdgeDepth: "change the depth of a cable",
@@ -260,6 +267,32 @@ export class Editor {
    */
   openEditor(node: NodeId): Promise<boolean> {
     return this.#attempt(`open the window of ${this.#name(node)}`, { type: "openEditor", node });
+  }
+
+  /**
+   * Open the session that a person picked, in place of this one (step 115: "load a sound from within the UI, i.e. load a toml"): `text` is the text of the session file, `name` what the file is called (for the notice). Only a program
+   * that can make its engine again takes it (the hello says `openSession`: a plugin in a host); it is not undone, and the page that asked is served again by the engine that is made, at another address, which a plugin's window
+   * follows. A file too big to be sent is said at once and not sent. True if it was taken (the page says why if it was not: it is not a session, the program cannot).
+   */
+  openSession(text: string, name: string): Promise<boolean> {
+    const what = `open ${quoted(name)}`;
+    if (new TextEncoder().encode(text).length > MAX_SESSION_FILE_BYTES) {
+      this.#notices.say(`Could not ${what}: it is more than ${String(MAX_SESSION_FILE_BYTES / (1024 * 1024))} MiB, which is more than a session that is opened here can be`);
+      return Promise.resolve(false);
+    }
+    return this.#attempt(what, { type: "openSession", text });
+  }
+
+  /** The session in a file that a person picked (`openSession`): the file is read here, and a file that cannot be read is said among the notices. True if the session was taken. */
+  async openSessionFile(file: { readonly name: string; text(): Promise<string> }): Promise<boolean> {
+    let text: string;
+    try {
+      text = await file.text();
+    } catch (error) {
+      this.#notices.say(`Could not open ${quoted(file.name)}: it could not be read (${whyNot(error)})`);
+      return false;
+    }
+    return this.openSession(text, file.name);
   }
 
   /**

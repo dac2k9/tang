@@ -6,7 +6,7 @@ import { MASTER, groupsFixture, macrosFixture, movesFixture, nodeNamed, reachFix
 import { MockServer } from "./mock";
 import type { MockOptions } from "./mock";
 import type { Module } from "./modules";
-import { Editor, refusal } from "./editor";
+import { Editor, MAX_SESSION_FILE_BYTES, refusal } from "./editor";
 import { Notices } from "./notices";
 import { samePort } from "./reach";
 import { Reveals } from "./reveals";
@@ -2325,5 +2325,62 @@ describe("undoing and redoing", () => {
     expect(await editor.undo()).toBe(false);
     expect(await editor.redo()).toBe(false);
     expect(said(notices)).toEqual(["Could not undo: Not connected to the server.", "Could not redo: Not connected to the server."]);
+  });
+});
+
+describe("opening another session (step 115: a session file that a person picked)", () => {
+  const FILE = "[[instrument]]\nplugin = \"builtin:osc\"\n";
+
+  test("sends the text as one intent and resolves true when the program takes it: no event is told, so the session is as it was (it is about to be another) and the history has no step", async () => {
+    const { server, client, notices, editor } = await open({ openSession: true });
+    const before = client.state.snapshot;
+    expect(await editor.openSession(FILE, "pluck.toml")).toBe(true);
+    expect(said(notices)).toEqual([]);
+    const sent = server.received.flatMap((message) => (message.type === "request" ? [message.intent] : []));
+    expect(sent).toEqual([{ type: "openSession", text: FILE }]);
+    expect(client.state.snapshot?.graph).toEqual(before?.graph);
+    expect(client.state.snapshot?.rev, "no event told, so no revision seen").toBe(before?.rev);
+    expect(client.state.history).toEqual({ undo: null, redo: null });
+  });
+
+  test("is refused, in the controller's words, by a program that cannot open another session: the page says so with the name of the file in quotes, and no revision is used", async () => {
+    const { client, notices, editor } = await open();
+    const rev = client.state.snapshot?.rev;
+    expect(await editor.openSession(FILE, "pluck.toml")).toBe(false);
+    expect(said(notices)).toEqual(['Could not open "pluck.toml": this program cannot open another session while it runs: start it with the file']);
+    expect(client.state.snapshot?.rev).toBe(rev);
+  });
+
+  test("says that a file is too big at once, and does not send it: the most is the half of what the server reads, in bytes of the text and not in characters", async () => {
+    const { server, notices, editor } = await open({ openSession: true });
+    const most = "x".repeat(MAX_SESSION_FILE_BYTES);
+    expect(await editor.openSession(most + "x", "big.toml")).toBe(false);
+    expect(said(notices)).toEqual(['Could not open "big.toml": it is more than 4 MiB, which is more than a session that is opened here can be']);
+    expect(server.received.some((message) => message.type === "request")).toBe(false);
+    // (Exactly the most goes; and a character of three bytes is three, so a text of that many characters does not.)
+    expect(await editor.openSession(most, "just.toml")).toBe(true);
+    expect(await editor.openSession("€".repeat(MAX_SESSION_FILE_BYTES / 3 + 1), "euros.toml")).toBe(false);
+  });
+
+  test("reads the file that a person picked and sends what is in it; one that cannot be read is said among the notices, with why, and nothing is sent", async () => {
+    const { server, notices, editor } = await open({ openSession: true });
+    expect(await editor.openSessionFile({ name: "a.toml", text: () => Promise.resolve(FILE) })).toBe(true);
+    expect(server.received.flatMap((message) => (message.type === "request" ? [message.intent] : []))).toEqual([{ type: "openSession", text: FILE }]);
+    const sent = server.received.length;
+    expect(await editor.openSessionFile({ name: "b.toml", text: () => Promise.reject(new Error("the disk went")) })).toBe(false);
+    expect(said(notices)).toEqual(['Could not open "b.toml": it could not be read (the disk went)']);
+    expect(server.received.length, "nothing more was sent").toBe(sent);
+  });
+
+  test("a file that a program that cannot open a session is given is refused with the file's name in the notice, as the text is", async () => {
+    const { notices, editor } = await open();
+    expect(await editor.openSessionFile({ name: "kick.toml", text: () => Promise.resolve(FILE) })).toBe(false);
+    expect(said(notices)).toEqual(['Could not open "kick.toml": this program cannot open another session while it runs: start it with the file']);
+  });
+
+  test("the notice quotes a name that is long cut short, as the others do", async () => {
+    const { notices, editor } = await open();
+    await editor.openSession(FILE, "a-session-file-with-a-very-long-name.toml");
+    expect(said(notices)[0]).toMatch(/^Could not open "a-session-file-with-a-ve…": /);
   });
 });

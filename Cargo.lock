@@ -3562,8 +3562,10 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "raw-window-handle",
+ "serde_json",
  "tang",
  "tempfile",
+ "tungstenite",
  "wry",
 ]
 

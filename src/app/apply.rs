@@ -54,6 +54,8 @@ impl Controller {
             Intent::SaveSelectionAsModule { nodes, name } => return self.save_selection_intent(&nodes, &name),
             // (A window that is opened is no change of the session either: what the person does in it comes back as `SetParam`.)
             Intent::OpenEditor { node } => return self.open_editor_intent(node),
+            // (Another session is no change of this one: the owner makes the engine again, and what is here goes with it.)
+            Intent::OpenSession { text } => return self.open_session_intent(&text),
             // (What they do is carried out as any intent is, and is no step of the history.)
             Intent::Undo => return self.undo(),
             Intent::Redo => return self.redo(),
@@ -146,7 +148,7 @@ impl Controller {
             Intent::AddInstrument { plugin } => self.add_instrument_intent(&plugin)?,
             Intent::ReplaceInstrument { node, plugin } => self.replace_instrument_intent(node, &plugin)?,
             Intent::ClearInstrument { node } => self.clear_instrument_intent(node)?,
-            Intent::Save | Intent::SaveAs { .. } | Intent::SaveModule { .. } | Intent::SaveSelectionAsModule { .. } | Intent::OpenEditor { .. } | Intent::Undo | Intent::Redo => unreachable!("done above"),
+            Intent::Save | Intent::SaveAs { .. } | Intent::SaveModule { .. } | Intent::SaveSelectionAsModule { .. } | Intent::OpenEditor { .. } | Intent::OpenSession { .. } | Intent::Undo | Intent::Redo => unreachable!("done above"),
         };
         Ok(self.conclude(done))
     }
@@ -178,6 +180,23 @@ impl Controller {
         self.save().map_err(|e| IntentError::Io(e.to_string()))?;
         self.rev += 1;
         let applied = Applied::of(self.rev, vec![Event::Saved { file: self.session_file_name() }]);
+        self.publish(&applied);
+        Ok(applied)
+    }
+
+    /// Hand another session to the program's owner to open (`Intent::OpenSession`, step 115). The text is read first, so that one that is not a session is refused with what is wrong with it, and one that cannot be loaded
+    /// is found by the owner and logged (its engine is made again with a new session standing in for it, as for a host's project that cannot be read). Nothing is changed here: no step of the history, the session is not
+    /// marked, and the clients are told nothing but that a revision is used (they are about to be served by the new engine).
+    fn open_session_intent(&mut self, text: &str) -> Result<Applied, IntentError> {
+        let Some(open) = &self.open_session else {
+            return Err(invalid("this program cannot open another session while it runs: start it with the file"));
+        };
+        if let Err(error) = crate::session::parse(text) {
+            return Err(invalid(format!("that is not a session: {error:#}")));
+        }
+        open(text.to_string()).map_err(invalid)?;
+        self.rev += 1;
+        let applied = Applied::of(self.rev, Vec::new());
         self.publish(&applied);
         Ok(applied)
     }
@@ -6477,6 +6496,97 @@ type = "midi"
         sent(&engine);
         assert!(matches!(ctl.apply(Intent::Save), Err(IntentError::Io(_))));
         assert_eq!((ctl.rev, ctl.dirty), (1, true));
+    }
+
+    /// A controller whose owner can open another session: what it is handed is kept, and it says what a test tells it to.
+    fn controller_that_opens(says: Result<(), String>) -> (StubEngine, Controller, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let (engine, mut ctl) = controller();
+        let handed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = handed.clone();
+        ctl.open_session = Some(Box::new(move |text| {
+            kept.lock().unwrap().push(text);
+            says.clone()
+        }));
+        (engine, ctl, handed)
+    }
+
+    const ANOTHER_SESSION: &str = "[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"C4-C5\"\n[master]\nlimiter = false\n";
+
+    #[test]
+    fn another_session_is_handed_to_the_owner_as_text_and_nothing_here_changes() {
+        let (engine, mut ctl, handed) = controller_that_opens(Ok(()));
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = heard.clone();
+        ctl.subscribe(Box::new(move |applied: &Applied| sink.lock().unwrap().push(applied.clone())));
+        let before = ctl.model.instruments.len();
+        let applied = ctl.apply(Intent::OpenSession { text: ANOTHER_SESSION.to_string() }).expect("taken");
+        assert_eq!(*heard.lock().unwrap(), std::slice::from_ref(&applied), "the clients are told that a revision was used, and of no event");
+        assert_eq!(applied, Applied::of(1, Vec::new()), "a revision is used, and the clients are told of no event");
+        assert_eq!(*handed.lock().unwrap(), [ANOTHER_SESSION], "the text as it came, once");
+        assert_eq!((ctl.rev, ctl.dirty), (1, false), "the session is not marked: it is about to be another");
+        assert_eq!(ctl.model.instruments.len(), before, "this session is as it was until the owner makes the engine again");
+        assert!(sent(&engine).is_empty(), "the audio thread has nothing to do with it: the owner makes another");
+        assert_eq!(ctl.apply(Intent::Undo), Err(invalid("there is nothing to undo")), "and it is no step of the history");
+    }
+
+    #[test]
+    fn a_text_that_is_not_a_session_is_refused_with_what_is_wrong_and_the_owner_is_not_asked() {
+        let (_engine, mut ctl, handed) = controller_that_opens(Ok(()));
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = heard.clone();
+        ctl.subscribe(Box::new(move |applied: &Applied| sink.lock().unwrap().push(applied.clone())));
+        for (what, text) in [("not toml", "this is {not toml"), ("a plugin that is a number", "[[instrument]]\nplugin = 3\n"), ("a volume that is a word", "[[instrument]]\nplugin = \"builtin:osc\"\nvolume = \"loud\"\n"), ("a number that is not one", "[[instrument]]\nplugin = \"builtin:osc\"\nvolume = nan\n")] {
+            match ctl.apply(Intent::OpenSession { text: text.to_string() }) {
+                Err(IntentError::Invalid(why)) => assert!(why.starts_with("that is not a session: "), "{what}: {why}"),
+                other => panic!("{what}: {other:?}"),
+            }
+        }
+        assert!(handed.lock().unwrap().is_empty(), "the owner was asked for none of them");
+        assert_eq!((ctl.rev, ctl.dirty), (0, false), "a refusal is not a revision");
+        assert!(heard.lock().unwrap().is_empty(), "and the clients are told of none");
+    }
+
+    #[test]
+    fn polling_makes_the_calls_that_clap_plugins_asked_the_main_thread_for() {
+        use crate::plugin::clap_callbacks::{self, MainThreadCall};
+        use crate::plugin::clap_editor::Asked;
+        struct Called(std::rc::Rc<std::cell::Cell<usize>>);
+        impl MainThreadCall for Called {
+            fn call(&self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let (_engine, mut ctl) = controller();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (asked, alive) = (std::sync::Arc::new(Asked::default()), std::sync::Arc::new(()));
+        let id = clap_callbacks::register(std::rc::Rc::new(Called(calls.clone())), asked.clone(), &alive);
+        ctl.poll();
+        assert_eq!(calls.get(), 0, "nothing was asked");
+        asked.request_callback();
+        ctl.poll();
+        assert_eq!(calls.get(), 1, "the main thread's turn, which polling is, makes the call");
+        ctl.poll();
+        assert_eq!(calls.get(), 1, "once for an ask");
+        clap_callbacks::forget(id);
+    }
+
+    #[test]
+    fn a_program_that_cannot_open_another_session_says_so() {
+        let (_engine, mut ctl) = controller();
+        assert!(ctl.open_session.is_none());
+        assert_eq!(
+            ctl.apply(Intent::OpenSession { text: ANOTHER_SESSION.to_string() }),
+            Err(invalid("this program cannot open another session while it runs: start it with the file"))
+        );
+        assert_eq!((ctl.rev, ctl.dirty), (0, false));
+    }
+
+    #[test]
+    fn an_owner_that_does_not_take_the_session_says_why_in_its_words_and_it_is_no_revision() {
+        let (_engine, mut ctl, handed) = controller_that_opens(Err("the plugin has stopped".to_string()));
+        assert_eq!(ctl.apply(Intent::OpenSession { text: ANOTHER_SESSION.to_string() }), Err(invalid("the plugin has stopped")));
+        assert_eq!(handed.lock().unwrap().len(), 1, "it was asked");
+        assert_eq!((ctl.rev, ctl.dirty), (0, false));
     }
 
     /// The files that a directory has, by name.

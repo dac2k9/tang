@@ -1,10 +1,11 @@
 // The session as a whole, in the bar at the top of the page: the file it is saved to, whether
 // there is anything in it that is not saved, the buttons that undo and redo (`UndoRedo`), its tempo (`Tempo`), the button
 // (and the keys: Control+S, or Command+S on a Mac) that saves it, and the one that saves it under another
-// name (`SaveAs`). The file is the server's own: a page names a file, and the server says where it goes.
+// name (`SaveAs`), and, for a program that can open another session while it runs, the one that opens a file the person picks (`OpenSession`). The file is the server's own: a page names a file, and the server says where it goes.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useClient, useClientState, useEditor } from "./ClientProvider";
+import { OpenSession } from "./OpenSession";
 import { SaveAs } from "./SaveAs";
 import "./SessionBar.css";
 import { Tempo } from "./Tempo";
@@ -59,6 +60,7 @@ export function SessionBar() {
         Save
       </button>
       <SaveAs />
+      <OpenSession />
     </div>
   );
 }

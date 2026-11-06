@@ -399,3 +399,153 @@ fn a_press_when_the_plugin_has_not_started_opens_nothing_and_the_switch_goes_bac
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(so_far(file), before, "and no page was opened: there is none, the plugin is not switched on");
 }
+
+/// A client of the page at `url`, as a browser is: the real socket, which the page's own code opens.
+fn page_socket(url: &str) -> tungstenite::WebSocket<std::net::TcpStream> {
+    let port: u16 = url.strip_prefix("http://127.0.0.1:").unwrap_or_else(|| panic!("an address on this machine: {url}")).trim_end_matches('/').parse().unwrap_or_else(|why| panic!("{url}: {why}"));
+    let stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("the page is served");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (socket, _) = tungstenite::client(format!("ws://127.0.0.1:{port}/ws"), stream).expect("the page takes the socket");
+    socket
+}
+
+/// The next message that the page sends, as JSON.
+fn heard(socket: &mut tungstenite::WebSocket<std::net::TcpStream>) -> serde_json::Value {
+    loop {
+        match socket.read().expect("the page says something in ten seconds") {
+            tungstenite::Message::Text(text) => return serde_json::from_str(text.as_str()).expect("JSON"),
+            _ => continue,
+        }
+    }
+}
+
+/// What the page answers to the request `req_id`.
+fn answer(socket: &mut tungstenite::WebSocket<std::net::TcpStream>, req_id: u64) -> serde_json::Value {
+    loop {
+        let message = heard(socket);
+        if message["reqId"] == req_id {
+            return message;
+        }
+    }
+}
+
+const OTHER_SESSION: &str = "[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"C4-C5\"\n\n[master]\nlimiter = false\n";
+
+#[test]
+fn a_page_that_opens_another_session_has_the_host_called_back_and_the_engine_made_again_with_it_and_the_project_marked_changed() {
+    let file = stand_in();
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let before = so_far(file);
+    let bundle = bundle();
+    let mut rig = Rig::start(&bundle, instrument_id());
+
+    // The page: the switch that opens it is pressed, and the stand-in for the browser is given its address.
+    assert!(rig.block_with(Some(1.0)).is_empty());
+    rig.call_back();
+    let url = opened(file, before + 1).get(before).cloned().expect("the browser was opened");
+    assert_eq!(rig.block_with(None), [0.0], "the switch is put back");
+    let asked = rig.callbacks();
+
+    // A person picks a file in the page: it sends the text of the session as one request, and is told that it was taken.
+    let mut socket = page_socket(&url);
+    let hello = heard(&mut socket);
+    assert!(hello["features"].as_array().unwrap().iter().any(|feature| feature == "openSession"), "the page is told that it can open a session: {hello}");
+    socket.send(tungstenite::Message::text(serde_json::json!({"type": "request", "reqId": 1, "intent": {"type": "openSession", "text": OTHER_SESSION}}).to_string())).unwrap();
+    assert_eq!(answer(&mut socket, 1)["type"], "ack");
+
+    // The controller's thread asked the host to call back, and nothing is changed until the host does (the plugin's own session is what the host would save).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.callbacks() == asked && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(rig.callbacks(), asked + 1, "the host was asked to call back, once");
+    assert_eq!(rig.dirty_marks(), 0, "and has not been told that the project changed");
+    assert!(!String::from_utf8_lossy(&rig.save()).contains("C4-C5"), "the session is as it was");
+
+    // The host calls back: the engine is made again with the session, and the host is told that its project has changed.
+    rig.call_back();
+    assert_eq!(rig.dirty_marks(), 1, "the host is told that the project changed, once");
+    let saved = String::from_utf8_lossy(&rig.save()).into_owned();
+    assert!(saved.contains("range = \"C4-C5\""), "the session is the one that was opened:\n{saved}");
+    // (The page that was served by the engine that is gone is gone.)
+    assert!(socket.read().is_err() || socket.read().is_err(), "the old page's socket ends");
+
+    // The new engine is served at another address, which the switch opens.
+    assert!(rig.block_with(Some(1.0)).is_empty());
+    rig.call_back();
+    let urls = opened(file, before + 2);
+    let now = urls.get(before + 1).cloned().expect("the browser was opened again");
+    assert_ne!(now, url, "the page is at another address");
+    // A call back with nothing to do does nothing: the project is not marked again.
+    rig.call_back();
+    assert_eq!(rig.dirty_marks(), 1);
+    rig.stop();
+}
+
+#[test]
+fn a_page_that_opens_a_text_that_is_not_a_session_is_refused_and_the_host_is_not_called_back() {
+    let file = stand_in();
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let before = so_far(file);
+    let bundle = bundle();
+    let mut rig = Rig::start(&bundle, instrument_id());
+    assert!(rig.block_with(Some(1.0)).is_empty());
+    rig.call_back();
+    let url = opened(file, before + 1).get(before).cloned().expect("the browser was opened");
+    let asked = rig.callbacks();
+    let mut socket = page_socket(&url);
+    heard(&mut socket);
+    socket.send(tungstenite::Message::text(serde_json::json!({"type": "request", "reqId": 1, "intent": {"type": "openSession", "text": "this is {not toml"}}).to_string())).unwrap();
+    let refused = answer(&mut socket, 1);
+    assert_eq!(refused["type"], "rejected", "{refused}");
+    assert!(refused["error"]["message"].as_str().unwrap().starts_with("that is not a session: "), "{refused}");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(rig.callbacks(), asked, "the host was not asked to call back");
+    rig.call_back();
+    assert_eq!(rig.dirty_marks(), 0, "and the project is as it was");
+    rig.stop();
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn a_window_follows_the_instance_to_the_address_that_a_session_opened_by_its_page_is_served_at() {
+    tang_clap::gui::use_maker_on_this_thread(fake_maker);
+    let bundle = bundle();
+    let mut instance = instance(&bundle, instrument_id());
+    let mut handle = instance.plugin_handle();
+    let gui = handle.get_extension::<PluginGui>().expect("the plugin has a window");
+    gui.create(&mut handle, embedded()).expect("an embedded window is made");
+    gui.set_scale(&mut handle, 1.0).unwrap();
+    // SAFETY: the window is a pointer that nothing is done with: the view of this test does not put itself in it.
+    unsafe { gui.set_parent(&mut handle, host_window()) }.expect("the view is made in the host's window");
+    gui.show(&mut handle).expect("and shown");
+    let processor = switch_on(&mut instance);
+    let told = said();
+    let first = told.iter().find_map(|line| line.strip_prefix("load ")).unwrap_or_else(|| panic!("the page of the instance: {told:?}")).to_string();
+
+    // The page, in the window, opens another session (a person picked a file): the plugin asks the host to call back.
+    let mut socket = page_socket(&first);
+    heard(&mut socket);
+    socket.send(tungstenite::Message::text(serde_json::json!({"type": "request", "reqId": 1, "intent": {"type": "openSession", "text": OTHER_SESSION}}).to_string())).unwrap();
+    assert_eq!(answer(&mut socket, 1)["type"], "ack");
+    let callbacks = |instance: &PluginInstance<Handlers>| instance.access_shared_handler(|shared| shared.callbacks.load(std::sync::atomic::Ordering::SeqCst));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while callbacks(&instance) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(callbacks(&instance), 1, "the host was asked to call back");
+    assert!(said().is_empty(), "the window waits for the host: nothing is done on the controller's thread");
+
+    // The host calls back: the engine is made again, and the window goes to the new address.
+    instance.call_on_main_thread_callback();
+    let told = said();
+    assert_eq!(told.len(), 1, "{told:?}");
+    let second = told[0].strip_prefix("load ").unwrap_or_else(|| panic!("the page of the instance: {told:?}"));
+    assert_ne!(second, first, "another address");
+    assert!(second.starts_with("http://127.0.0.1:"), "{second}");
+
+    let mut handle = instance.plugin_handle();
+    let gui = handle.get_extension::<PluginGui>().unwrap();
+    gui.destroy(&mut handle);
+    instance.deactivate(processor.stop_processing());
+}

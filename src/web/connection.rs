@@ -22,9 +22,14 @@ use crate::web::Shared;
 use crate::web::hub::{ClientId, Hub, Outgoing};
 use crate::web::security::Policy;
 
-/// The longest message the server reads, in bytes. A session's worth of intents is a
+/// The longest message the server reads from a connection that has not been let in, in bytes. A session's worth of intents is a
 /// few dozen bytes each; this is generous.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// The longest message that a connection which has been let in may send (step 115): the text of a session file goes through as one (`Intent::OpenSession`), and a session that keeps the state of a plugin
+/// (a sampler's, a drum kit's) is some hundreds of kilobytes. The frame that carries it is read whole before this is looked at, so the transport takes as much (`server::upgrade`) and a connection that
+/// has not been let in is cut at `MAX_MESSAGE_BYTES` all the same, the moment that it is read.
+pub const MAX_OPEN_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// The most nodes a connection may watch the signal of at once (`ClientMessage::Probes`): far more than the engine has rings for, which are shared by every client; a longer list is cut.
 pub const MAX_PROBES: usize = 64;
@@ -105,6 +110,8 @@ pub struct Context {
     pub limits: Limits,
     /// Whether this machine can show a plugin's own window (`Config::windows`): said in the hello.
     pub windows: bool,
+    /// Whether the program can open another session while it runs (`Config::open_session`): said in the hello.
+    pub open_session: bool,
 }
 
 pub struct Connection {
@@ -115,6 +122,7 @@ pub struct Connection {
     owner: Sender<OwnerRequest>,
     notes: NoteInput,
     windows: bool,
+    open_session: bool,
     state: State,
     /// The notes this connection has started and not ended, one bit each.
     held: u128,
@@ -123,9 +131,9 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(id: ClientId, context: Context, now: Instant) -> Connection {
-        let Context { hub, policy, shared, owner, notes, limits, windows } = context;
+        let Context { hub, policy, shared, owner, notes, limits, windows, open_session } = context;
         let state = if policy.needs_token() { State::Unauthorized } else { State::Open };
-        Connection { id, hub, policy, shared, owner, notes, windows, state, held: 0, limiter: RateLimiter::new(limits, now) }
+        Connection { id, hub, policy, shared, owner, notes, windows, open_session, state, held: 0, limiter: RateLimiter::new(limits, now) }
     }
 
     /// Whether the connection may go on without the token: it has none to give, or it
@@ -139,14 +147,15 @@ impl Connection {
         self.reply(&ServerMessage::Hello {
             protocol: PROTOCOL,
             rev: self.shared.rev.load(Ordering::Relaxed),
-            features: ["notes", "telemetry"].into_iter().chain(self.windows.then_some("windows")).map(String::from).collect(),
+            features: ["notes", "telemetry"].into_iter().chain(self.windows.then_some("windows")).chain(self.open_session.then_some("openSession")).map(String::from).collect(),
             needs_token: self.policy.needs_token(),
         });
     }
 
     /// A text frame arrived.
     pub fn on_text(&mut self, text: &str, now: Instant) -> Flow {
-        if text.len() > MAX_MESSAGE_BYTES {
+        let longest = if self.is_open() { MAX_OPEN_MESSAGE_BYTES } else { MAX_MESSAGE_BYTES };
+        if text.len() > longest {
             return self.close_with(ErrorCode::BadRequest, "that message is too long");
         }
         let message = match serde_json::from_str::<ClientMessage>(text) {
@@ -320,7 +329,7 @@ mod tests {
         let notes = NoteInput::new(midi_tx, held.clone(), filter.clone());
         let t0 = Instant::now();
         let shared = Arc::new(Shared::new(7, SessionModel::default().telemetry_layout()));
-        let context = Context { hub: hub.clone(), policy: Arc::new(policy), shared, owner: owner_tx, notes, limits, windows: false };
+        let context = Context { hub: hub.clone(), policy: Arc::new(policy), shared, owner: owner_tx, notes, limits, windows: false, open_session: false };
         let conn = Connection::new(id, context, t0);
         Rig { conn, id, out, owner, midi, hub, filter, held, t0 }
     }
@@ -705,6 +714,7 @@ mod tests {
             notes,
             limits: Limits::default(),
             windows: false,
+            open_session: false,
         };
         let mut conn = Connection::new(id, context, t0);
         conn.on_text(&json!({"type": "noteOn", "note": 60, "velocity": 100}).to_string(), t0);
@@ -748,19 +758,44 @@ mod tests {
 
     #[test]
     fn a_message_that_is_too_long_ends_the_connection_unread() {
-        let mut rig = rig();
+        // A connection that has not been let in (it has a token to give, and has not given it) reads no more than the small limit.
+        let mut rig = rig_with(guarded_policy(), Limits::default(), 16);
         let now = rig.t0;
         let long = format!(r#"{{"type":"auth","token":"{}"}}"#, "x".repeat(MAX_MESSAGE_BYTES));
         assert_eq!(rig.conn.on_text(&long, now), Flow::Close);
         assert_eq!(rig.said()[0]["error"]["code"], "badRequest");
-        // Exactly the longest: read. One more: not.
-        let padding = MAX_MESSAGE_BYTES - r#"{"type":"auth","token":""}"#.len();
+        // One that has been let in reads more (a session's file goes through as one message): exactly the longest, and one more is not.
+        let padding = MAX_OPEN_MESSAGE_BYTES - r#"{"type":"auth","token":""}"#.len();
         let just_fits = format!(r#"{{"type":"auth","token":"{}"}}"#, "x".repeat(padding));
-        assert_eq!(just_fits.len(), MAX_MESSAGE_BYTES);
+        assert_eq!(just_fits.len(), MAX_OPEN_MESSAGE_BYTES);
         let mut rig = rig_with(open_policy(), Limits::default(), 16);
         assert_eq!(rig.conn.on_text(&just_fits, now), Flow::Continue);
         let one_too_many = format!(r#"{{"type":"auth","token":"{}"}}"#, "x".repeat(padding + 1));
         assert_eq!(rig.conn.on_text(&one_too_many, now), Flow::Close);
+    }
+
+    #[test]
+    fn a_connection_that_is_let_in_reads_what_one_that_is_not_would_be_cut_off_for() {
+        // The same message, a little over the small limit: a connection that is open reads it, one that waits for its token does not.
+        let now = Instant::now();
+        let over = format!(r#"{{"type":"auth","token":"{}"}}"#, "x".repeat(MAX_MESSAGE_BYTES + 1));
+        let mut open = rig_with(open_policy(), Limits::default(), 16);
+        assert_eq!(open.conn.on_text(&over, now), Flow::Continue);
+        let mut waiting = rig_with(guarded_policy(), Limits::default(), 16);
+        assert_eq!(waiting.conn.on_text(&over, now), Flow::Close);
+    }
+
+    #[test]
+    fn hello_says_open_session_only_when_the_program_can_open_another_session() {
+        let mut rig = rig();
+        rig.conn.open();
+        assert_eq!(rig.said()[0]["features"], json!(["notes", "telemetry"]));
+        rig.conn.open_session = true;
+        rig.conn.open();
+        assert_eq!(rig.said()[0]["features"], json!(["notes", "telemetry", "openSession"]));
+        rig.conn.windows = true;
+        rig.conn.open();
+        assert_eq!(rig.said()[0]["features"], json!(["notes", "telemetry", "windows", "openSession"]), "after the others");
     }
 
     #[test]

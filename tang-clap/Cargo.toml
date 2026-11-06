@@ -34,6 +34,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 [dev-dependencies]
 # A host in the same process, to run the plugin through the way a DAW does (and the raw buffers that a host that processes in place gives).
 clap-sys = "0.5"
+# A client of the page that the plugin serves (the intent that opens another session goes through the real socket), and the JSON that it speaks.
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+serde_json = "1"
 tempfile = "3"
 clack-host = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin"] }
 clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin", "clack-host", "audio-ports", "note-ports", "params", "state", "gui"] }

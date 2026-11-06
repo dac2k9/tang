@@ -5,6 +5,7 @@ pub mod autodetect;
 pub mod builtin;
 pub mod chain;
 pub mod clap;
+pub mod clap_callbacks;
 pub mod clap_editor;
 pub mod editors;
 #[cfg(test)]

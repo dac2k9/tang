@@ -22,7 +22,7 @@ use crate::plugin::builtin::HostInput;
 use crate::plugin::chain::CHAIN_CHANNELS;
 use crate::source::Events;
 
-use control::{Control, Setup};
+use control::{Control, Owner, Request, Setup};
 use engine::Shared;
 
 pub use control::HOST_DEVICE;
@@ -92,11 +92,11 @@ struct Session {
 
 impl Session {
     /// Start a controller's thread on `text`, give the engine that it makes to `shared` (so that the commands of the load are taken out as they are sent), and wait until the session is loaded. Whatever the engine had is dropped, here.
-    fn start(shared: &Arc<Shared>, text: &str, rate: f32, frames: u32, serve: bool, input: &Arc<HostInput>) -> Result<Session, String> {
+    fn start(shared: &Arc<Shared>, text: &str, rate: f32, frames: u32, serve: bool, input: &Arc<HostInput>, owner: Owner) -> Result<Session, String> {
         let (audio_tx, audio_rx) = crossbeam_channel::bounded(1);
         let (started_tx, started_rx) = crossbeam_channel::bounded(1);
         let (control_tx, control_rx) = crossbeam_channel::unbounded();
-        let setup = Setup { text: text.to_string(), sample_rate: rate, max_frames: frames as usize, serve, bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)), input: input.clone() };
+        let setup = Setup { text: text.to_string(), sample_rate: rate, max_frames: frames as usize, serve, bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)), input: input.clone(), owner };
         let thread = std::thread::Builder::new()
             .name("tang-controller".to_string())
             .spawn(move || control::run(setup, audio_tx, started_tx, control_rx))
@@ -161,17 +161,41 @@ pub struct Host {
     /// The session as it was last given or asked for: what starts the engine, and what a save gives while there is none.
     text: Option<String>,
     running: Option<Running>,
+    /// What the controller's thread asks of this host (the page opened another session: `Intent::OpenSession`); the host's main thread reads it (`serve_requests`).
+    requests: (Sender<Request>, Receiver<Request>),
+    /// What wakes the host's main thread up to look at `requests` (a plugin: `request_callback`, which may be called from any thread); the controller's thread calls it after it has put a request there.
+    waker: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Host {
     /// A plugin of this kind that is not running yet (`activate` starts it), which serves its session to browsers if `serve` (a build that has no web interface serves none).
     pub fn new(kind: Kind, serve: bool) -> Host {
         log_file::init();
-        Host { kind, serve, text: None, running: None }
+        Host { kind, serve, text: None, running: None, requests: crossbeam_channel::unbounded(), waker: Arc::new(|| {}) }
     }
 
     pub fn kind(&self) -> Kind {
         self.kind
+    }
+
+    /// Say how to wake the host's main thread when the page has something for it (a plugin: `request_callback`; what it does then is `serve_requests`). It is for the sessions that are started after this: set it before `activate`.
+    pub fn set_waker(&mut self, waker: Arc<dyn Fn() + Send + Sync>) {
+        self.waker = waker;
+    }
+
+    /// Do what the controller's thread has asked since the last look, on the host's main thread: the page opened another session, which is loaded as a project that the host opens is (`set_session_text`: the engine is made again,
+    /// at another address). True if a session was replaced, which is for the caller to follow (a window shows the new page, the host is told that the project has changed). One that cannot be loaded at all is logged and leaves the engine as it was.
+    pub fn serve_requests(&mut self) -> bool {
+        let mut replaced = false;
+        while let Ok(request) = self.requests.1.try_recv() {
+            match request {
+                Request::OpenSession(text) => match self.set_session_text(text) {
+                    Ok(()) => replaced = true,
+                    Err(why) => log::error!("The session that the page asked to open could not be loaded: {why}"),
+                },
+            }
+        }
+        replaced
     }
 
     /// Start the engine for blocks of up to `max_frames` frames at `sample_rate`, and give the host's audio thread its end of it. A plugin that is activated again at the rate and the block size that it has is not made again (the sound that the page has been
@@ -213,13 +237,13 @@ impl Host {
 
     /// The session of `text` loaded onto `running`'s engine, or, if it cannot be, a new one with `text` kept (`Session::unreadable`).
     fn load(&self, running: &Running, text: &str) -> Result<Session, String> {
-        let attempt = Session::start(&running.shared, text, running.rate, running.frames, self.serve, &running.input);
+        let attempt = Session::start(&running.shared, text, running.rate, running.frames, self.serve, &running.input, self.owner());
         match attempt {
             Ok(session) => Ok(session),
             Err(why) => {
                 log::error!("The session of this plugin could not be loaded ({why}); a new session stands in for it, and what was given is kept until the new one is changed");
                 let default = self.kind.default_session();
-                let mut session = Session::start(&running.shared, default, running.rate, running.frames, self.serve, &running.input)?;
+                let mut session = Session::start(&running.shared, default, running.rate, running.frames, self.serve, &running.input, self.owner())?;
                 session.unreadable = Some(text.to_string());
                 Ok(session)
             }
@@ -255,6 +279,11 @@ impl Host {
         let result = loaded.map(|session| running.session = Some(session));
         self.running = Some(running);
         result
+    }
+
+    /// How a controller that this host starts reaches it.
+    fn owner(&self) -> Owner {
+        Owner { requests: self.requests.0.clone(), wake: self.waker.clone() }
     }
 
     /// Where the page of this instance is, if the engine runs and serves one.
@@ -643,6 +672,29 @@ mod tests {
         assert_eq!(b, c, "a third channel is the second again");
     }
 
+    #[test]
+    fn every_request_that_is_waiting_is_done_in_the_order_it_came_and_a_look_with_none_waiting_does_nothing() {
+        let mut host = Host::new(Kind::Instrument, false);
+        let _audio = host.activate(RATE, BLOCK as u32).unwrap();
+        assert!(!host.serve_requests(), "nothing is waiting");
+        let session = |range: &str| format!("[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"{range}\"\n\n[master]\nlimiter = false\n");
+        host.requests.0.send(Request::OpenSession(session("C4-C5"))).unwrap();
+        host.requests.0.send(Request::OpenSession(session("D4-D5"))).unwrap();
+        assert!(host.serve_requests(), "a session was replaced");
+        let text = host.session_text().unwrap();
+        assert!(text.contains("range = \"D4-D5\"") && !text.contains("C4-C5"), "both were done, in the order they came: the last is the session\n{text}");
+        assert!(!host.serve_requests(), "and they were taken: a second look finds nothing");
+    }
+
+    #[test]
+    fn a_session_that_the_page_opens_is_the_hosts_text_for_a_save_even_before_the_engine_is_asked() {
+        // A host that is not running keeps the text, as a project that is opened before the plugin is switched on does.
+        let mut host = Host::new(Kind::Instrument, false);
+        host.requests.0.send(Request::OpenSession("[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"E4-E5\"\n".to_string())).unwrap();
+        assert!(host.serve_requests());
+        assert!(host.session_text().unwrap().contains("E4-E5"));
+    }
+
     #[cfg(feature = "web")]
     mod page {
         use std::net::SocketAddr;
@@ -767,6 +819,59 @@ mod tests {
             assert_ne!(address(&first), address(&second), "each instance has its own port");
             assert!(plain.url().is_none());
             assert!(Host::new(Kind::Instrument, true).url().is_none(), "none before it is activated");
+        }
+
+        /// The session that a page opens in the tests below: a range of its own, so that it can be told from the default one.
+        const OTHER: &str = "[[instrument]]\nplugin = \"builtin:osc\"\nrange = \"C4-C5\"\n\n[master]\nlimiter = false\n";
+
+        #[tokio::test]
+        async fn a_page_that_opens_another_session_has_the_host_woken_and_the_engine_made_again_with_it_at_another_address() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let mut host = Host::new(Kind::Instrument, true);
+            let woken = Arc::new(AtomicUsize::new(0));
+            let counter = woken.clone();
+            host.set_waker(Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }));
+            let _audio = host.activate(RATE, BLOCK as u32).unwrap();
+            let before = host.url().expect("served");
+            // The hello says that this page can open another session.
+            let mut first = connect(address(&host)).await;
+            let hello = said(&mut first).await;
+            assert!(hello["features"].as_array().unwrap().iter().any(|feature| feature == "openSession"), "{hello}");
+            drop(first);
+            let (mut client, _, _) = subscribed(&host).await;
+
+            tell(&mut client, json!({"type": "request", "reqId": 1, "intent": {"type": "openSession", "text": OTHER}})).await;
+            assert_eq!(answer(&mut client, 1).await["type"], "ack");
+            wait_until("the host is woken", || woken.load(Ordering::SeqCst) == 1).await;
+            assert!(host.session_text().unwrap().contains("builtin:osc") && !host.session_text().unwrap().contains("C4-C5"), "the session is as it was until the host makes the engine again");
+            assert!(host.serve_requests(), "the host made it again");
+            assert_ne!(host.url().expect("served"), before, "and the page is served again, at another address (a window follows it)");
+            let text = host.session_text().unwrap();
+            assert!(text.contains("range = \"C4-C5\""), "the session is the one that was opened:\n{text}");
+            assert!(!host.serve_requests(), "and a second look finds nothing");
+        }
+
+        #[tokio::test]
+        async fn a_text_that_is_not_a_session_is_refused_in_the_page_and_the_host_is_not_asked() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let mut host = Host::new(Kind::Instrument, true);
+            let woken = Arc::new(AtomicUsize::new(0));
+            let counter = woken.clone();
+            host.set_waker(Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }));
+            let _audio = host.activate(RATE, BLOCK as u32).unwrap();
+            let before = host.url().expect("served");
+            let (mut client, _, _) = subscribed(&host).await;
+            tell(&mut client, json!({"type": "request", "reqId": 1, "intent": {"type": "openSession", "text": "this is {not toml"}})).await;
+            let refused = answer(&mut client, 1).await;
+            assert_eq!(refused["type"], "rejected", "{refused}");
+            assert!(refused["error"]["message"].as_str().unwrap().starts_with("that is not a session: "), "{refused}");
+            assert_eq!(woken.load(Ordering::SeqCst), 0, "the host was not asked");
+            assert!(!host.serve_requests(), "and has nothing to do");
+            assert_eq!(host.url().expect("served"), before, "the engine is as it was");
         }
     }
 }
