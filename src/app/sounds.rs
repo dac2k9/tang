@@ -378,8 +378,8 @@ mod tests {
     #[test]
     fn a_folder_lists_what_is_in_the_folders_in_it_by_a_name_that_has_them_and_an_id_with_slashes() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "drums/kick.toml", OSC);
-        write(dir.path(), "drums/deep/sub.toml", OSC);
+        changed(&write(dir.path(), "drums/kick.toml", OSC), 10);
+        changed(&write(dir.path(), "drums/deep/sub.toml", OSC), 10);
         let listing = folder(dir.path()).list().unwrap();
         assert_eq!(names(&listing), ["drums/deep/sub", "drums/kick"]);
         assert_eq!(listing.entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(), ["drums/deep/sub.toml", "drums/kick.toml"]);
@@ -398,6 +398,10 @@ mod tests {
         write(dir.path(), "target/d.toml", OSC);
         write(dir.path(), "node_modules/e.toml", OSC);
         fs::create_dir_all(dir.path().join("folder.toml")).unwrap();
+        // (As new as one another, so that the order is by name: files that are written one after the other can be a second apart.)
+        for name in ["a.toml", "B.TOML", "c.Toml"] {
+            changed(&dir.path().join(name), 10);
+        }
         let listing = folder(dir.path()).list().unwrap();
         assert_eq!(names(&listing), ["a", "B", "c"], "an extension in any case is one, and is not in the name");
     }
