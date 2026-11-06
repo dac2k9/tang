@@ -1,4 +1,4 @@
-/* The page itself: the tokens' background and type, and nothing else. */
+/* The page itself: the tokens' background and type, and what a drag must not do to it. */
 html,
 body,
 #root {
@@ -14,4 +14,23 @@ body {
 
 * {
   box-sizing: border-box;
+}
+
+/*
+ * A control surface and not a document: a drag that starts on a knob must not select text. WebKit (Safari, and the web view of the plugin's window on macOS) starts a selection from the nearest text when a drag starts
+ * on something that cannot be selected, and paints it across the canvas (gray, when its window is not the key one); it knows only the prefixed property, so the unprefixed `user-select` of a knob alone does nothing there.
+ * What takes text, and what is shown to be copied (the notices, the session as JSON), stays selectable.
+ */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.tang-notice__text,
+.tang-session {
+  -webkit-user-select: text;
+  user-select: text;
 }

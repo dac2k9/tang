@@ -88,7 +88,7 @@ phase 0 step list: [`docs/web-ui.md`](docs/web-ui.md). Summary:
   vanilla zustand store, the frame loop, `Drive` (what a control shows while the server
   catches up, one intent a frame), the engine's modulation laws for the knobs' rings, and
   the mock engine, which speaks the protocol in the page), generated protocol types,
-  design tokens as CSS variables (`web/src/ui/tokens.css`), the controls
+  design tokens as CSS variables (`web/src/ui/tokens.css`), the page's own rules (`web/src/ui/global.css`: the page is not selectable text, in both spellings of `user-select`, except what takes text and what is shown to be copied: see "A drag on a knob painted a gray box" in `docs/reference/plugin-host.md`), the controls
   (`web/src/ui/`: `Knob`, `Choice`, `LiveBar`, `LiveTrace`, `LiveEnvelope`, `Meter`, which draw live values by
   writing to the DOM or a canvas, never through React state) and the patch canvas
   (`web/src/app/patch/`: `toFlow`, a pure layout of the graph, drawn with React Flow:
