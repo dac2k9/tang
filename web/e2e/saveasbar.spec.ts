@@ -43,10 +43,10 @@ function fit(page: Page): Promise<Fit> {
   });
 }
 
-/** The width from which the open bar is as tall as the closed one: it needs 1,561 pixels in a row (1,467 before the bar had the button that adds a module, 1,555 before it lost the button that adds a group, 1,444 before the button that adds a modulator that is in no lane, 1,358 before the one that adds an effect that stands by itself, 1,265 before the one that adds a source of notes). */
-const ONE_ROW = 1600;
+/** The width from which the open bar is as tall as the closed one: it needs 1,561 pixels in a row (1,467 before the bar had the button that adds a module, 1,555 before it lost the button that adds a group, 1,444 before the button that adds a modulator that is in no lane, 1,358 before the one that adds an effect that stands by itself, 1,265 before the one that adds a source of notes; and the bar has the button that opens a session file since step 115, which took it past 1,600 where the font is wider than a Mac's, as on the Linux that CI runs on, where 1,700 holds it). */
+const ONE_ROW = 1700;
 
-for (const width of [1700, ONE_ROW, 1280, 1100, 1000, 900]) {
+for (const width of [1800, ONE_ROW, 1280, 1100, 1000, 900]) {
   test(`with the field of Save as open the bar fits a window ${String(width)} pixels wide: no sideways scrolling, texts on a line, nothing over anything`, async ({ page }) => {
     await open(page);
     await page.setViewportSize({ width, height: 700 });
