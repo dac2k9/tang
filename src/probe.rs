@@ -1,4 +1,4 @@
-//! A check that is run from the command line and plays nothing: what a plugin's own window is like on this machine (`tang window`, step 112; a CLAP plugin's, step 114). (`tang listen` is the other of its kind, and is with the audio input that it checks.)
+//! A check that is run from the command line and plays nothing: what a plugin's own window is like on this machine (`tang window`, step 112; a CLAP plugin's too, step 114). (`tang listen` is the other of its kind, and is with the audio input that it checks.)
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -26,20 +26,24 @@ pub struct WindowOptions<'a> {
 pub fn window(source: &str, options: WindowOptions, sample_rate: u32) -> anyhow::Result<()> {
     // (Before anything is loaded: a session that has no screen is said so, and the plugin is not made to wait for nothing.)
     window::available().map_err(|why| anyhow!(why))?;
-    // A CLAP plugin has its own way to a window (its `gui` extension, step 114): the VST3 view protocol below is not it.
-    if let Ok((plugin::PluginType::Clap, resolved)) = plugin::autodetect::resolve(source) {
-        return plugin::clap_window::window(&resolved, &options, sample_rate);
-    }
     // The plugin is loaded as `describe` loads it, on this thread, which is the main one: the window and the plugin's controller are its. No sound is made, and none is needed to draw a plugin's face.
-    if options.size.is_some() {
-        println!("(--size is for a CLAP plugin: the window of a VST3 plugin is the size of its view)");
-    }
     let plugin = plugin::load(source, sample_rate as f32, 512, &plugin::Runtime::default())?;
     let name = plugin.name().to_string();
-    let editor = plugin.editor_id().ok_or_else(|| anyhow!("{name} has no window of its own that Tang can show (its plugin format has none yet)"))?;
+    let editor = plugin.editor_id().ok_or_else(|| anyhow!("{name} has no window of its own that Tang can show (it has no `gui` extension, if it is a CLAP plugin, or no view, if it is a VST3 plugin; the other formats have none yet)"))?;
     editors::open(editor, &name, options.focus, &[]).map_err(|why| anyhow!("{name}: {why}"))?;
     let (width, height) = editors::with_open(editor, |open| open.size()).unwrap_or_default();
     println!("{name}: a window of {width} x {height}");
+    // A host that has kept the size that a person gave the window makes it that, and tells the plugin.
+    if let Some((wanted_width, wanted_height)) = options.size {
+        match editors::with_open(editor, |open| open.resize(i32::try_from(wanted_width).unwrap_or(i32::MAX), i32::try_from(wanted_height).unwrap_or(i32::MAX))) {
+            Some(Ok(())) => {
+                let (width, height) = editors::with_open(editor, |open| open.size()).unwrap_or_default();
+                println!("The window is {width} x {height}");
+            }
+            Some(Err(why)) => println!("(--size: {why})"),
+            None => println!("(--size: the window is closed)"),
+        }
+    }
 
     let started = Instant::now();
     let limit = options.seconds.map(Duration::from_secs_f32);

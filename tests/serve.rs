@@ -2435,6 +2435,90 @@ async fn a_plugins_own_window_opens_through_the_server_and_leaves_the_screen_wit
     assert!(!tang.log().contains("let go of on a thread that is not the main one"), "{}", tang.log());
 }
 
+/// A bundle of Tang's own plugin, as a host finds one, made from the library that `cargo build -p tang-clap` leaves: the library in `Contents/MacOS` and a plist that names it. None if the plugin has not been built.
+#[cfg(target_os = "macos")]
+fn tangs_own_plugin(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/libtang_clap.dylib");
+    if !library.exists() {
+        return None;
+    }
+    let bundle = dir.join("Tang.clap");
+    std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    std::fs::copy(&library, bundle.join("Contents/MacOS/Tang")).unwrap();
+    std::fs::write(
+        bundle.join("Contents/Info.plist"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>Tang</string><key>CFBundleIdentifier</key><string>io.github.apanloco.tang</string><key>CFBundlePackageType</key><string>BNDL</string></dict></plist>",
+    )
+    .unwrap();
+    Some(bundle)
+}
+
+/// A CLAP plugin's own window, through the whole program (step 114, part C): the node of a CLAP plugin says that it has a window (the `UI` button of the page), a request opens it, and it leaves the screen with its plugin, when the
+/// instrument is taken out of the lane, and is there again for the plugin that an undo brings back. The plugin is Tang's own, which is a plugin that has a window to show (its page in a web view), in a session of Tang's own: what a
+/// person sees in the picture of a Tang box with no button. For a person at a Mac, after `cargo build -p tang-clap`; the window takes the keyboard from the terminal for a few seconds.
+/// `cargo test --features web --test serve -- --ignored`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "opens a plugin's window on the screen for a few seconds, and takes the keyboard: cargo build -p tang-clap, then cargo test --features web --test serve -- --ignored"]
+async fn a_clap_plugins_own_window_opens_through_the_server_and_leaves_the_screen_with_its_plugin() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(bundle) = tangs_own_plugin(dir.path()) else {
+        eprintln!("skipped: build the plugin first (cargo build -p tang-clap)");
+        return;
+    };
+    let file = dir.path().join("window.toml");
+    std::fs::write(&file, format!("[[instrument]]\nplugin = {:?}\n", bundle.to_string_lossy())).unwrap();
+    let tang = Tang::start_on(&file);
+    let mut client = connect(&tang).await;
+    let hello = next_json(&mut client).await;
+    if !hello["features"].as_array().unwrap().iter().any(|feature| feature == "windows") {
+        eprintln!("skipped: the server says that this machine cannot show a window: {hello}");
+        return;
+    }
+    tell(&mut client, json!({"type": "subscribe"})).await;
+    let snapshot = next_json(&mut client).await;
+    let node = snapshot["snapshot"]["graph"]["nodes"].as_array().unwrap().iter().find(|node| node["plugin"]["hasEditor"] == true).unwrap_or_else(|| panic!("the plugin does not say that it has a window: {snapshot}"))["id"].as_u64().unwrap();
+    let mut req = 0;
+    let mut ask = async |intent: Value| {
+        req += 1;
+        tell(&mut client, json!({"type": "request", "reqId": req, "intent": intent})).await;
+        answer(&mut client, req).await
+    };
+
+    assert_eq!(windows_on_screen(tang.child.0.id()), 0, "nothing is open until it is asked for");
+    // (A window waits for the scan of the installed plugins, which has only just begun: that is said, and it is asked for again.)
+    let scan_over = Instant::now() + Duration::from_secs(60);
+    loop {
+        let opened = ask(json!({"type": "openEditor", "node": node})).await;
+        if opened["type"] == "ack" {
+            break;
+        }
+        let why = opened["error"]["message"].as_str().unwrap_or_default();
+        assert!(why.contains("still being looked for") && Instant::now() < scan_over, "{opened}\n{}", tang.log());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    wait_for_windows(&tang, 1, "the window that was asked for");
+    // Asked for again, the one that is open is brought to the front: there is still one.
+    assert_eq!(ask(json!({"type": "openEditor", "node": node})).await["type"], "ack");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_windows(&tang, 1, "the window that was asked for twice");
+
+    // The instrument is taken out of its lane: the window goes with the plugin, and the plugin is let go of with its window already closed.
+    assert_eq!(ask(json!({"type": "clearInstrument", "node": node})).await["type"], "ack");
+    wait_for_windows(&tang, 0, "the window of a plugin that left the session");
+    let refused = ask(json!({"type": "openEditor", "node": node})).await;
+    assert_eq!(refused["type"], "rejected", "{refused}");
+
+    // An undo brings the plugin back, shut: a window is opened again by asking, for the plugin that is there now.
+    assert_eq!(ask(json!({"type": "undo"})).await["type"], "ack");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(windows_on_screen(tang.child.0.id()), 0, "the plugin is back, and its window is not");
+    assert_eq!(ask(json!({"type": "openEditor", "node": node})).await["type"], "ack");
+    wait_for_windows(&tang, 1, "the window of the plugin that an undo brought back");
+    assert!(!tang.log().contains("let go of on a thread that is not the main one"), "{}", tang.log());
+    assert!(!tang.log().contains("was open when the plugin was let go of"), "{}", tang.log());
+}
+
 /// The `state` of the first instrument of a session file, as the text that the file keeps it as (base64).
 #[cfg(target_os = "macos")]
 fn state_in(file: &std::path::Path) -> Option<String> {

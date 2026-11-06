@@ -60,7 +60,7 @@ impl Catalog {
     }
 
     /// Start scanning the plugins that are installed (LV2, CLAP and VST3: each is loaded to be asked what it is), on a background thread, and not the built-ins (`builtins` has them). Results arrive through `poll`.
-    #[cfg_attr(not(any(test, feature = "web")), expect(dead_code, reason = "only the page of a plugin in a host asks for the scan, when it is told to"))]
+    #[cfg_attr(not(feature = "web"), expect(dead_code, reason = "only the page of a plugin in a host asks for the scan, when it is told to"))]
     pub fn scan_installed(&mut self) {
         self.start(false);
     }

@@ -180,7 +180,7 @@ fn window_opens_tangs_own_plugin_with_its_page_in_a_web_view_resizes_it_and_the_
         return;
     }
     assert_eq!(output.status.code(), Some(0), "{said}{err}");
-    assert!(said.contains("Tang: a window of 1100 x 720, which it can be resized"), "the size that the plugin asks for, and that it can be resized: {said}");
+    assert!(said.contains("Tang: a window of 1100 x 720\n"), "the size that the plugin asks for: {said}");
     assert!(said.contains("The window is 900 x 600"), "the plugin took the size that the host made the window: {said}");
     assert!(said.contains("wry_web_view") && said.contains("WryWebView0.57.1 900x600"), "the web view is in the window, at the size that it was made: {said}");
     assert!(said.contains("Snapshot: ") && said.trim_end().ends_with(" s."), "{said}");

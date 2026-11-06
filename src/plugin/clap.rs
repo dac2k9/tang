@@ -1,6 +1,9 @@
 use std::ffi::CStr;
 use std::path::Path;
+use std::rc::Rc;
+use std::sync::Arc;
 
+use clack_extensions::gui::{GuiSize, HostGui, HostGuiImpl, PluginGui};
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::audio_ports::{
     AudioPortInfoBuffer, HostAudioPorts, HostAudioPortsImpl, PluginAudioPorts, RescanType,
@@ -19,6 +22,8 @@ use clack_host::prelude::*;
 use clack_host::process::StartedPluginAudioProcessor;
 use clack_host::utils::Cookie;
 
+use super::clap_editor::{self, Asked};
+use super::editors;
 use super::{ParameterInfo, Plugin, PluginInfo, Preset};
 
 // ---------------------------------------------------------------------------
@@ -26,7 +31,11 @@ use super::{ParameterInfo, Plugin, PluginInfo, Preset};
 // ---------------------------------------------------------------------------
 
 struct TangHost;
-struct TangHostShared;
+/// What the host's threads share for one plugin: what the plugin asks of the host about its window (`clap_editor::Asked`).
+#[derive(Default)]
+struct TangHostShared {
+    asked: Arc<Asked>,
+}
 struct TangHostMainThread;
 
 impl HostHandlers for TangHost {
@@ -36,6 +45,7 @@ impl HostHandlers for TangHost {
 
     fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
         builder.register::<HostAudioPorts>();
+        builder.register::<HostGui>();
         builder.register::<HostParams>();
         builder.register::<HostPresetLoad>();
     }
@@ -54,6 +64,34 @@ impl<'a> SharedHandler<'a> for TangHostShared {
 }
 
 impl<'a> MainThreadHandler<'a> for TangHostMainThread {}
+
+/// What a plugin says to the host about its window (step 114, part C): written down for the window's loop to answer, from whichever thread the plugin says it on.
+impl HostGuiImpl for TangHostShared {
+    fn resize_hints_changed(&self) {
+        log::debug!("CLAP gui: resize_hints_changed (ignored)");
+    }
+
+    fn request_resize(&self, new_size: GuiSize) -> Result<(), HostError> {
+        self.asked.request_resize(new_size.width, new_size.height);
+        Ok(())
+    }
+
+    fn request_show(&self) -> Result<(), HostError> {
+        // (A window is opened when a person asks for it, from the page, the terminal or `tang window`: not by a plugin.)
+        Err(HostError::Message("Tang opens a plugin's window when a person asks for it"))
+    }
+
+    fn request_hide(&self) -> Result<(), HostError> {
+        // (The button of a plugin's own that hides its window: the window is closed, which hides it, and is made again when a person asks for it.)
+        self.asked.closed();
+        Ok(())
+    }
+
+    fn closed(&self, was_destroyed: bool) {
+        log::debug!("CLAP gui: the plugin closed its window (destroyed: {was_destroyed})");
+        self.asked.closed();
+    }
+}
 
 impl HostParamsImplShared for TangHostShared {
     fn request_flush(&self) {
@@ -343,6 +381,11 @@ pub struct ClapPlugin {
     preset_cache: Vec<Preset>,
     preset_data: Vec<ClapPresetData>,
     preset_load_ext: Option<PluginPresetLoad>,
+    /// The plugin's own window in the registry of the windows (step 114, part C; `plugin::editors`): made when the plugin is loaded if it has a `gui` extension, and forgotten, with its window closed, first thing when the
+    /// plugin is let go of.
+    editor_id: Option<editors::EditorId>,
+    /// What the registry looks at to know that the plugin is still there (`editors::register`).
+    _alive: Arc<()>,
     _bundle: PluginBundle,
     instance: PluginInstance<TangHost>,
     audio_processor: Option<StartedPluginAudioProcessor<TangHost>>,
@@ -367,6 +410,10 @@ unsafe impl Send for ClapPlugin {}
 
 impl Drop for ClapPlugin {
     fn drop(&mut self) {
+        // The window first: a window of a plugin that is destroyed is a window of nothing.
+        if let Some(editor) = self.editor_id {
+            editors::forget(editor);
+        }
         if let Some(processor) = self.audio_processor.take() {
             let stopped = processor.stop_processing();
             self.instance.deactivate(stopped);
@@ -458,7 +505,7 @@ fn scan_bundle(path: &Path) -> Option<Vec<PluginInfo>> {
         // Briefly instantiate to query param count
         let plugin_id = std::ffi::CString::new(id.as_str()).ok()?;
         let param_count = PluginInstance::<TangHost>::new(
-            |_| TangHostShared,
+            |_| TangHostShared::default(),
             |_| TangHostMainThread,
             &bundle,
             &plugin_id,
@@ -507,7 +554,7 @@ pub fn load(
 
     // Instantiate
     let mut instance = PluginInstance::<TangHost>::new(
-        |_| TangHostShared,
+        |_| TangHostShared::default(),
         |_shared| TangHostMainThread,
         &bundle,
         &plugin_id,
@@ -660,6 +707,17 @@ pub fn load(
 
     let event_buffer = EventBuffer::new();
 
+    // The plugin's own window, if it has one (its `gui` extension): in the registry of the windows for as long as the plugin is (`plugin::clap_editor`).
+    let alive = Arc::new(());
+    let gui: Option<PluginGui> = instance.plugin_shared_handle().get_extension();
+    // What the plugin says of its window is written down by the host's handler that it was made with, and the editor answers that same one.
+    let asked = instance.access_shared_handler(|shared| shared.asked.clone());
+    let editor_id = gui.map(|gui| {
+        // SAFETY: the editor is forgotten, with its window closed, before the plugin is let go of (`Drop for ClapPlugin`), and calls nothing in a plugin whose token is gone.
+        let calls = unsafe { clap_editor::RealGui::new(instance.plugin_handle(), gui) };
+        editors::register(Rc::new(clap_editor::ClapEditor::new(Rc::new(calls), &name, asked, &alive, Some(bundle.clone()))), &alive)
+    });
+
     Ok(Box::new(ClapPlugin {
         name,
         is_instrument,
@@ -674,6 +732,8 @@ pub fn load(
         preset_cache,
         preset_data,
         preset_load_ext,
+        editor_id,
+        _alive: alive,
         _bundle: bundle,
         instance,
         audio_processor: Some(started),
@@ -761,6 +821,10 @@ pub(super) fn find_plugin(source: &str) -> anyhow::Result<(PluginBundle, String,
 // ---------------------------------------------------------------------------
 
 impl Plugin for ClapPlugin {
+    fn editor_id(&self) -> Option<editors::EditorId> {
+        self.editor_id
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -991,5 +1055,27 @@ impl Plugin for ClapPlugin {
 
         log::info!("CLAP: loaded preset {id}");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_a_plugin_asks_of_its_window_is_written_down_for_the_loop_that_turns_the_window() {
+        let shared = TangHostShared::default();
+        shared.request_resize(GuiSize { width: 800, height: 500 }).expect("a size is taken");
+        assert_eq!(shared.asked.take_resize(), Some((800, 500)), "the width and the height, as they were said");
+        assert!(!shared.asked.take_closed(), "nothing has closed");
+        shared.closed(true);
+        assert!(shared.asked.take_closed(), "a plugin that says that it closed its window");
+        // The button of a plugin's own that hides its window is a request to hide it: the window is closed, which hides it.
+        shared.request_hide().expect("a window is closed when a plugin asks for it to be hidden");
+        assert!(shared.asked.take_closed());
+        // A window is opened by a person and not by a plugin: that is said, and nothing else comes of it.
+        assert!(shared.request_show().is_err());
+        assert_eq!(shared.asked.take_resize(), None);
+        assert!(!shared.asked.take_closed());
     }
 }

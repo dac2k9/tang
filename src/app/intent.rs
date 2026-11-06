@@ -308,7 +308,7 @@ pub enum Intent {
     /// terminal; one that is open is brought to the front. `node` is a lane's instrument (the lane's node) or an effect, a bus effect included, and the values that the session has for the plugin's parameters are told to its controller
     /// first, so that the window shows them. What a person does to the plugin's knobs in the window comes back as `SetParam` (a drag is one step of the history); a window is no change of the session: no step of the history, the
     /// session is not marked, and a revision is used, as a save uses one (`EditorOpened`). Refused, with nothing opened, for a node that is not there, one that has no plugin (a group, a modulator, a source, a module, a lane that has
-    /// no instrument), a plugin that has no window of its own (the built-in ones, the CLAP and LV2 plugins: only VST3 so far), a machine that has no screen to open one on, a plugin scan that is still going (the windows' events are not turned
+    /// no instrument), a plugin that has no window of its own (the built-in ones, the LV2 plugins and a CLAP plugin that has no `gui` extension: a VST3 plugin has one, and so has a CLAP plugin that can put its window in one of Tang's own, step 114), a machine that has no screen to open one on, a plugin scan that is still going (the windows' events are not turned
     /// while it is: f179) and a plugin whose window did not open, each in its own words.
     OpenEditor { node: NodeId },
     /// Put back what the last step that can be undone did: a parameter, a gain, a modulator's setting, a cable's depth, the keys

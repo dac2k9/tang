@@ -5,9 +5,7 @@ pub mod autodetect;
 pub mod builtin;
 pub mod chain;
 pub mod clap;
-pub mod clap_window;
-// (A VST3 plugin is the only one that has a window of its own so far: a build without the format registers no editor, and the table and the way into it are not used.)
-#[cfg_attr(not(feature = "vst3"), allow(dead_code))]
+pub mod clap_editor;
 pub mod editors;
 #[cfg(test)]
 pub mod fake;
@@ -149,7 +147,6 @@ pub trait OpenEditor {
     fn raise(&mut self, focus: bool);
 
     /// Close the window: the plugin's view is let go of first, as the plugin formats say. Closing a window that is closed is nothing.
-    #[cfg_attr(not(feature = "vst3"), allow(dead_code))]
     fn close(&mut self);
 
     /// The size of what is in the window, in points.
@@ -160,6 +157,13 @@ pub trait OpenEditor {
 
     /// The views that are in the window, as text (`window::Window::describe`).
     fn describe(&self) -> String;
+
+    /// Make the window this size, in points, as a host does that has kept the size that a person gave it (`tang window --size`), and say why in words if it cannot be: the default is a window that is the size of its view,
+    /// which a VST3 plugin says.
+    fn resize(&mut self, width: i32, height: i32) -> Result<(), String> {
+        let _ = (width, height);
+        Err("the size of this window is the size of its plugin's view".to_string())
+    }
 }
 
 /// A loaded plugin instance ready to process audio.
@@ -346,5 +350,35 @@ mod tests {
         assert!(condition.holds(|_| None, false));
         assert!(!condition.holds(|_| None, true));
         assert!(!condition.holds(|_| Some(0.0), true) && condition.holds(|_| Some(7.0), false));
+    }
+
+    /// A window that says nothing of its own about its size: all that `OpenEditor` asks of one.
+    struct Bare;
+
+    impl OpenEditor for Bare {
+        fn poll(&mut self) -> bool {
+            true
+        }
+
+        fn raise(&mut self, _focus: bool) {}
+
+        fn close(&mut self) {}
+
+        fn size(&self) -> (i32, i32) {
+            (1, 1)
+        }
+
+        fn snapshot_png(&self) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn describe(&self) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn a_window_that_is_the_size_of_its_view_says_so_when_it_is_asked_to_be_another_size() {
+        assert_eq!(Bare.resize(900, 600), Err("the size of this window is the size of its plugin's view".to_string()));
     }
 }

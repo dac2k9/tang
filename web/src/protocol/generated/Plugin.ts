@@ -29,7 +29,7 @@ pinned: Array<number>,
  */
 takesNotes?: boolean, 
 /**
- * Whether the plugin has a window of its own that the machine that runs Tang can open (`PluginSlot::editor`, step 112): a front-end shows a button for it. Left out of the wire when there is none (every plugin but a VST3 one),
+ * Whether the plugin has a window of its own that the machine that runs Tang can open (`PluginSlot::editor`, step 112): a front-end shows a button for it. Left out of the wire when there is none (every plugin but a VST3 one and a CLAP one that has a `gui` extension),
  * so that a front-end reads an absent one as false and no other plugin's node is the JSON that it was.
  */
 hasEditor?: boolean, };
