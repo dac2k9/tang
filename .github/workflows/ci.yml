@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # (And the branch of steps 108 to 116 while it has no pull request: it is on a fork whose main has no workflow, so a run cannot be started by hand, and the push is what builds the Windows file of the plugin to be tried. Take it out before the pull request.)
+    branches: [main, feat/module-collapse]
   pull_request:
     branches: [main]
   # A run that is started by hand (the Actions tab, or `gh workflow run ci.yml --ref BRANCH`): for a branch that is on a fork and has no pull request yet, which is how the Windows file of the plugin (step 113) is built to be tried.
