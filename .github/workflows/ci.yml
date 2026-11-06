@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # A run that is started by hand (the Actions tab, or `gh workflow run ci.yml --ref BRANCH`): for a branch that is on a fork and has no pull request yet, which is how the Windows file of the plugin (step 113) is built to be tried.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
