@@ -35,6 +35,10 @@ case "$(uname -s)" in
 </dict>
 </plist>
 PLIST
+    # A signature of no identity (ad hoc), which makes the bundle whole: its plist is bound to it and `codesign --verify --strict` passes. It is enough for the Mac that built it; another Mac that is strict about plugins needs a bundle that is signed and notarised.
+    if command -v codesign >/dev/null 2>&1; then
+      codesign --force --sign - --timestamp=none "$out/Tang.clap" >/dev/null 2>&1 || echo "warning: $out/Tang.clap could not be signed (ad hoc)" >&2
+    fi
     ;;
   *)
     library="$here/target/$profile/libtang_clap.so"
