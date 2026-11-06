@@ -13,15 +13,20 @@ mod state;
 use std::ffi::CStr;
 use std::io::{Read, Write};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts, PluginAudioPortsImpl};
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui, PluginGuiImpl, Window};
 use clack_extensions::note_ports::{NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts, PluginNotePortsImpl};
+use clack_extensions::params::{ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams, PluginMainThreadParams, PluginParams};
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_plugin::entry::prelude::*;
+use clack_plugin::events::event_types::ParamValueEvent;
+use clack_plugin::events::spaces::CoreEventSpace;
 use clack_plugin::plugin::features::{AUDIO_EFFECT, INSTRUMENT, STEREO, SYNTHESIZER};
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
+use clack_plugin::utils::Cookie;
 use tang::embed::{Host, HostMidi, Kind};
 
 /// The ids that the plugins have. A host keeps a plugin by its id, in every project that has it: they are never changed.
@@ -78,34 +83,116 @@ fn descriptor<F: Flavour>() -> PluginDescriptor {
 pub struct TangPlugin<F>(PhantomData<fn() -> F>);
 
 impl<F: Flavour> Plugin for TangPlugin<F> {
-    type AudioProcessor<'a> = TangAudioProcessor;
+    type AudioProcessor<'a> = TangAudioProcessor<'a>;
     type Shared<'a> = TangShared;
     type MainThread<'a> = TangMainThread<'a, F>;
 
     fn declare_extensions(builder: &mut PluginExtensions<Self>, _shared: Option<&TangShared>) {
-        builder.register::<PluginAudioPorts>().register::<PluginNotePorts>().register::<PluginState>().register::<PluginGui>();
+        builder.register::<PluginAudioPorts>().register::<PluginNotePorts>().register::<PluginParams>().register::<PluginState>().register::<PluginGui>();
     }
 }
 
-/// What the host's threads share: nothing, so far (the engine's two halves meet in the library).
-pub struct TangShared;
+/// The plugin's one parameter, **Open the page**: a switch that opens the page of the instance in the browser, in the way of every host (a host that has a button for the plugin's window shows the page from it as well, but not every host has
+/// one for a window that the plugin shows itself, and every host has the parameters of a plugin). It goes from 0 to 1 when it is pressed, opens the page, and is put back to 0 for the host to show.
+pub const PAGE_PARAM: u32 = 0;
+
+/// What the host's threads share: the state of the switch that opens the page, which the host sets on the audio thread (in a block) or on the main thread (when it is not processing) and which the main thread acts on.
+pub struct TangShared {
+    /// What the host last set the switch to (an `f64`'s bits): 0 or 1.
+    page: AtomicU64,
+    /// The switch was pressed, and the page has not been opened for it yet: the host's main thread does it when the host calls back (`request_callback`).
+    open_requested: AtomicBool,
+    /// The page was opened for a press: the switch is put back to 0 for the host, in the next block (or at the end of a flush).
+    put_back: AtomicBool,
+}
+
+impl TangShared {
+    fn new() -> TangShared {
+        TangShared { page: AtomicU64::new(0f64.to_bits()), open_requested: AtomicBool::new(false), put_back: AtomicBool::new(false) }
+    }
+
+    /// The host sets the switch to `value`: true if that is a press (it was under a half, and is not), which asks for the page to be opened.
+    fn host_sets(&self, value: f64) -> bool {
+        let before = f64::from_bits(self.page.swap(value.to_bits(), Ordering::AcqRel));
+        let pressed = value >= 0.5 && before < 0.5;
+        if pressed {
+            self.open_requested.store(true, Ordering::Release);
+        }
+        pressed
+    }
+
+    /// The switch as the host has it now.
+    fn value(&self) -> f64 {
+        f64::from_bits(self.page.load(Ordering::Acquire))
+    }
+
+    /// If a press has been acted on and the host does not know that the switch is back to 0: put it back, and say so. The event to tell the host with is for the caller to send.
+    fn take_put_back(&self) -> bool {
+        let put_back = self.put_back.swap(false, Ordering::AcqRel);
+        if put_back {
+            self.page.store(0f64.to_bits(), Ordering::Release);
+        }
+        put_back
+    }
+
+    /// The switch, if the event is one for it: the value it is set to.
+    fn page_value(event: &UnknownEvent) -> Option<f64> {
+        match event.as_core_event() {
+            Some(CoreEventSpace::ParamValue(change)) if change.param_id() == Some(ClapId::new(PAGE_PARAM)) => Some(change.value()),
+            _ => None,
+        }
+    }
+}
 
 impl PluginShared<'_> for TangShared {}
+
+/// The event that tells a host that the switch is back to 0.
+fn switch_is_back() -> ParamValueEvent {
+    ParamValueEvent::new(0, ClapId::new(PAGE_PARAM), Pckn::match_all(), 0.0, Cookie::empty())
+}
 
 /// The host's main thread's end of an instance: the engine, which is started when the plugin is activated and has the session, the page and the controller.
 pub struct TangMainThread<'a, F> {
     host: Host,
     /// Whether the host has made the plugin's window (`gui.create`), which is a page that `show` opens.
     window_made: bool,
+    shared: &'a TangShared,
     _handle: HostMainThreadHandle<'a>,
     _flavour: PhantomData<fn() -> F>,
 }
 
-impl<'a, F: Flavour> PluginMainThread<'a, TangShared> for TangMainThread<'a, F> {}
+impl<'a, F: Flavour> PluginMainThread<'a, TangShared> for TangMainThread<'a, F> {
+    /// The host calls back, as the audio thread asked (`request_callback`) when the switch that opens the page was pressed in a block.
+    fn on_main_thread(&mut self) {
+        if self.shared.open_requested.swap(false, Ordering::AcqRel) {
+            // (A page that could not be opened has said why in the log; the switch goes back all the same, for the host to show that the press was seen.)
+            let _ = self.open_page();
+            self.shared.put_back.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl<F: Flavour> TangMainThread<'_, F> {
+    /// Open the page of this instance in the browser, and say why not if it cannot be (the log has the reason as well).
+    fn open_page(&mut self) -> Result<(), PluginError> {
+        let Some(url) = self.host.url() else {
+            log::warn!("The page was asked for, and the plugin has no page: it has not started (the host starts it when it switches the plugin on), or the page could not be served");
+            return Err(PluginError::Message("Tang has no page to show: it has not started yet, or the page could not be served (tang-plugin.log in the temporary files says)"));
+        };
+        log::info!("Opening {url}");
+        browser::open(&url).map_err(|why| {
+            log::error!("The browser could not be opened on {url}: {why}");
+            PluginError::Message("the browser could not be opened: the address is in tang-plugin.log in the temporary files")
+        })?;
+        Ok(())
+    }
+}
 
 /// The audio thread's end of an instance.
-pub struct TangAudioProcessor {
+pub struct TangAudioProcessor<'a> {
     audio: tang::embed::Audio,
+    shared: &'a TangShared,
+    host: HostSharedHandle<'a>,
     /// The MIDI of the block (made once: a block asks the allocator for nothing unless a host sends more than a thousand messages in it).
     midi: Vec<HostMidi>,
     /// The audio that comes in, as a copy (a host may give the input and the output as the same memory), a side each.
@@ -114,15 +201,15 @@ pub struct TangAudioProcessor {
     reset: bool,
 }
 
-impl<'a, F: Flavour> PluginAudioProcessor<'a, TangShared, TangMainThread<'a, F>> for TangAudioProcessor {
-    fn activate(_host: HostAudioProcessorHandle<'a>, main_thread: &mut TangMainThread<'a, F>, _shared: &'a TangShared, config: PluginAudioConfiguration) -> Result<Self, PluginError> {
+impl<'a, F: Flavour> PluginAudioProcessor<'a, TangShared, TangMainThread<'a, F>> for TangAudioProcessor<'a> {
+    fn activate(host: HostAudioProcessorHandle<'a>, main_thread: &mut TangMainThread<'a, F>, shared: &'a TangShared, config: PluginAudioConfiguration) -> Result<Self, PluginError> {
         let frames = config.max_frames_count;
         let audio = main_thread.host.activate(config.sample_rate, frames).map_err(|why| {
             log::error!("Tang could not start: {why}");
             PluginError::Message("Tang could not start: the log, tang-plugin.log in the temporary files, says why")
         })?;
         let input = [vec![0.0; frames as usize], vec![0.0; frames as usize]];
-        Ok(TangAudioProcessor { audio, midi: Vec::with_capacity(1024), input, reset: false })
+        Ok(TangAudioProcessor { audio, shared, host: host.shared(), midi: Vec::with_capacity(1024), input, reset: false })
     }
 
     fn process(&mut self, _process: Process, mut audio: Audio, events: Events) -> Result<ProcessStatus, PluginError> {
@@ -132,6 +219,10 @@ impl<'a, F: Flavour> PluginAudioProcessor<'a, TangShared, TangMainThread<'a, F>>
         }
         for event in events.input {
             events::convert(event, &mut self.midi);
+            self.switch(event);
+        }
+        if self.shared.take_put_back() {
+            let _ = events.output.try_push(switch_is_back());
         }
 
         let mut pair = audio.port_pair(0).ok_or(PluginError::Message("Tang has no audio port to play on"))?;
@@ -170,6 +261,85 @@ impl<'a, F: Flavour> PluginAudioProcessor<'a, TangShared, TangMainThread<'a, F>>
 
     fn reset(&mut self) {
         self.reset = true;
+    }
+}
+
+impl TangAudioProcessor<'_> {
+    /// If the event sets the switch that opens the page, and it is a press: have the host call the main thread back, which opens the page (a page is not opened on the audio thread).
+    fn switch(&self, event: &UnknownEvent) {
+        if TangShared::page_value(event).is_some_and(|value| self.shared.host_sets(value)) {
+            self.host.request_callback();
+        }
+    }
+}
+
+impl PluginAudioProcessorParams for TangAudioProcessor<'_> {
+    /// The host sends the changes of its parameters without a block (it is not processing, or it only wants them taken): a press is asked for, and the switch is put back.
+    fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
+        for event in input {
+            self.switch(event);
+        }
+        if self.shared.take_put_back() {
+            let _ = output.try_push(switch_is_back());
+        }
+    }
+}
+
+impl<F: Flavour> PluginMainThreadParams for TangMainThread<'_, F> {
+    fn count(&mut self) -> u32 {
+        1
+    }
+
+    fn get_info(&mut self, param_index: u32, info: &mut ParamInfoWriter) {
+        if param_index == 0 {
+            info.set(&ParamInfo {
+                id: ClapId::new(PAGE_PARAM),
+                flags: ParamInfoFlags::IS_STEPPED | ParamInfoFlags::IS_AUTOMATABLE,
+                cookie: Cookie::empty(),
+                name: b"Open the page",
+                module: b"",
+                min_value: 0.0,
+                max_value: 1.0,
+                default_value: 0.0,
+            });
+        }
+    }
+
+    fn get_value(&mut self, param_id: ClapId) -> Option<f64> {
+        (param_id == ClapId::new(PAGE_PARAM)).then(|| self.shared.value())
+    }
+
+    fn value_to_text(&mut self, param_id: ClapId, value: f64, writer: &mut ParamDisplayWriter) -> std::fmt::Result {
+        use std::fmt::Write as _;
+        if param_id != ClapId::new(PAGE_PARAM) {
+            return Err(std::fmt::Error);
+        }
+        writer.write_str(if value >= 0.5 { "Open" } else { "Closed" })
+    }
+
+    fn text_to_value(&mut self, param_id: ClapId, text: &CStr) -> Option<f64> {
+        if param_id != ClapId::new(PAGE_PARAM) {
+            return None;
+        }
+        match text.to_str().ok()?.trim().to_ascii_lowercase().as_str() {
+            "open" | "on" | "1" | "yes" => Some(1.0),
+            "closed" | "off" | "0" | "no" => Some(0.0),
+            _ => None,
+        }
+    }
+
+    /// The host sends the changes of its parameters while the plugin is not processing (the main thread): a press opens the page at once, and the switch is put back.
+    fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
+        for event in input {
+            if TangShared::page_value(event).is_some_and(|value| self.shared.host_sets(value)) {
+                self.shared.open_requested.store(false, Ordering::Release);
+                let _ = self.open_page();
+                self.shared.put_back.store(true, Ordering::Release);
+            }
+        }
+        if self.shared.take_put_back() {
+            let _ = output.try_push(switch_is_back());
+        }
     }
 }
 
@@ -282,15 +452,7 @@ impl<F: Flavour> PluginGuiImpl for TangMainThread<'_, F> {
     }
 
     fn show(&mut self) -> Result<(), PluginError> {
-        let Some(url) = self.host.url() else {
-            log::warn!("The window was asked for, and the plugin has not started: it starts when the host switches it on");
-            return Err(PluginError::Message("Tang has not started yet: the host starts it when it switches the plugin on"));
-        };
-        log::info!("Opening {url}");
-        browser::open(&url).map_err(|why| {
-            log::error!("The browser could not be opened on {url}: {why}");
-            PluginError::Message("the browser could not be opened: the address is in tang-plugin.log in the temporary files")
-        })
+        self.open_page()
     }
 
     fn hide(&mut self) -> Result<(), PluginError> {
@@ -299,11 +461,11 @@ impl<F: Flavour> PluginGuiImpl for TangMainThread<'_, F> {
 }
 
 fn new_shared(_host: HostSharedHandle<'_>) -> Result<TangShared, PluginError> {
-    Ok(TangShared)
+    Ok(TangShared::new())
 }
 
-fn new_main_thread<'a, F: Flavour>(host: HostMainThreadHandle<'a>, _shared: &'a TangShared) -> Result<TangMainThread<'a, F>, PluginError> {
-    Ok(TangMainThread { host: Host::new(F::KIND, true), window_made: false, _handle: host, _flavour: PhantomData })
+fn new_main_thread<'a, F: Flavour>(host: HostMainThreadHandle<'a>, shared: &'a TangShared) -> Result<TangMainThread<'a, F>, PluginError> {
+    Ok(TangMainThread { host: Host::new(F::KIND, true), window_made: false, shared, _handle: host, _flavour: PhantomData })
 }
 
 /// The two plugins, as the host asks for them.
@@ -336,6 +498,33 @@ impl PluginFactoryImpl for TangFactory {
     }
 }
 
+/// Keep this library loaded for as long as the process lives (Windows). A host may unload a plugin's library when the last instance of it has gone, and Tang has threads that can be running by then: the scan of the installed plugins
+/// (which loads every one of them, and goes on while nobody is looking) and the program that opens a page. Code that is unmapped under a thread that runs is a crash in the host; a library that is pinned is not unloaded by `FreeLibrary`.
+#[cfg(windows)]
+fn pin_library() {
+    use std::ffi::c_void;
+
+    /// `GET_MODULE_HANDLE_EX_FLAG_PIN`: the module is not unloaded until the process ends. `GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS`: the module is the one that the address is in.
+    const PIN: u32 = 0x1;
+    const FROM_ADDRESS: u32 = 0x4;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut *mut c_void) -> i32;
+    }
+
+    let mut module: *mut c_void = std::ptr::null_mut();
+    // SAFETY: with `FROM_ADDRESS` the second argument is an address in the module (this function's, which is in this library), not a name, and the third is a place for a handle that is not used.
+    let pinned = unsafe { GetModuleHandleExW(PIN | FROM_ADDRESS, pin_library as *const () as *const u16, &mut module) };
+    if pinned == 0 {
+        log::warn!("The library could not be pinned: a host that unloads it while a thread of Tang runs would crash");
+    }
+}
+
+/// (Where a library is not unloaded under a thread by the system's habits, nothing is done.)
+#[cfg(not(windows))]
+fn pin_library() {}
+
 /// The file's entry: the factory of the two plugins.
 pub struct TangEntry {
     factory: PluginFactoryWrapper<TangFactory>,
@@ -343,6 +532,7 @@ pub struct TangEntry {
 
 impl Entry for TangEntry {
     fn new(_bundle_path: &CStr) -> Result<Self, EntryLoadError> {
+        pin_library();
         Ok(TangEntry { factory: PluginFactoryWrapper::new(TangFactory { instrument: descriptor::<InstrumentFlavour>(), effect: descriptor::<EffectFlavour>() }) })
     }
 

@@ -18,7 +18,7 @@ lv2 = ["tang/lv2"]
 [dependencies]
 tang = { path = "..", default-features = false, features = ["web"] }
 clack-plugin = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7" }
-clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin", "audio-ports", "note-ports", "state", "gui"] }
+clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin", "audio-ports", "note-ports", "params", "state", "gui"] }
 log = "0.4"
 
 [dev-dependencies]
@@ -26,4 +26,4 @@ log = "0.4"
 clap-sys = "0.5"
 tempfile = "3"
 clack-host = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin"] }
-clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin", "clack-host", "audio-ports", "note-ports", "state", "gui"] }
+clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "57e89b356f16194a04fa03cc5c5a87d88db560c7", features = ["clack-plugin", "clack-host", "audio-ports", "note-ports", "params", "state", "gui"] }

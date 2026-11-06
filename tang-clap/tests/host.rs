@@ -5,6 +5,7 @@ mod common;
 
 use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::note_ports::{NoteDialect, NoteDialects, NotePortInfoBuffer, PluginNotePorts};
+use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
 use clack_host::prelude::*;
 use common::*;
 
@@ -30,7 +31,7 @@ fn the_file_has_two_plugins_that_a_host_lists_by_these_ids_names_and_features() 
 fn a_plugin_that_is_not_in_the_file_is_not_made() {
     let bundle = bundle();
     let info = HostInfo::new("a test host", "", "", "").unwrap();
-    assert!(PluginInstance::<Handlers>::new(|_| TestShared, |_| TestMainThread, &bundle, c"no.such.plugin", &info).is_err());
+    assert!(PluginInstance::<Handlers>::new(|_| TestShared::default(), |_| TestMainThread, &bundle, c"no.such.plugin", &info).is_err());
 }
 
 #[test]
@@ -60,6 +61,33 @@ fn the_instrument_has_notes_in_and_a_stereo_output_and_the_effect_has_a_stereo_i
 }
 
 #[test]
+fn the_one_parameter_is_the_switch_that_opens_the_page_and_it_starts_closed() {
+    let bundle = bundle();
+    for id in [instrument_id(), effect_id()] {
+        let mut instance = instance(&bundle, id);
+        let mut handle = instance.plugin_handle();
+        let params = handle.get_extension::<PluginParams>().expect("the plugin has parameters");
+        assert_eq!(params.count(&mut handle), 1, "{id:?}");
+        let mut buffer = ParamInfoBuffer::new();
+        let info = params.get_info(&mut handle, 0, &mut buffer).expect("its description");
+        assert_eq!((info.id, info.name, info.min_value, info.max_value, info.default_value), (ClapId::new(0), &b"Open the page"[..], 0.0, 1.0, 0.0));
+        assert!(info.flags.contains(ParamInfoFlags::IS_STEPPED), "a switch has two places");
+        assert!(params.get_info(&mut handle, 1, &mut ParamInfoBuffer::new()).is_none(), "and there is no other");
+        assert_eq!(params.get_value(&mut handle, ClapId::new(0)), Some(0.0), "closed to begin with");
+        assert_eq!(params.get_value(&mut handle, ClapId::new(7)), None, "no other parameter has a value");
+        let mut text = [std::mem::MaybeUninit::<u8>::uninit(); 32];
+        assert_eq!(params.value_to_text(&mut handle, ClapId::new(0), 0.0, &mut text).unwrap(), b"Closed");
+        assert_eq!(params.value_to_text(&mut handle, ClapId::new(0), 1.0, &mut text).unwrap(), b"Open");
+        assert!(params.value_to_text(&mut handle, ClapId::new(7), 1.0, &mut text).is_err());
+        for (written, value) in [(c"open", 1.0), (c"On", 1.0), (c"1", 1.0), (c"closed", 0.0), (c"OFF", 0.0), (c"0", 0.0)] {
+            assert_eq!(params.text_to_value(&mut handle, ClapId::new(0), written), Some(value), "{written:?}");
+        }
+        assert_eq!(params.text_to_value(&mut handle, ClapId::new(0), c"maybe"), None);
+        assert_eq!(params.text_to_value(&mut handle, ClapId::new(7), c"open"), None);
+    }
+}
+
+#[test]
 fn the_instrument_plays_the_midi_that_a_host_sends_from_the_frame_it_says_and_is_silent_when_it_ends() {
     let bundle = bundle();
     let mut rig = Rig::start(&bundle, instrument_id());
@@ -69,6 +97,39 @@ fn the_instrument_plays_the_midi_that_a_host_sends_from_the_frame_it_says_and_is
     assert!(left[100..].iter().any(|&sample| sample.abs() > 0.01), "and the note from it");
     assert!(rig.loudest(&[], 8) > 0.05, "a held note goes on");
     assert!(rig.settled(&[(0, NOTE_OFF)], 60) < 1e-4, "silent when it has ended");
+    rig.stop();
+}
+
+#[test]
+fn a_host_that_gives_one_channel_has_the_left_side_played_into_it() {
+    let bundle = bundle();
+    let mut rig = Rig::start(&bundle, instrument_id());
+    let mut loudest = 0.0f32;
+    for block in 0..8 {
+        let mut input_events = EventBuffer::with_capacity(1);
+        if block == 0 {
+            input_events.push(&clack_host::events::event_types::MidiEvent::new(0, 0, NOTE_ON));
+        }
+        let mut mono = vec![9.0f32; BLOCK];
+        let mut ports = AudioPorts::with_capacity(1, 1);
+        let mut outputs = ports.with_output_buffers([AudioPortBuffer { channels: AudioPortBufferType::f32_output_only([mono.as_mut_slice()].into_iter()), latency: 0 }]);
+        let mut output_events = EventBuffer::with_capacity(1);
+        rig.processor.as_mut().unwrap().process(&InputAudioBuffers::empty(), &mut outputs, &input_events.as_input(), &mut output_events.as_output(), None, None).unwrap();
+        loudest = mono.iter().fold(loudest, |loudest, sample| loudest.max(sample.abs()));
+    }
+    // (The buffer was full of 9s: a plugin that leaves it alone is as loud as that, which is not what a note is.)
+    assert!(loudest > 0.05 && loudest < 1.0, "a host with one channel is played into, over what it had in its buffer: {loudest}");
+    rig.stop();
+}
+
+#[test]
+fn a_block_of_no_frames_is_processed_without_trouble_and_the_next_block_plays() {
+    let bundle = bundle();
+    let mut rig = Rig::start(&bundle, instrument_id());
+    let (left, right) = rig.play_frames(&[(0, NOTE_ON)], 0);
+    assert!((left.len(), right.len()) == (0, 0), "a block of nothing has nothing in it");
+    assert_eq!(rig.loudest(&[], 4), 0.0, "and the note that came with it, which has no frame to be at, is not played");
+    assert!(rig.loudest(&[(0, NOTE_ON)], 8) > 0.05, "the next block that has frames plays what it is sent");
     rig.stop();
 }
 

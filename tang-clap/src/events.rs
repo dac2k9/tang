@@ -74,12 +74,15 @@ mod tests {
     fn a_velocity_of_0_to_1_is_1_to_127_and_never_0_which_would_end_the_note() {
         assert_eq!(note_on(0, 60, 1.0), Some([0x90, 60, 127]));
         assert_eq!(note_on(0, 60, 0.5), Some([0x90, 60, 64]));
+        assert_eq!(note_on(0, 60, 0.7), Some([0x90, 60, 89]), "the scale is 127, not 128 (0.7 of 128 would be 90)");
+        assert_eq!(note_on(0, 60, 0.9), Some([0x90, 60, 114]));
         assert_eq!(note_on(0, 60, 0.0), Some([0x90, 60, 1]), "a note-on that is silent is still a note-on");
         assert_eq!(note_on(0, 60, 7.0), Some([0x90, 60, 127]), "beyond the top");
         assert_eq!(note_on(0, 60, -1.0), Some([0x90, 60, 1]));
         assert_eq!(note_on(0, 60, f64::NAN), Some([0x90, 60, 64]), "a velocity that is not a number is a middle one");
         assert_eq!(note_off(0, 60, 0.0), Some([0x80, 60, 0]));
         assert_eq!(note_off(0, 60, 1.0), Some([0x80, 60, 127]));
+        assert_eq!(note_off(0, 60, 0.7), Some([0x80, 60, 89]));
         assert_eq!(note_off(0, 60, f64::NAN), Some([0x80, 60, 0]));
     }
 
@@ -103,8 +106,8 @@ mod tests {
     fn the_notes_of_claps_own_dialect_become_midi_at_their_frames() {
         let on = NoteOnEvent::new(10, Pckn::new(0u16, 2u16, 64u16, 7u32), 0.8);
         assert_eq!(converted(on.as_unknown()), [HostMidi { frame: 10, bytes: [0x92, 64, 102] }]);
-        let off = NoteOffEvent::new(200, Pckn::new(0u16, 2u16, 64u16, 7u32), 0.0);
-        assert_eq!(converted(off.as_unknown()), [HostMidi { frame: 200, bytes: [0x82, 64, 0] }]);
+        let off = NoteOffEvent::new(200, Pckn::new(0u16, 2u16, 64u16, 7u32), 0.6);
+        assert_eq!(converted(off.as_unknown()), [HostMidi { frame: 200, bytes: [0x82, 64, 76] }], "the velocity that a note is released at goes with it");
         let choke = NoteChokeEvent::new(5, Pckn::new(0u16, 3u16, 40u16, 1u32));
         assert_eq!(converted(choke.as_unknown()), [HostMidi { frame: 5, bytes: [0x83, 40, 0] }], "a choke ends the note");
     }
