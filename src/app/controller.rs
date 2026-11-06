@@ -1612,6 +1612,26 @@ mod tests {
     }
 
     #[test]
+    fn the_session_as_text_is_the_file_that_a_save_writes_and_has_what_was_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_engine, mut ctl) = controller_for(TWO_LANES);
+        ctl.apply(volume(&ctl, 0.5)).unwrap();
+        let text = ctl.session_text().expect("the text");
+        assert!(text.contains("volume = 0.5"), "what was changed is in it:\n{text}");
+        assert!(ctl.dirty, "asking for the text is not a save: the session is still unsaved");
+        let path = dir.path().join("song.toml");
+        ctl.session_path = Some(path.clone());
+        ctl.apply(Intent::Save).unwrap();
+        assert_eq!(text, std::fs::read_to_string(&path).unwrap(), "it is what a save writes");
+        crate::session::parse(&text).expect("and a session file can be read again");
+        // The Piano tab's scale and whether it is locked to it are the session's too.
+        ctl.piano_filter.set_mode(PianoMode::Locked);
+        assert!(ctl.session_text().unwrap().contains("locked = true"), "the lock is in the text");
+        ctl.piano_filter.set_mode(PianoMode::Highlight);
+        assert!(!ctl.session_text().unwrap().contains("locked = true"));
+    }
+
+    #[test]
     fn a_save_as_is_published_with_the_name_the_session_has_after_it_and_one_that_is_refused_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let (_engine, mut ctl) = controller_for(TWO_LANES);

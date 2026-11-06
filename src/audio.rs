@@ -1946,4 +1946,151 @@ mod tests {
         // (They share the key, the pressure and the start of the first puff, so that they are not unlike: 0.40 as it is measured.)
         assert!(correlation.abs() < 0.6, "the second is not the first again: {correlation}");
     }
+
+    /// An engine that writes down the events of each block as it is given them, and how often it has been told that it is idle; channel `c` is the constant `c + 1`. `fail` makes it an engine that fails.
+    struct Noting {
+        seen: Seen,
+        idles: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail: bool,
+    }
+
+    impl Engine for Noting {
+        fn num_channels(&self) -> usize {
+            2
+        }
+        fn process(&mut self, events: Events<'_>, out: &mut [Vec<f32>]) -> anyhow::Result<()> {
+            self.seen.lock().unwrap().push(events.iter().collect());
+            if self.fail {
+                anyhow::bail!("the engine failed");
+            }
+            for (c, channel) in out.iter_mut().enumerate() {
+                channel.fill(c as f32 + 1.0);
+            }
+            Ok(())
+        }
+        fn idle(&mut self) {
+            self.idles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<Vec<(crate::source::Source, u64, [u8; 3])>>>>;
+
+    fn noting(fail: bool) -> (Renderer, crossbeam_channel::Sender<MidiEvent>, Seen, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let (seen, idles) = (Seen::default(), std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let (midi_tx, midi_rx) = crossbeam_channel::bounded(16);
+        (Renderer::new(Noting { seen: seen.clone(), idles: idles.clone(), fail }, midi_rx, 4), midi_tx, seen, idles)
+    }
+
+    #[test]
+    fn a_host_that_gives_a_buffer_for_each_channel_has_the_engines_channels_and_the_last_again_when_it_gives_more() {
+        let (mut renderer, _midi_tx, _seen, _idles) = noting(false);
+        let (mut a, mut b, mut c) = (vec![9.0f32; 4], vec![9.0f32; 4], vec![9.0f32; 4]);
+        renderer.render_planar(&[], &mut [&mut a, &mut b, &mut c]);
+        assert_eq!((a, b, c), (vec![1.0; 4], vec![2.0; 4], vec![2.0; 4]), "the first two channels, and the last of the engine again for the third");
+        let mut only = vec![9.0f32; 4];
+        renderer.render_planar(&[], &mut [&mut only]);
+        assert_eq!(only, vec![1.0; 4], "a host that gives one channel has the first");
+        // The block is as long as the first buffer says, whatever the others are: what is beyond it is silence.
+        let (mut short, mut long) = (vec![9.0f32; 4], vec![9.0f32; 6]);
+        renderer.render_planar(&[], &mut [&mut short, &mut long]);
+        assert_eq!(long, [2.0, 2.0, 2.0, 2.0, 0.0, 0.0]);
+        // And a buffer that is shorter than the first has as much as it can hold.
+        let (mut long, mut short) = (vec![9.0f32; 6], vec![9.0f32; 4]);
+        renderer.render_planar(&[], &mut [&mut long, &mut short]);
+        assert_eq!((long, short), (vec![1.0; 6], vec![2.0; 4]));
+    }
+
+    /// An engine that adds 1 to what is in the buffers it is given (as an engine that mixes into them does).
+    struct Adds;
+
+    impl Engine for Adds {
+        fn num_channels(&self) -> usize {
+            2
+        }
+        fn process(&mut self, _: Events<'_>, out: &mut [Vec<f32>]) -> anyhow::Result<()> {
+            for channel in out.iter_mut() {
+                for sample in channel.iter_mut() {
+                    *sample += 1.0;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_buffers_that_an_engine_is_given_are_silent_for_every_block_whatever_it_left_in_them() {
+        let (_midi_tx, midi_rx) = crossbeam_channel::bounded(8);
+        let mut renderer = Renderer::new(Adds, midi_rx, 4);
+        let mut data = vec![0.0f32; 8];
+        for block in 0..3 {
+            renderer.render(&mut data, block);
+            assert_eq!(data, vec![1.0; 8], "block {block}: what the engine added to silence, and not to the block before");
+        }
+        let (mut left, mut right) = (vec![9.0f32; 4], vec![9.0f32; 4]);
+        for _ in 0..3 {
+            renderer.render_planar(&[], &mut [&mut left, &mut right]);
+            assert_eq!((left.clone(), right.clone()), (vec![1.0; 4], vec![1.0; 4]));
+        }
+    }
+
+    #[test]
+    fn the_events_of_a_host_come_after_the_notes_that_arrived_each_at_its_own_frame_and_from_its_own_source() {
+        use crate::source::Source;
+        let (mut renderer, midi_tx, seen, _idles) = noting(false);
+        midi_tx.send(MidiEvent::keys(0, [0x90, 60, 100])).unwrap();
+        let host = [MidiEvent::from_source(Source::device(0), 7, [0x90, 64, 90]), MidiEvent::from_source(Source::device(0), 9, [0x80, 64, 0])];
+        let mut out = vec![0.0f32; 4];
+        renderer.render_planar(&host, &mut [&mut out]);
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            [(Source::KEYS, 0, [0x90, 60, 100]), (Source::device(0), 7, [0x90, 64, 90]), (Source::device(0), 9, [0x80, 64, 0])],
+            "what arrived is at the start of the block and first; the host's are where it says"
+        );
+        // Taken: the next block has none of them again.
+        renderer.render_planar(&[], &mut [&mut out]);
+        assert!(seen.lock().unwrap()[1].is_empty());
+    }
+
+    #[test]
+    fn an_engine_that_fails_is_silence_to_a_host() {
+        let (mut renderer, _midi_tx, seen, _idles) = noting(true);
+        let (mut left, mut right) = (vec![9.0f32; 4], vec![9.0f32; 4]);
+        renderer.render_planar(&[], &mut [&mut left, &mut right]);
+        assert_eq!(seen.lock().unwrap().len(), 1, "it was asked");
+        assert_eq!((left, right), (vec![0.0; 4], vec![0.0; 4]));
+    }
+
+    #[test]
+    fn an_engine_that_fails_is_silence_to_a_sound_card_too() {
+        let (mut renderer, _midi_tx, seen, _idles) = noting(true);
+        let mut data = vec![9.0f32; 8];
+        renderer.render(&mut data, 0);
+        assert_eq!(seen.lock().unwrap().len(), 1, "it was asked");
+        assert_eq!(data, vec![0.0; 8]);
+    }
+
+    #[test]
+    fn a_renderer_that_is_idle_drops_the_notes_that_arrive_and_tells_the_engine_and_renders_nothing() {
+        use std::sync::atomic::Ordering;
+        let (mut renderer, midi_tx, seen, idles) = noting(false);
+        midi_tx.send(MidiEvent::keys(0, [0x90, 60, 100])).unwrap();
+        midi_tx.send(MidiEvent::keys(0, [0x90, 62, 100])).unwrap();
+        renderer.idle();
+        renderer.idle();
+        assert_eq!(idles.load(Ordering::Relaxed), 2, "the engine was told each time");
+        assert!(seen.lock().unwrap().is_empty(), "no block was rendered");
+        assert!(midi_tx.is_empty(), "the notes were taken out of the channel");
+        let mut out = vec![0.0f32; 4];
+        renderer.render_planar(&[], &mut [&mut out]);
+        assert!(seen.lock().unwrap()[0].is_empty(), "and are not for the block that comes later");
+    }
+
+    #[test]
+    fn the_graph_that_is_idle_takes_the_commands_that_are_waiting_and_renders_nothing() {
+        let mut rig = rig("[[instrument]]\nplugin = \"builtin:osc\"\n", 4);
+        // The commands that `rig` sent are waiting in the channel, and no block has been rendered: the graph has no lane.
+        assert_eq!(rig.renderer.engine().facts().unwrap().lanes.len(), 0);
+        rig.renderer.idle();
+        assert_eq!(rig.renderer.engine().facts().unwrap().lanes.len(), 1, "an idle graph has taken them");
+    }
 }

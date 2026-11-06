@@ -1399,4 +1399,57 @@ mod tests {
         thread.join().unwrap();
         assert_eq!(listening.open.load(Ordering::SeqCst), 0, "the stream went with the thread");
     }
+
+    // -- What a host gives to hear --
+
+    /// What `feed` gives for a block of `frames`, as a left and a right side that were full of 7s before.
+    fn taken(feed: &HostInput, frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let (mut left, mut right) = (vec![7.0f32; frames], vec![7.0f32; frames]);
+        feed.take(&mut left, &mut right);
+        (left, right)
+    }
+
+    #[test]
+    fn what_a_host_puts_is_what_the_audio_input_is_given_a_side_each_and_the_rest_of_a_longer_block_is_silence() {
+        let feed = HostInput::new(8);
+        assert_eq!(taken(&feed, 4), (vec![0.0; 4], vec![0.0; 4]), "nothing has been put: silence, not what was in the buffers");
+        feed.put(&[0.1, 0.2, 0.3], &[-0.1, -0.2, -0.3]);
+        assert_eq!(taken(&feed, 3), (vec![0.1, 0.2, 0.3], vec![-0.1, -0.2, -0.3]), "each side is its own");
+        assert_eq!(taken(&feed, 5), (vec![0.1, 0.2, 0.3, 0.0, 0.0], vec![-0.1, -0.2, -0.3, 0.0, 0.0]), "a block that is longer than what was put has silence after it");
+        assert_eq!(taken(&feed, 2), (vec![0.1, 0.2], vec![-0.1, -0.2]), "and one that is shorter has the first of it");
+    }
+
+    #[test]
+    fn a_host_that_puts_nothing_for_a_block_has_the_block_before_forgotten_and_one_that_puts_too_much_is_cut() {
+        let feed = HostInput::new(4);
+        feed.put(&[1.0, 1.0, 1.0, 1.0], &[2.0, 2.0, 2.0, 2.0]);
+        feed.clear();
+        assert_eq!(taken(&feed, 4), (vec![0.0; 4], vec![0.0; 4]));
+        // More than the feed has room for: what fits is taken, the sides are not mixed up, and the rest is silence.
+        feed.put(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]);
+        assert_eq!(taken(&feed, 6), (vec![1.0, 2.0, 3.0, 4.0, 0.0, 0.0], vec![-1.0, -2.0, -3.0, -4.0, 0.0, 0.0]));
+        // Sides of different lengths: the shorter says how much there is.
+        feed.put(&[1.0, 1.0, 1.0], &[2.0]);
+        assert_eq!(taken(&feed, 3), (vec![1.0, 0.0, 0.0], vec![2.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn an_audio_input_made_for_a_host_plays_what_it_is_given_applies_its_gain_and_has_one_input_to_choose() {
+        let feed = std::sync::Arc::new(HostInput::new(16));
+        let mut input = AudioInput::with_host(48_000.0, feed.clone());
+        feed.put(&[0.5; 8], &[0.25; 8]);
+        let (left, right) = block(&mut input, 8);
+        assert_eq!((left, right), (vec![0.5; 8], vec![0.25; 8]), "gain 1, no pan: what came in");
+        // Its gain is the audio input's own (set before the first block, it is there at once).
+        let mut quieter = AudioInput::with_host(48_000.0, feed.clone());
+        quieter.set_parameter(GAIN, 0.5).unwrap();
+        feed.put(&[0.5; 8], &[0.25; 8]);
+        let (left, right) = block(&mut quieter, 8);
+        assert_eq!((left, right), (vec![0.25; 8], vec![0.125; 8]));
+        let parameters = input.parameters();
+        assert_eq!(parameters[2].labels.as_deref(), Some(&["Host input".to_string()][..]), "the one input it has is the host's, by that name");
+        // It opens no device, and takes none: a choice of the device does nothing.
+        input.set_parameter(DEVICE, 3.0).unwrap();
+        assert_eq!(input.get_parameter(DEVICE), Some(0.0));
+    }
 }

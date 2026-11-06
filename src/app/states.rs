@@ -324,4 +324,22 @@ mod tests {
         let added = ctl.model.instruments.len() - 1;
         assert_eq!(state_of(&ctl, NodePath::Effect { inst: added, index: 0 }), Some(vec![8]));
     }
+
+    #[test]
+    fn the_session_as_text_is_what_a_save_writes_with_the_state_that_the_plugins_have_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Sink::default();
+        let synth = fake::install("fake:synth", "Synth", &sink);
+        let _verb = fake::install("fake:verb", "Verb", &sink);
+        let (_engine, mut ctl) = controller(LANE);
+        // The plugin's state is another by the time the text is asked for: the text has it (`Bwc=` is [7, 7]), as the file of a save does.
+        synth.state.replace(Some(vec![7, 7]));
+        let text = ctl.session_text().expect("the text");
+        assert!(text.contains("state = \"Bwc=\""), "the state that the plugin has now:\n{text}");
+        assert!(text.contains("state = \"BAUG\""), "and the state of the other, which it still has:\n{text}");
+        let path = dir.path().join("s.toml");
+        ctl.session_path = Some(path.clone());
+        ctl.apply(Intent::Save).expect("saved");
+        assert_eq!(text, std::fs::read_to_string(path).unwrap(), "the file of a save is that text");
+    }
 }

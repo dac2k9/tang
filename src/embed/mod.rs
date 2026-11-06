@@ -96,7 +96,7 @@ impl Session {
         let (audio_tx, audio_rx) = crossbeam_channel::bounded(1);
         let (started_tx, started_rx) = crossbeam_channel::bounded(1);
         let (control_tx, control_rx) = crossbeam_channel::unbounded();
-        let setup = Setup { text: text.to_string(), sample_rate: rate, max_frames: frames as usize, serve, input: input.clone() };
+        let setup = Setup { text: text.to_string(), sample_rate: rate, max_frames: frames as usize, serve, bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)), input: input.clone() };
         let thread = std::thread::Builder::new()
             .name("tang-controller".to_string())
             .spawn(move || control::run(setup, audio_tx, started_tx, control_rx))
@@ -454,11 +454,108 @@ mod tests {
     }
 
     #[test]
+    fn a_host_that_gives_one_channel_of_audio_has_it_heard_on_both_sides() {
+        let mut host = Host::new(Kind::Effect, false);
+        let mut audio = host.activate(RATE, BLOCK as u32).unwrap();
+        let sine: Vec<f32> = (0..BLOCK).map(|i| 0.25 * (std::f32::consts::TAU * 480.0 * i as f32 / RATE as f32).sin()).collect();
+        let (mut left, mut right) = (vec![9.0f32; BLOCK], vec![9.0f32; BLOCK]);
+        audio.process(&[], &[&sine], &mut [&mut left, &mut right]);
+        assert_eq!((left.as_slice(), right.as_slice()), (sine.as_slice(), sine.as_slice()), "the one channel is both sides");
+        // And none at all is silence (an effect that is given no input, as an instrument is).
+        audio.process(&[], &[], &mut [&mut left, &mut right]);
+        assert_eq!((left, right), (vec![0.0; BLOCK], vec![0.0; BLOCK]));
+    }
+
+    #[test]
+    fn the_engine_is_made_again_for_another_block_size_at_the_same_rate_too() {
+        let (mut host, mut audio) = instrument();
+        play(&mut audio, &[at(0, NOTE_ON)], None, 8);
+        drop(audio);
+        let mut same = host.activate(RATE, BLOCK as u32).unwrap();
+        assert!(play(&mut same, &[], None, 2).1 > 0.05, "the same size: the note goes on");
+        drop(same);
+        let mut other = host.activate(RATE, BLOCK as u32 * 2).unwrap();
+        assert_eq!(play(&mut other, &[], None, 2).1, 0.0, "another size: a new engine, with no note held");
+    }
+
+    #[test]
     fn a_rate_or_a_size_that_cannot_be_played_is_refused() {
         let mut host = Host::new(Kind::Instrument, false);
-        for (rate, frames) in [(0.0, 256), (-44_100.0, 256), (f64::NAN, 256), (48_000.0, 0)] {
+        for (rate, frames) in [(0.0, 256), (-44_100.0, 256), (f64::NAN, 256), (f64::INFINITY, 256), (1e300, 256), (48_000.0, 0)] {
             assert!(host.activate(rate, frames).is_err(), "{rate} Hz in {frames} frames");
         }
+    }
+
+    /// An engine that plays 1 in every frame of both channels.
+    struct Ones;
+
+    impl Engine for Ones {
+        fn num_channels(&self) -> usize {
+            2
+        }
+        fn process(&mut self, _: Events<'_>, out: &mut [Vec<f32>]) -> anyhow::Result<()> {
+            for channel in out.iter_mut() {
+                channel.fill(1.0);
+            }
+            Ok(())
+        }
+    }
+
+    fn ones() -> (Arc<Shared>, Audio) {
+        let (_, notes) = crossbeam_channel::bounded::<MidiEvent>(1);
+        let shared = Shared::new(Renderer::new(Ones, notes, BLOCK), Arc::new(HostInput::new(BLOCK)));
+        let audio = Audio::new(shared.clone());
+        (shared, audio)
+    }
+
+    /// A block of the engine of `ones`, from buffers full of 9s: what the host has in them after.
+    fn block_of(audio: &mut Audio) -> (Vec<f32>, Vec<f32>) {
+        let (mut left, mut right) = (vec![9.0f32; BLOCK], vec![9.0f32; BLOCK]);
+        audio.process(&[], &[], &mut [&mut left, &mut right]);
+        (left, right)
+    }
+
+    #[test]
+    fn a_block_that_cannot_have_the_renderer_is_silence_and_one_that_can_is_not() {
+        let (shared, mut audio) = ones();
+        assert_eq!(block_of(&mut audio), (vec![1.0; BLOCK], vec![1.0; BLOCK]), "the engine renders");
+        // The renderer is held (a drain or a replacement is in the middle of it): the host's thread does not wait for it more than a few microseconds, and the block is silence, over what the host had in its buffers.
+        let held = shared.hold_renderer();
+        assert_eq!(block_of(&mut audio), (vec![0.0; BLOCK], vec![0.0; BLOCK]));
+        drop(held);
+        assert_eq!(block_of(&mut audio), (vec![1.0; BLOCK], vec![1.0; BLOCK]), "and the next block that can have it is rendered");
+    }
+
+    #[test]
+    fn an_engine_that_panicked_is_silence_for_every_block_after_it() {
+        let (shared, mut audio) = ones();
+        let poisoner = shared.clone();
+        let panicked = std::thread::spawn(move || {
+            let _held = poisoner.hold_renderer();
+            panic!("the engine panicked, with the renderer in its hand");
+        })
+        .join();
+        assert!(panicked.is_err());
+        for _ in 0..3 {
+            assert_eq!(block_of(&mut audio), (vec![0.0; BLOCK], vec![0.0; BLOCK]), "a renderer that may be in pieces is not played");
+        }
+    }
+
+    #[test]
+    fn a_block_of_no_frames_is_neither_rendered_nor_counted() {
+        use std::sync::atomic::Ordering;
+        let (shared, _idles, blocks) = counting();
+        let mut audio = Audio::new(shared.clone());
+        let (mut left, mut right): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
+        audio.process(&[at(0, NOTE_ON)], &[], &mut [&mut left, &mut right]);
+        audio.process(&[], &[], &mut []);
+        assert_eq!(blocks.load(Ordering::Relaxed), 0, "the engine was not given a block of nothing");
+        // It is not a block: it took no commands, so the idle thread is to go on taking them.
+        assert_eq!(shared.look(0), 0, "no block has come");
+        let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+        audio.process(&[], &[], &mut [&mut left, &mut right]);
+        assert_eq!(blocks.load(Ordering::Relaxed), 1, "a block of frames is rendered");
+        assert_eq!(shared.look(0), 1, "and counted");
     }
 
     #[test]
@@ -571,11 +668,9 @@ mod tests {
             }
         }
 
-        #[tokio::test]
-        async fn the_page_of_a_plugin_changes_what_the_host_hears_and_what_a_save_gives_and_its_keys_are_heard_and_the_host_is_an_input() {
-            let mut host = Host::new(Kind::Instrument, true);
-            let mut audio = host.activate(RATE, BLOCK as u32).unwrap();
-            let mut client = connect(address(&host)).await;
+        /// A client that has subscribed to the page of `host`: the snapshot it was given, and the MIDI inputs that it was told are open.
+        async fn subscribed(host: &Host) -> (crate::web::testclient::Client, Value, Value) {
+            let mut client = connect(address(host)).await;
             assert_eq!(said(&mut client).await["type"], "hello");
             // (What a client that subscribes is told: the snapshot, the catalog, what can be undone, and the MIDI inputs that are open, of which the host is one.)
             tell(&mut client, json!({"type": "subscribe"})).await;
@@ -585,11 +680,24 @@ mod tests {
             assert_eq!(said(&mut client).await["type"], "history");
             let inputs = said(&mut client).await;
             assert_eq!(inputs["type"], "inputs");
-            assert!(inputs.to_string().contains(&format!("\"{HOST_DEVICE}\"")), "the host is a device that notes come from: {inputs}");
+            (client, snapshot, inputs)
+        }
+
+        /// The node and the parameter index of the oscillator's volume, from a snapshot.
+        fn oscillator_volume(snapshot: &Value) -> (u64, u64) {
             let nodes = snapshot["snapshot"]["graph"]["nodes"].as_array().unwrap();
             let osc = nodes.iter().find(|node| node["name"] == "Oscillator").expect("the oscillator");
             let volume = osc["plugin"]["params"].as_array().unwrap().iter().find(|param| param["name"] == "volume").unwrap();
-            let (node, param) = (osc["id"].as_u64().unwrap(), volume["index"].as_u64().unwrap());
+            (osc["id"].as_u64().unwrap(), volume["index"].as_u64().unwrap())
+        }
+
+        #[tokio::test]
+        async fn the_page_of_a_plugin_changes_what_the_host_hears_and_what_a_save_gives_and_its_keys_are_heard_and_the_host_is_an_input() {
+            let mut host = Host::new(Kind::Instrument, true);
+            let mut audio = host.activate(RATE, BLOCK as u32).unwrap();
+            let (mut client, snapshot, inputs) = subscribed(&host).await;
+            assert!(inputs.to_string().contains(&format!("\"{HOST_DEVICE}\"")), "the host is a device that notes come from: {inputs}");
+            let (node, param) = oscillator_volume(&snapshot);
 
             // What the host plays is heard; the volume turned to nothing in the page, the same note is silent; and the text that a save gives has it.
             let (_, heard) = play(&mut audio, &[at(0, NOTE_ON)], None, 8);
@@ -612,6 +720,40 @@ mod tests {
             play(&mut audio, &[at(0, NOTE_OFF)], None, 40);
             tell(&mut client, json!({"type": "noteOn", "note": 60, "velocity": 100})).await;
             wait_until("a key of the page is heard in the host's blocks", || play(&mut audio, &[], None, 2).1 > 0.05).await;
+        }
+
+        #[tokio::test]
+        async fn a_session_that_stands_in_for_one_that_could_not_be_loaded_is_saved_as_itself_once_the_page_has_changed_it() {
+            let broken = "[[instrument]]\nplugin = \"builtin:no-such-thing\"\n";
+            let mut host = Host::new(Kind::Instrument, true);
+            host.set_session_text(broken.to_string()).unwrap();
+            let _audio = host.activate(RATE, BLOCK as u32).unwrap();
+            assert_eq!(host.session_text().unwrap(), broken, "as given, while nothing is changed");
+            let (mut client, snapshot, _) = subscribed(&host).await;
+            let (node, param) = oscillator_volume(&snapshot);
+            tell(&mut client, json!({"type": "request", "reqId": 1, "intent": {"type": "setParam", "node": node, "param": param, "value": 0.0}})).await;
+            assert_eq!(answer(&mut client, 1).await["type"], "ack");
+            let text = host.session_text().unwrap();
+            assert_ne!(text, broken, "the session that the person has made is what is saved, not the one that could not be played");
+            assert!(text.contains("builtin:osc") && text.contains("volume = 0"), "{text}");
+        }
+
+        #[tokio::test]
+        async fn what_the_page_changed_is_in_the_engine_that_is_made_again_for_another_sample_rate() {
+            let mut host = Host::new(Kind::Instrument, true);
+            let audio = host.activate(RATE, BLOCK as u32).unwrap();
+            let (mut client, snapshot, _) = subscribed(&host).await;
+            let (node, param) = oscillator_volume(&snapshot);
+            tell(&mut client, json!({"type": "request", "reqId": 1, "intent": {"type": "setParam", "node": node, "param": param, "value": 0.0}})).await;
+            assert_eq!(answer(&mut client, 1).await["type"], "ack");
+            // The host activates the plugin again at another rate (the old handle is let go of first, as a host does): the engine that is made has the session as the page left it.
+            drop(audio);
+            let mut audio = host.activate(44_100.0, BLOCK as u32).unwrap();
+            // (The oscillator eases its volume over a few milliseconds, from the 1 that it has until it is told: some blocks are let go before the note.)
+            play(&mut audio, &[], None, 20);
+            let (_, loudest) = play(&mut audio, &[at(0, NOTE_ON)], None, 8);
+            assert!(loudest < 1e-3, "the volume that the page turned to 0 is 0 in the new engine: {loudest}");
+            assert!(host.session_text().unwrap().contains("volume = 0"));
         }
 
         #[tokio::test]

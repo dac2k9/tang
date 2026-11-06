@@ -124,6 +124,10 @@ impl Audio {
     /// audio that comes into the host's `process` in `input` (a buffer for each channel: none for a plugin that has no audio input, one is heard in both sides), which the audio inputs of the session play. A block that cannot be rendered (the renderer is busy for longer than a few
     /// microseconds, or the engine has panicked) is silence.
     pub fn process(&mut self, midi: &[HostMidi], input: &[&[f32]], output: &mut [&mut [f32]]) {
+        // (A block of no frames is not a block: the plugins inside are never given one, what the host sent with it has no frame to be at, and it takes no commands, so it is not counted either: the idle thread goes on taking what the controller sends.)
+        if output.first().is_none_or(|channel| channel.is_empty()) {
+            return;
+        }
         self.shared.beats.fetch_add(1, Ordering::Relaxed);
         match input {
             [left, right, ..] => self.shared.input.put(left, right),
