@@ -24,7 +24,7 @@ tang listen [input]              # listen to an audio input for a few seconds an
 tang window <plugin>             # open a plugin's own window by itself, for a check (macOS; VST3 and CLAP; plays nothing)
 ```
 
-Tang is also a **plugin for a DAW** (step 113): `cargo build --release -p tang-clap` makes the CLAP file that Bitwig loads, which has an instrument (Tang) and an effect (Tang FX), each with its session in the host's project and its page in a window of the host's (a web view: WebView2 on Windows, WKWebView on macOS; step 114) or in a browser (`docs/reference/plugin-host.md`: how to build it and where to put it, on Windows too). The package is a library (`src/lib.rs`) and a thin binary (`src/main.rs`); `cargo test --lib` runs the unit tests.
+Tang is also a **plugin for a DAW** (step 113): `cargo build --release -p tang-clap` makes the CLAP file that Bitwig loads, which has an instrument (Tang) and an effect (Tang FX), each with its session in the host's project (and `Open…` in the page's bar loads a session file in its place) and its page in a window of the host's (a web view: WebView2 on Windows, WKWebView on macOS; step 114) or in a browser (`docs/reference/plugin-host.md`: how to build it and where to put it, on Windows too). The package is a library (`src/lib.rs`) and a thin binary (`src/main.rs`); `cargo test --lib` runs the unit tests.
 
 ## Flags
 
